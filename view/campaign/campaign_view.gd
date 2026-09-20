@@ -28,6 +28,10 @@ var _build_buttons := {}
 var _raze: Button
 var _trees: PanelContainer
 var _tech_buttons := {}
+var _detach_bar: HBoxContainer
+var _detach_buttons := []
+var _detaching := PackedInt32Array()     # regiment indices picked for a new army
+var _placing_detachment := false
 var _recruit_buttons := {}
 var _dragging := false
 
@@ -115,6 +119,11 @@ func _build_hud() -> void:
 		save.custom_minimum_size = Vector2(80, 28)
 		save.pressed.connect(func() -> void: Net.save_campaign())
 		layer.add_child(save)
+
+	_detach_bar = HBoxContainer.new()
+	_detach_bar.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	_detach_bar.position = Vector2(12, -136)
+	layer.add_child(_detach_bar)
 
 	_build_trees(layer)
 
@@ -234,7 +243,27 @@ func _on_click(tile: int) -> void:
 	var me: int = Net.my_id()
 	var army = cs.army_at(tile)
 
+	# Waiting to be told where the detachment marches to.
+	if _placing_detachment and selected_army >= 0:
+		Net.order_split(selected_army, _detaching, tile)
+		_clear_detachment()
+		_refresh()
+		return
+
+	# Shift-click one of yours to fold the selected army into it. A combine idiom, and
+	# it leaves ordinary selection alone.
+	if Input.is_key_pressed(KEY_SHIFT) and army != null and army["owner"] == me \
+			and selected_army >= 0 and army["id"] != selected_army:
+		Net.order_merge(selected_army, army["id"])
+		selected_army = army["id"]
+		selected_tile = tile
+		_clear_detachment()
+		_refresh()
+		return
+
 	if army != null and army["owner"] == me:
+		if army["id"] != selected_army:
+			_clear_detachment()
 		selected_army = army["id"]
 		selected_tile = tile
 	elif selected_army >= 0 and cs.armies.has(selected_army):
@@ -242,7 +271,47 @@ func _on_click(tile: int) -> void:
 	else:
 		selected_army = -1
 		selected_tile = tile
+		_clear_detachment()
 	_refresh()
+
+
+func _clear_detachment() -> void:
+	_detaching = PackedInt32Array()
+	_placing_detachment = false
+
+
+## One toggle per regiment in the selected army, and a Detach button that arms the next
+## click. An army has to leave somebody behind, so the last regiment cannot be picked.
+func _rebuild_detach_bar(a: Dictionary) -> void:
+	for b: Node in _detach_buttons:
+		b.queue_free()
+	_detach_buttons = []
+
+	var regiments: Array = a["regiments"]
+	for i in regiments.size():
+		var b := Button.new()
+		b.toggle_mode = true
+		b.text = String(regiments[i][0])
+		b.button_pressed = Array(_detaching).has(i)
+		b.toggled.connect(func(on: bool) -> void:
+			var picked := Array(_detaching)
+			if on and not picked.has(i):
+				picked.append(i)
+			elif not on:
+				picked.erase(i)
+			_detaching = PackedInt32Array(picked)
+			_refresh())
+		_detach_bar.add_child(b)
+		_detach_buttons.append(b)
+
+	var go := Button.new()
+	go.text = "Detach → click a hex" if _placing_detachment else "Detach"
+	go.disabled = _detaching.is_empty() or _detaching.size() >= regiments.size()
+	go.pressed.connect(func() -> void:
+		_placing_detachment = true
+		_refresh())
+	_detach_bar.add_child(go)
+	_detach_buttons.append(go)
 
 
 func _on_recruit(kind: StringName) -> void:
@@ -337,10 +406,16 @@ func _refresh() -> void:
 			button.disabled = not available.has(kind) or purse < int(Rules.KINDS[kind]["cost"])
 			button.tooltip_text = "" if available.has(kind) else "needs a %s on the land nearby" % needs
 
+	_detach_bar.visible = selected_army >= 0 and cs.armies.has(selected_army)
+	if _detach_bar.visible:
+		_rebuild_detach_bar(cs.armies[selected_army])
+
 	if selected_army >= 0 and cs.armies.has(selected_army):
 		var a = cs.armies[selected_army]
-		_hint.text = "army %d: %d regiments, %d moves left — click a tile to march" % [
+		_hint.text = "army %d: %d regiments, %d moves left — click a tile to march, shift-click one of yours to join it" % [
 			a["id"], a["regiments"].size(), a["move_left"]]
+		if _placing_detachment:
+			_hint.text = "click an empty hex beside the army to send %d regiment(s) there" % _detaching.size()
 	elif selected_tile >= 0 and settlement == null:
 		var made := cs.structure_at(selected_tile)
 		_hint.text = "tile %d: %s%s" % [selected_tile,

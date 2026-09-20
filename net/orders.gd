@@ -15,7 +15,8 @@ const VERSION := 1
 const MAX_IDS_PER_ORDER := 64          # a box selection, not a whole army list
 const TILE_COUNT := Rules.MAP_W * Rules.MAP_H
 
-enum Type { BATTLE_MOVE, ARMY_MOVE, RECRUIT, READY, BUILD, SET_FORMATION, FOCUS, RAZE, RESEARCH }
+enum Type { BATTLE_MOVE, ARMY_MOVE, RECRUIT, READY, BUILD, SET_FORMATION, FOCUS, RAZE,
+	RESEARCH, MERGE, SPLIT }
 
 
 # --- encoding -------------------------------------------------------------
@@ -47,6 +48,14 @@ static func raze(army_id: int) -> PackedByteArray:
 
 static func research(tech: StringName) -> PackedByteArray:
 	return var_to_bytes([VERSION, Type.RESEARCH, tech])
+
+
+static func merge(army_id: int, into_id: int) -> PackedByteArray:
+	return var_to_bytes([VERSION, Type.MERGE, army_id, into_id])
+
+
+static func split(army_id: int, indices: PackedInt32Array, to_tile: int) -> PackedByteArray:
+	return var_to_bytes([VERSION, Type.SPLIT, army_id, indices, to_tile])
 
 
 ## One order for both, because changing either is the same manoeuvre. A width of 0
@@ -95,6 +104,10 @@ static func decode(bytes: PackedByteArray) -> Dictionary:
 			return _decode_raze(d)
 		Type.RESEARCH:
 			return _decode_research(d)
+		Type.MERGE:
+			return _decode_merge(d)
+		Type.SPLIT:
+			return _decode_split(d)
 	return {}
 
 
@@ -188,6 +201,27 @@ static func _decode_raze(d: Array) -> Dictionary:
 	if d.size() != 3 or typeof(d[2]) != TYPE_INT:
 		return {}
 	return {"type": Type.RAZE, "army_id": d[2]}
+
+
+static func _decode_merge(d: Array) -> Dictionary:
+	if d.size() != 4 or typeof(d[2]) != TYPE_INT or typeof(d[3]) != TYPE_INT:
+		return {}
+	if d[2] == d[3]:
+		return {}
+	return {"type": Type.MERGE, "army_id": d[2], "into_id": d[3]}
+
+
+static func _decode_split(d: Array) -> Dictionary:
+	if d.size() != 5 or typeof(d[2]) != TYPE_INT:
+		return {}
+	if typeof(d[3]) != TYPE_PACKED_INT32_ARRAY:
+		return {}
+	var indices: PackedInt32Array = d[3]
+	if indices.is_empty() or indices.size() > MAX_IDS_PER_ORDER:
+		return {}
+	if typeof(d[4]) != TYPE_INT or not _is_tile(d[4]):
+		return {}
+	return {"type": Type.SPLIT, "army_id": d[2], "indices": indices, "to_tile": d[4]}
 
 
 static func _decode_research(d: Array) -> Dictionary:

@@ -371,6 +371,14 @@ func order_research(tech: StringName) -> void:
 	submit(Orders.research(tech))
 
 
+func order_merge(army_id: int, into_id: int) -> void:
+	submit(Orders.merge(army_id, into_id))
+
+
+func order_split(army_id: int, indices: PackedInt32Array, to_tile: int) -> void:
+	submit(Orders.split(army_id, indices, to_tile))
+
+
 func _receive_order(sender: int, bytes: PackedByteArray) -> void:
 	var order := Orders.decode(bytes)
 	if order.is_empty():
@@ -398,6 +406,10 @@ func _receive_order(sender: int, bytes: PackedByteArray) -> void:
 			_raze(sender, order)
 		Orders.Type.RESEARCH:
 			_research(sender, order)
+		Orders.Type.MERGE:
+			_merge(sender, order)
+		Orders.Type.SPLIT:
+			_split(sender, order)
 
 
 # --- campaign orders ------------------------------------------------------
@@ -466,6 +478,38 @@ func _set_formation(sender: int, order: Dictionary) -> void:
 		var changed: bool = r.set_formation(order["formation"])
 		if int(order["width"]) > 0 and not changed:
 			r.set_width(int(order["width"]))
+
+
+func _merge(sender: int, order: Dictionary) -> void:
+	if not _campaign_is_open(sender):
+		return
+	if not campaign.merge(sender, order["army_id"], order["into_id"]):
+		_reject(sender, "army %d cannot join army %d" % [order["army_id"], order["into_id"]])
+		return
+	broadcast_campaign()
+	campaign_updated.emit(campaign)
+
+
+func _split(sender: int, order: Dictionary) -> void:
+	if not _campaign_is_open(sender):
+		return
+	var made: int = campaign.split(sender, order["army_id"], order["indices"], order["to_tile"])
+	if made < 0:
+		_reject(sender, "army %d cannot detach onto tile %d" % [order["army_id"], order["to_tile"]])
+		return
+	broadcast_campaign()
+	campaign_updated.emit(campaign)
+
+
+## The three things every campaign order needs to be true before it means anything.
+func _campaign_is_open(sender: int) -> bool:
+	if campaign == null:
+		_reject(sender, "no campaign in progress")
+		return false
+	if battle != null:
+		_reject(sender, "a battle is being fought")
+		return false
+	return true
 
 
 func _research(sender: int, order: Dictionary) -> void:

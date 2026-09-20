@@ -172,6 +172,21 @@ them**. This is the third time that shape of bug has appeared -- a unit chasing 
 computed from a moving enemy centre never arrives, so it never does the thing arriving was
 for, and the battle never ends. The cavalry sweep latches its waypoint for the same reason.
 
+## Ordering a battle move
+
+`BattleView.plan_order()` works out, for every selected regiment, where it will stand and
+which way it will face. **The preview and the order both read its rows and neither
+computes anything of its own.** That is the only way a preview stays honest: when the
+spread rule changes, the ghosts change with it instead of quietly lying.
+
+It takes a pose dictionary rather than reaching for the scene tree, so it tests headless
+the way `bodies.gd` does.
+
+Each ghost is the regiment's real footprint -- `Formation.frontage()` and `half_depth()`
+at its current width and its formation's spacing -- so the preview also shows what `[`
+and `]` just did. Frontage is what decides the fight; it should not be invisible until
+after you have committed.
+
 ## The men
 
 `view/battle/bodies.gd` draws the soldiers, and everything in it is built on the **file**
@@ -275,6 +290,25 @@ Deliberate because marching through enemy farmland without torching it has to st
 option, or there is no decision in it. Burned ground can be built on again -- this is
 pillage, not salting the earth.
 
+## Armies
+
+Two armies **cannot share a hex**. `army_at()` returns the first army on one, and
+movement, collision detection and razing all lean on that, so a stack would quietly break
+all three. Everything about merging and splitting follows from it.
+
+- **Merge** folds one army into an adjacent one of yours. Regiments transfer up to the
+  cap and the remainder stays behind as a smaller army; the result takes `min` of the two
+  movement allowances, so combining is never a way to buy a move. Shift-click in the UI.
+- **Split** detaches chosen regiments onto an **adjacent, passable, empty** hex -- it
+  marches out rather than standing in place -- with no movement left that turn. Something
+  always stays behind.
+
+Both are deliberate orders rather than automatic, for the same reason razing is: a column
+marching past its own garrison must not silently swallow it.
+
+Splitting exists because you have fast cavalry and you have razing. Peeling one horse
+regiment off a stack to go burn farmland is the move that makes raiding worth doing.
+
 ## The tech trees
 
 Two trees, **one pool**. Research is a third resource produced by settlements and by
@@ -297,7 +331,26 @@ from the opening snapshot -- the same reason `defense` is on there.
 Measured: over a 70s duel, untrained keeps 91 men and leaves the enemy 91; drilled and
 armoured keeps 96 and leaves them 87.
 
-## Replays## The tech trees
+## Replays## Armies
+
+Two armies **cannot share a hex**. `army_at()` returns the first army on one, and
+movement, collision detection and razing all lean on that, so a stack would quietly break
+all three. Everything about merging and splitting follows from it.
+
+- **Merge** folds one army into an adjacent one of yours. Regiments transfer up to the
+  cap and the remainder stays behind as a smaller army; the result takes `min` of the two
+  movement allowances, so combining is never a way to buy a move. Shift-click in the UI.
+- **Split** detaches chosen regiments onto an **adjacent, passable, empty** hex -- it
+  marches out rather than standing in place -- with no movement left that turn. Something
+  always stays behind.
+
+Both are deliberate orders rather than automatic, for the same reason razing is: a column
+marching past its own garrison must not silently swallow it.
+
+Splitting exists because you have fast cavalry and you have razing. Peeling one horse
+regiment off a stack to go burn farmland is the move that makes raiding worth doing.
+
+## The tech trees
 
 Two trees, **one pool**. Research is a third resource produced by settlements and by
 libraries; both trees spend it, so every tech taken in one is a tech not taken in the

@@ -528,6 +528,81 @@ func recruit(owner: int, tile: int, kind: StringName) -> bool:
 	return true
 
 
+## Two armies of the same owner standing beside each other become one. Deliberate
+## rather than automatic, for the same reason razing is: a column marching past its own
+## garrison must not silently swallow it.
+func can_merge(owner: int, army_id: int, into_id: int) -> bool:
+	if army_id == into_id:
+		return false
+	var a = armies.get(army_id)
+	var b = armies.get(into_id)
+	if a == null or b == null:
+		return false
+	if a["owner"] != owner or b["owner"] != owner:
+		return false
+	if a["move_left"] <= 0:
+		return false
+	if b["regiments"].size() >= MAX_REGIMENTS_PER_ARMY:
+		return false
+	return Array(adjacent(a["tile"])).has(b["tile"])
+
+
+func merge(owner: int, army_id: int, into_id: int) -> bool:
+	if not can_merge(owner, army_id, into_id):
+		return false
+	var a = armies[army_id]
+	var b = armies[into_id]
+	var room: int = MAX_REGIMENTS_PER_ARMY - b["regiments"].size()
+	for i in mini(room, a["regiments"].size()):
+		b["regiments"].append(a["regiments"].pop_front())
+	# The slower half sets the pace, so combining is never a way to buy a move.
+	b["move_left"] = mini(int(b["move_left"]), int(a["move_left"]))
+	a["move_left"] = 0
+	disband_if_empty(army_id)
+	return true
+
+
+## Peel regiments off into a new army on an adjacent hex.
+##
+## It has to march out rather than stand where it was: `army_at()` returns the FIRST army
+## on a hex and movement, collision detection and razing all lean on that, so two armies
+## sharing one would quietly break all three.
+func can_split(owner: int, army_id: int, indices: PackedInt32Array, to_tile: int) -> bool:
+	var a = armies.get(army_id)
+	if a == null or a["owner"] != owner:
+		return false
+	if indices.is_empty() or indices.size() >= a["regiments"].size():
+		return false                       # somebody has to stay behind
+	var seen := {}
+	for i in indices:
+		if i < 0 or i >= a["regiments"].size() or seen.has(i):
+			return false
+		seen[i] = true
+	if not passable(to_tile) or army_at(to_tile) != null:
+		return false
+	return Array(adjacent(a["tile"])).has(to_tile)
+
+
+## Returns the new army's id, or -1.
+func split(owner: int, army_id: int, indices: PackedInt32Array, to_tile: int) -> int:
+	if not can_split(owner, army_id, indices, to_tile):
+		return -1
+	var a = armies[army_id]
+	var order := Array(indices)
+	order.sort()
+	order.reverse()                        # take from the back so earlier indices hold
+	var taken := []
+	for i: int in order:
+		taken.push_front(a["regiments"][i])
+		a["regiments"].remove_at(i)
+
+	var b := add_army(owner, to_tile, [])
+	b["regiments"] = taken
+	b["move_left"] = 0                     # forming up takes the day
+	_capture_if_undefended(b)
+	return b["id"]
+
+
 func disband_if_empty(army_id: int) -> void:
 	var a = armies.get(army_id)
 	if a != null and a["regiments"].is_empty():

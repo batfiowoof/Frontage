@@ -71,6 +71,7 @@ func campaign_orders(cs) -> Array:
 		_learn_something(cs, out)
 		_recruit_something(cs, out)
 		_burn_something(cs, out)
+		_gather_up(cs, out)
 		_march(cs, out)
 	out.append(Orders.ready(true))
 	return out
@@ -136,6 +137,27 @@ func _burn_something(cs, out: Array) -> void:
 		if s != null and s["owner"] != seat:
 			out.append(Orders.raze(id))
 			return
+
+
+## A remnant standing next to a bigger army of ours joins it, rather than wandering
+## off alone to be picked off. One merge a turn is plenty.
+const REMNANT := 3
+
+
+func _gather_up(cs, out: Array) -> void:
+	for id in cs.sorted_army_ids():
+		var a = cs.armies[id]
+		if a["owner"] != seat or a["regiments"].size() > REMNANT or a["move_left"] <= 0:
+			continue
+		for other in cs.sorted_army_ids():
+			if other == id:
+				continue
+			var b = cs.armies[other]
+			if b["owner"] != seat or b["regiments"].size() <= a["regiments"].size():
+				continue
+			if cs.can_merge(seat, id, other):
+				out.append(Orders.merge(id, other))
+				return
 
 
 func _march(cs, out: Array) -> void:

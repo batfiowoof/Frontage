@@ -228,8 +228,33 @@ func _draw() -> void:
 		draw_rect(box, Color.WHITE, false, 1.0)
 
 	if _order_from != Vector2.INF:
-		# The drag that sets a facing, drawn as the line the regiment will face along.
-		draw_line(_order_from, get_global_mouse_position(), Color("9fd8a0"), 2.0)
+		# The drag that sets a facing, and the order it would give: every regiment's real
+		# footprint where it would stand, turned the way it would face. Frontage is what
+		# decides the fight, so it should not be invisible until after you have committed.
+		var mouse := get_global_mouse_position()
+		draw_line(_order_from, mouse, Color("9fd8a0"), 2.0)
+		for row: Dictionary in _plan_order(_order_from, mouse):
+			_draw_ghost(row)
+
+
+func _draw_ghost(row: Dictionary) -> void:
+	var at: Vector2 = row["target"]
+	var ahead := Vector2.from_angle(row["face"])
+	var across := Vector2(-ahead.y, ahead.x)
+	var half_w: float = row["half_width"]
+	var half_d: float = row["half_depth"]
+
+	var corners := PackedVector2Array([
+		at + ahead * half_d - across * half_w,
+		at + ahead * half_d + across * half_w,
+		at - ahead * half_d + across * half_w,
+		at - ahead * half_d - across * half_w,
+	])
+	draw_colored_polygon(corners, Color(0.62, 0.85, 0.63, 0.13))
+	draw_polyline(corners + PackedVector2Array([corners[0]]), Color("9fd8a0"), 1.5)
+	# A nose on the front rank, so which way it faces is not a guess.
+	draw_line(at, at + ahead * (half_d + 22.0), Color("cfeecf"), 2.0)
+	draw_line(row["from"], at, Color(0.62, 0.85, 0.63, 0.35), 1.0)
 
 
 func _update_hud(pose: Dictionary) -> void:
@@ -370,29 +395,55 @@ func _finish_selection() -> void:
 	selected = picked
 
 
+## Where a right-drag would put everything, as one row per regiment.
+##
+## The preview and the order both come from here and neither works anything out on its
+## own. That is the only way a preview stays honest: the moment the spread rule changes,
+## the ghosts change with it rather than quietly lying about where the men will stand.
+func _plan_order(from: Vector2, to: Vector2) -> Array:
+	return plan_order(_display_state(), selected, from, to)
+
+
+## The arithmetic, with nothing of the scene tree in it, so it tests headless the way
+## bodies.gd does.
+static func plan_order(pose: Dictionary, chosen: PackedInt32Array, from: Vector2, to: Vector2) -> Array:
+	var out := []
+	if from == Vector2.INF or chosen.is_empty():
+		return out
+	var explicit := from.distance_to(to) > 12.0
+	var facing := (to - from).angle() if explicit else 0.0
+
+	# Spread the selection into a line across the facing rather than piling every
+	# regiment onto one point.
+	var across := Vector2(cos(facing + PI / 2.0), sin(facing + PI / 2.0))
+	var n := chosen.size()
+	for i in n:
+		var id: int = chosen[i]
+		if not pose.has(id):
+			continue
+		var p: Dictionary = pose[id]
+		var spacing := float(p.get("spacing", 1.0))
+		var half := Formation.frontage(p["strength"], p["width"], spacing)
+		var slot := across * (float(i) - float(n - 1) * 0.5) * (half * 2.4)
+		var target: Vector2 = from + slot
+		out.append({
+			"id": id,
+			"target": target,
+			"face": facing if explicit else (target - p["pos"]).angle(),
+			"from": p["pos"],
+			"half_width": half,
+			"half_depth": Formation.half_depth(p["max_strength"], p["width"], spacing),
+		})
+	return out
+
+
 ## Right-click moves. Dragging while you do it sets the facing, so you can decide
 ## which way a regiment meets what is coming -- the whole point of the flank.
 func _finish_order() -> void:
 	var from := _order_from
 	var to := get_global_mouse_position()
 	_order_from = Vector2.INF
-	if from == Vector2.INF or selected.is_empty():
-		return
-	var pose := _display_state()
-	var facing := (to - from).angle() if from.distance_to(to) > 12.0 else 0.0
-	var explicit := from.distance_to(to) > 12.0
-
-	# Spread the selection into a line across the facing rather than piling every
-	# regiment onto one point. One order per regiment: the wire format carries a
-	# single target, and a right-click is not a hot path.
-	var across := Vector2(cos(facing + PI / 2.0), sin(facing + PI / 2.0))
-	var n := selected.size()
-	for i in n:
-		var id: int = selected[i]
-		if not pose.has(id):
-			continue
-		var spread: float = Formation.frontage(pose[id]["strength"], pose[id]["width"]) * 2.4
-		var slot := across * (float(i) - float(n - 1) * 0.5) * spread
-		var target: Vector2 = from + slot
-		var face: float = facing if explicit else (target - pose[id]["pos"]).angle()
-		Net.order_battle_move(PackedInt32Array([id]), target, face)
+	# One order per regiment: the wire carries a single target, and a right-click is
+	# not a hot path.
+	for row: Dictionary in _plan_order(from, to):
+		Net.order_battle_move(PackedInt32Array([row["id"]]), row["target"], row["face"])
