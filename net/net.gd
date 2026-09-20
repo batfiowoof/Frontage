@@ -127,7 +127,9 @@ func start_demo_battle() -> void:
 	var seats := player_ids()
 	var left: int = seats[0] if seats.size() > 0 else 1
 	var right: int = seats[1] if seats.size() > 1 else left
-	var line := [&"spear", &"sword", &"spear", &"archer", &"spear"]
+	# Cavalry on one wing on purpose: the demo exists to answer whether a flank reads,
+	# and a line with nothing that can outrun it cannot produce one.
+	var line := [&"cavalry", &"spear", &"pike", &"sword", &"archer"]
 	var bs = BattleState.new()
 	for i in line.size():
 		var y := (float(i) - float(line.size() - 1) * 0.5) * Rules.DEPLOY_SPACING
