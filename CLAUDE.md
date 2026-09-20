@@ -32,9 +32,9 @@ These are not style preferences. Breaking one costs a rewrite.
 
 ## Running it
 
-    play.cmd            two windowed clients; the campaign is dealt once both are up
-    play.cmd demo       two windowed clients dropped straight into a staged battle,
-                        for tuning how the battle feels to drive
+	play.cmd            two windowed clients; the campaign is dealt once both are up
+	play.cmd demo       two windowed clients dropped straight into a staged battle,
+						for tuning how the battle feels to drive
 
 Campaign: left-click your army, click a tile to march, click your own settlement to
 recruit, End Turn bottom-right. The turn advances when every player has pressed it.
@@ -43,8 +43,8 @@ facing you arrive on. WASD or screen edges pan, wheel zooms.
 
 ## Gates
 
-    test.cmd       unit suite, headless, ~1s. Every source file must compile.
-    nettest.cmd    two processes: mirror matches the server's bytes, orders are
+	test.cmd       unit suite, headless, ~1s. Every source file must compile.
+	nettest.cmd    two processes: mirror matches the server's bytes, orders are
                    validated, a foreign order is refused.
     camptest.cmd   two processes: campaign turns, armies meet, real-time battle,
                    casualties written back, campaign resumes. ~60s (battles run
