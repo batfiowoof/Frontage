@@ -80,14 +80,18 @@ static func apply_order(bs, sender: int, bytes: PackedByteArray) -> void:
 	var order := Orders.decode(bytes)
 	if order.is_empty():
 		return
-	if order["type"] != Orders.Type.BATTLE_MOVE and order["type"] != Orders.Type.SET_FORMATION:
+	var kind: int = order["type"]
+	if kind != Orders.Type.BATTLE_MOVE and kind != Orders.Type.SET_FORMATION \
+			and kind != Orders.Type.FOCUS:
 		return
 	for id in order["ids"]:
 		var r = bs.get_regiment(id)
 		if r == null or r.owner_id != sender:
 			continue
-		if order["type"] == Orders.Type.BATTLE_MOVE:
+		if kind == Orders.Type.BATTLE_MOVE:
 			r.order_move(order["target"], order["facing"])
+		elif kind == Orders.Type.FOCUS:
+			r.focus = int(order["mark"])
 		elif not r.set_formation(order["formation"]) and int(order["width"]) > 0:
 			r.set_width(int(order["width"]))
 

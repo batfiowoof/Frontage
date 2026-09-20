@@ -16,6 +16,7 @@ const TESTS := [
 	"res://tests/test_bodies.gd",
 	"res://tests/test_replay.gd",
 	"res://tests/test_formations.gd",
+	"res://tests/test_shooting.gd",
 ]
 
 

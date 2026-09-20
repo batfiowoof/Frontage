@@ -110,13 +110,24 @@ const DEFAULT_WIDTH := 12
 ## Cavalry is the point of this table: few men, expensive, and fast enough to get
 ## round a flank while the fronts are locked. Without something that can outrun a
 ## line, flanking is an accident rather than a decision.
+## `range` of 0 means it has nothing to shoot with. `volley` is the men a full-strength
+## regiment kills with one, `reload` the seconds between them, `ammo` how many it brought.
 const KINDS := {
-	&"spear":   {"strength": 120, "width": 12, "cost": 120, "upkeep": 2, "speed": 1.0,  "requires": &""},
-	&"sword":   {"strength": 100, "width": 10, "cost": 150, "upkeep": 3, "speed": 1.05, "requires": &""},
-	&"archer":  {"strength": 80,  "width": 16, "cost": 140, "upkeep": 2, "speed": 1.0,  "requires": &""},
-	&"pike":    {"strength": 140, "width": 14, "cost": 220, "upkeep": 4, "speed": 0.85, "requires": &"barracks"},
-	&"cavalry": {"strength": 70,  "width": 10, "cost": 280, "upkeep": 5, "speed": 1.75, "requires": &"barracks"},
+	&"spear":   {"strength": 120, "width": 12, "cost": 120, "upkeep": 2, "speed": 1.0,  "requires": &"",         "range": 0.0,   "reload": 0.0, "volley": 0.0,  "ammo": 0},
+	&"sword":   {"strength": 100, "width": 10, "cost": 150, "upkeep": 3, "speed": 1.05, "requires": &"",         "range": 0.0,   "reload": 0.0, "volley": 0.0,  "ammo": 0},
+	&"archer":  {"strength": 80,  "width": 16, "cost": 140, "upkeep": 2, "speed": 1.0,  "requires": &"",         "range": 430.0, "reload": 3.0, "volley": 10.0, "ammo": 14},
+	&"pike":    {"strength": 140, "width": 14, "cost": 220, "upkeep": 4, "speed": 0.85, "requires": &"barracks", "range": 0.0,   "reload": 0.0, "volley": 0.0,  "ammo": 0},
+	&"cavalry": {"strength": 70,  "width": 10, "cost": 280, "upkeep": 5, "speed": 1.75, "requires": &"barracks", "range": 0.0,   "reload": 0.0, "volley": 0.0,  "ammo": 0},
 }
+
+# --- shooting -----------------------------------------------------------
+## A volley at the far edge of its range is worth this much of one at point blank.
+const MISSILE_FALLOFF := 0.55
+## Morale cost of being shot at, per volley landed. Arrows are frightening out of all
+## proportion to what they kill, which is most of what they were for.
+const MISSILE_SHOCK := 6.0
+## How wide a friendly regiment counts as when it is standing in the line of fire.
+const LINE_OF_FIRE_MARGIN := 18.0
 
 # --- formations ---------------------------------------------------------
 ## What a regiment can be told to do with its shape. Under frontage-limited combat

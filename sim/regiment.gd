@@ -19,6 +19,7 @@ var facing := 0.0                  # radians; 0 = +X
 var width := Rules.DEFAULT_WIDTH
 var formation := Rules.DEFAULT_FORMATION
 var reforming := 0.0
+var ammo := 0
 var state := State.IDLE
 var target := Vector2.ZERO         # move order destination
 var target_facing := 0.0
@@ -27,6 +28,11 @@ var engaged_with := -1             # regiment id, or -1
 ## Fractional casualties waiting to become whole men. Server-side only: it is not on
 ## the wire, because a client never continues the simulation, only draws it.
 var damage_pool := 0.0
+
+## Seconds until it can loose again, and whoever the player told it to shoot at.
+## Server-side only, like damage_pool: a client draws the battle, it does not run it.
+var reload := 0.0
+var focus := -1
 
 ## Fortification credit from whatever the regiment is standing behind, 0..1.
 ## Server-side only, like damage_pool: it comes from the campaign, not the wire.
@@ -46,6 +52,7 @@ static func make(p_id: int, p_owner: int, p_kind: StringName, p_pos: Vector2, p_
 	r.facing = p_facing
 	r.target = p_pos
 	r.target_facing = p_facing
+	r.ammo = int(spec.get("ammo", 0))
 	return r
 
 
@@ -75,6 +82,14 @@ func spacing() -> float:
 ## Caught mid-change, a regiment is worth rather less than either shape it is between.
 func order_factor() -> float:
 	return Rules.REFORM_PENALTY if reforming > 0.0 else 1.0
+
+
+func can_shoot() -> bool:
+	return ammo > 0 and float(Rules.KINDS[kind]["range"]) > 0.0
+
+
+func range_of() -> float:
+	return float(Rules.KINDS[kind]["range"])
 
 
 func is_cavalry() -> bool:

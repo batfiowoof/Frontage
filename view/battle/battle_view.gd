@@ -167,6 +167,7 @@ func _pose_of(a, b, alpha: float) -> Dictionary:
 			"strength": r.strength, "max_strength": r.max_strength,
 			"morale": r.morale, "stamina": r.stamina, "width": r.width, "state": r.state,
 			"formation": r.formation, "reforming": r.reforming, "spacing": r.spacing(),
+			"ammo": r.ammo,
 			"hits": fights[id]["sides"] if fights.has(id) else [],
 			"threats": fights[id]["threats"] if fights.has(id) else PackedVector2Array(),
 		}
@@ -247,8 +248,10 @@ func _update_hud(pose: Dictionary) -> void:
 		return
 	var lead: Dictionary = pose[selected[0]]
 	var busy: float = lead["reforming"]
-	_hint.text = "%s, %d across%s      [ and ] change the frontage" % [
+	var quiver: int = lead.get("ammo", 0)
+	_hint.text = "%s, %d across%s%s      [ and ] change the frontage" % [
 		lead["formation"], int(lead["width"]),
+		"      %d volleys left" % quiver if quiver > 0 else "",
 		"      RE-FORMING %.0fs" % busy if busy > 0.0 else ""]
 	for b: Button in _formation_bar.get_children():
 		b.disabled = busy > 0.0

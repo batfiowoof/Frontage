@@ -107,6 +107,8 @@ func step() -> void:
 	for id in shocks:
 		regiments[id].shock(shocks[id])
 
+	_shoot(contacts, dt)
+
 	for id in sorted_ids():
 		_step_regiment(regiments[id], dt)
 
@@ -127,6 +129,92 @@ static func reach(r: Regiment, exposure: Exposure) -> float:
 ## The space between two regiments' facing edges. Negative means they overlap.
 static func gap_between(a: Regiment, b: Regiment) -> float:
 	return a.pos.distance_to(b.pos) - reach(a, exposure_of(a, b)) - reach(b, exposure_of(b, a))
+
+
+## Everyone with arrows left looses at whoever they can actually see.
+##
+## Shooting happens after the melee is resolved, so a regiment that was cut down this
+## tick does not get a volley off from beyond the grave.
+func _shoot(contacts: Dictionary, dt: float) -> void:
+	for id in sorted_ids():
+		var r: Regiment = regiments[id]
+		if not r.is_alive() or not r.can_shoot():
+			continue
+		r.reload = maxf(0.0, r.reload - dt)
+		# Not while somebody is swinging at you, and not on the move: a bow needs both
+		# hands and a moment, which is what makes archers a question of where you put
+		# them rather than a number on a card.
+		if contacts.has(id) or r.state != Regiment.State.IDLE:
+			continue
+		if r.reload > 0.0:
+			continue
+		var mark = _volley_target(r)
+		if mark == null:
+			continue
+		r.reload = float(Rules.KINDS[r.kind]["reload"])
+		r.ammo -= 1
+		_land_volley(r, mark)
+
+
+## Whoever the player named if it is still shootable, otherwise the nearest enemy that
+## is both in range and not behind one of our own regiments.
+func _volley_target(shooter: Regiment):
+	var chosen = regiments.get(shooter.focus)
+	if chosen != null and _shootable(shooter, chosen):
+		return chosen
+	var best = null
+	var best_distance := INF
+	for id in sorted_ids():
+		var e: Regiment = regiments[id]
+		if not _shootable(shooter, e):
+			continue
+		var d := shooter.pos.distance_squared_to(e.pos)
+		if d < best_distance:
+			best_distance = d
+			best = e
+	return best
+
+
+func _shootable(shooter: Regiment, mark: Regiment) -> bool:
+	if mark == null or mark.owner_id == shooter.owner_id or not mark.is_alive():
+		return false
+	if shooter.pos.distance_to(mark.pos) > shooter.range_of():
+		return false
+	return line_is_clear(shooter, mark, regiments.values())
+
+
+## Nobody shoots through their own line. A friendly regiment anywhere between the two,
+## within a regiment's width of the flight path, blocks it -- which is why archers go on
+## a wing or in front and have to be pulled back before the lines meet.
+static func line_is_clear(shooter: Regiment, mark: Regiment, everyone) -> bool:
+	var flight: Vector2 = mark.pos - shooter.pos
+	var length := flight.length()
+	if length < 1.0:
+		return true
+	var along := flight / length
+	for f in everyone:
+		if f.id == shooter.id or f.owner_id != shooter.owner_id or not f.is_alive():
+			continue
+		var offset: Vector2 = f.pos - shooter.pos
+		var travelled := offset.dot(along)
+		if travelled <= 0.0 or travelled >= length:
+			continue                       # beside us or behind the target
+		var aside := absf(offset.cross(along))
+		var width := Formation.frontage(f.max_strength, f.width, f.spacing()) + Rules.LINE_OF_FIRE_MARGIN
+		if aside < width:
+			return false
+	return true
+
+
+func _land_volley(shooter: Regiment, mark: Regiment) -> void:
+	var distance := shooter.pos.distance_to(mark.pos)
+	var reach := maxf(1.0, shooter.range_of())
+	var falloff := lerpf(1.0, Rules.MISSILE_FALLOFF, clampf(distance / reach, 0.0, 1.0))
+	var cover := clampf(float(mark.form()["missile"]), -1.0, 0.95)
+	var kills := float(Rules.KINDS[shooter.kind]["volley"]) * shooter.fraction() * falloff
+	kills *= (1.0 - cover) * shooter.order_factor()
+	mark.take_casualties(int(round(maxf(0.0, kills))))
+	mark.shock(Rules.MISSILE_SHOCK * (1.0 - clampf(cover, 0.0, 0.95)))
 
 
 ## Who is touching whom. ponytail: O(n^2) over every pair. A battle is ~40 regiments,

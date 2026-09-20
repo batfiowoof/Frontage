@@ -16,7 +16,7 @@ const BattleState := preload("res://sim/battle_state.gd")
 const CampaignState := preload("res://sim/campaign_state.gd")
 const Rules := preload("res://sim/rules.gd")
 
-const VERSION := 3
+const VERSION := 4
 
 ## Field order on the wire.  Add a field here and the round-trip test covers it.
 const REGIMENT_FIELDS := [
@@ -32,6 +32,7 @@ const REGIMENT_FIELDS := [
 	["width", TYPE_INT],
 	["formation", TYPE_STRING_NAME],
 	["reforming", TYPE_FLOAT],
+	["ammo", TYPE_INT],
 	["state", TYPE_INT],
 	["target", TYPE_VECTOR2],
 	["target_facing", TYPE_FLOAT],

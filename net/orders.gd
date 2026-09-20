@@ -15,7 +15,7 @@ const VERSION := 1
 const MAX_IDS_PER_ORDER := 64          # a box selection, not a whole army list
 const TILE_COUNT := Rules.MAP_W * Rules.MAP_H
 
-enum Type { BATTLE_MOVE, ARMY_MOVE, RECRUIT, READY, BUILD, SET_FORMATION }
+enum Type { BATTLE_MOVE, ARMY_MOVE, RECRUIT, READY, BUILD, SET_FORMATION, FOCUS }
 
 
 # --- encoding -------------------------------------------------------------
@@ -46,6 +46,11 @@ static func set_formation(ids: PackedInt32Array, shape: StringName, width: int) 
 	return var_to_bytes([VERSION, Type.SET_FORMATION, ids, shape, width])
 
 
+## Shoot at that one. -1 hands the choice back to the regiment.
+static func focus(ids: PackedInt32Array, mark: int) -> PackedByteArray:
+	return var_to_bytes([VERSION, Type.FOCUS, ids, mark])
+
+
 # --- decoding -------------------------------------------------------------
 
 ## Returns a validated order dictionary, or {} if these bytes are not an order.
@@ -72,6 +77,8 @@ static func decode(bytes: PackedByteArray) -> Dictionary:
 			return _decode_build(d)
 		Type.SET_FORMATION:
 			return _decode_set_formation(d)
+		Type.FOCUS:
+			return _decode_focus(d)
 	return {}
 
 
@@ -146,6 +153,19 @@ static func _decode_set_formation(d: Array) -> Dictionary:
 	if typeof(d[4]) != TYPE_INT or d[4] < 0 or d[4] > Rules.MAX_WIDTH:
 		return {}
 	return {"type": Type.SET_FORMATION, "ids": ids, "formation": d[3], "width": d[4]}
+
+
+static func _decode_focus(d: Array) -> Dictionary:
+	if d.size() != 4:
+		return {}
+	if typeof(d[2]) != TYPE_PACKED_INT32_ARRAY:
+		return {}
+	var ids: PackedInt32Array = d[2]
+	if ids.is_empty() or ids.size() > MAX_IDS_PER_ORDER:
+		return {}
+	if typeof(d[3]) != TYPE_INT:
+		return {}
+	return {"type": Type.FOCUS, "ids": ids, "mark": d[3]}
 
 
 static func _is_tile(i: int) -> bool:

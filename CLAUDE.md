@@ -140,6 +140,26 @@ Two things that are easy to get wrong here:
   well it is set. Its job is not being flanked; the shield wall's is standing in front of
   horses.
 
+## Shooting
+
+Archers fire a volley every `reload` seconds at whatever is in range, and have a finite
+quiver. Two rules make them a question of where you put them rather than a number:
+
+- **Nobody shoots through their own line.** A friendly regiment between the archers and
+  their target blocks the shot, so bows go on a wing or in front and have to be pulled
+  back before the lines meet.
+- **Not on the move and not in a melee.** A bow needs a moment and both hands, so a
+  regiment that is still walking never looses.
+
+Out of arrows they are simply bad infantry, which is what stops a missile duel being free.
+Formation matters more here than anywhere: over 16 seconds under the same archers, a line
+loses 48 men, loose order 18, and a square 60.
+
+The AI holds its archers back until something is in range and then **stops re-ordering
+them**. This is the third time that shape of bug has appeared -- a unit chasing a point
+computed from a moving enemy centre never arrives, so it never does the thing arriving was
+for, and the battle never ends. The cavalry sweep latches its waypoint for the same reason.
+
 ## The men
 
 `view/battle/bodies.gd` draws the soldiers, and everything in it is built on the **file**

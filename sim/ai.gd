@@ -172,12 +172,20 @@ func battle_orders(bs) -> Array:
 	var out := []
 	var foot := []
 	for r: Regiment in mine:
+		if r.can_shoot():
+			continue                       # handled by _stand_off
 		if float(Rules.KINDS[r.kind]["speed"]) >= 1.4:
 			_sweep(r, out, enemy_centre, approach, across)
 		else:
 			foot.append(r)
 
 	_mind_the_cavalry(mine, foes, out)
+
+	var shooters := []
+	for r: Regiment in mine:
+		if r.can_shoot():
+			shooters.append(r)
+	_stand_off(shooters, foes, out, enemy_centre, approach)
 
 	# Everything slow forms one line and walks at them -- unless somebody is already
 	# within reach, in which case it goes and fights instead of dressing ranks.
@@ -198,6 +206,25 @@ func battle_orders(bs) -> Array:
 		if r.pos.distance_to(target) > 20.0:
 			out.append(Orders.battle_move(PackedInt32Array([r.id]), target, face))
 	return out
+
+
+## Archers hold back inside their own range and stop, because a bow needs a moment and
+## a regiment that is still walking never looses. Out of arrows, they join the line.
+func _stand_off(shooters: Array, foes: Array, out: Array, enemy_centre: Vector2, approach: Vector2) -> void:
+	for r: Regiment in shooters:
+		if r.state == Regiment.State.FIGHTING or r.state == Regiment.State.ROUTING:
+			continue
+		# Stop the moment anything is in range, and do not re-order after that. Chasing
+		# a stand-off point computed from a moving enemy centre means never standing
+		# still, and a regiment that is still walking never looses an arrow -- so the
+		# quiver never empties, the archers never join the line, and the battle never
+		# ends. Exactly the way the cavalry sweep used to circle forever.
+		var near = _nearest(r, foes)
+		if near != null and r.pos.distance_to(near.pos) <= r.range_of() * 0.9:
+			continue
+		var stand: Vector2 = enemy_centre - approach * (r.range_of() * 0.8)
+		if r.pos.distance_to(stand) > 40.0:
+			out.append(Orders.battle_move(PackedInt32Array([r.id]), stand, approach.angle()))
 
 
 ## Foot with horsemen bearing down on it forms square; once they are gone it goes back

@@ -323,13 +323,17 @@ func order_set_formation(ids: PackedInt32Array, shape: StringName, width := 0) -
 	submit(Orders.set_formation(ids, shape, width))
 
 
+func order_focus(ids: PackedInt32Array, mark: int) -> void:
+	submit(Orders.focus(ids, mark))
+
+
 func _receive_order(sender: int, bytes: PackedByteArray) -> void:
 	var order := Orders.decode(bytes)
 	if order.is_empty():
 		_reject(sender, "malformed order")
 		return
 	if battle != null and _recorder != null and (order["type"] == Orders.Type.BATTLE_MOVE
-			or order["type"] == Orders.Type.SET_FORMATION):
+			or order["type"] == Orders.Type.SET_FORMATION or order["type"] == Orders.Type.FOCUS):
 		_recorder.note(battle.tick, sender, bytes)
 	match order["type"]:
 		Orders.Type.BATTLE_MOVE:
@@ -344,6 +348,8 @@ func _receive_order(sender: int, bytes: PackedByteArray) -> void:
 			_build(sender, order)
 		Orders.Type.SET_FORMATION:
 			_set_formation(sender, order)
+		Orders.Type.FOCUS:
+			_focus(sender, order)
 
 
 # --- campaign orders ------------------------------------------------------
@@ -381,6 +387,18 @@ func _recruit(sender: int, order: Dictionary) -> void:
 		return
 	broadcast_campaign()
 	campaign_updated.emit(campaign)
+
+
+func _focus(sender: int, order: Dictionary) -> void:
+	if battle == null:
+		_reject(sender, "no battle in progress")
+		return
+	for id in order["ids"]:
+		var r = battle.get_regiment(id)
+		if r == null or r.owner_id != sender:
+			_reject(sender, "regiment %d is not yours to aim" % id)
+			continue
+		r.focus = int(order["mark"])
 
 
 func _set_formation(sender: int, order: Dictionary) -> void:
