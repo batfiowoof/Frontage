@@ -105,6 +105,41 @@ Measured (`tests/test_combat.gd` prints these):
 	same frontage       3-deep breaks at 32s, 10-deep at 75s
 	two blocks meet     centres 94 apart, fronts 13 apart
 
+## Formations
+
+Six shapes in `Rules.FORMATIONS`, and a frontage the player sets directly with `[` and
+`]`. Under frontage-limited combat these are real decisions, not costumes -- width buys
+output, depth buys endurance, and every number in the table feeds something the fight
+already reads.
+
+	line     balanced, the default
+	column   narrow and quick; good on the road, bad if caught
+	square   no flank or rear penalty at all, but few files and slow
+	wedge    hits harder, narrower front
+	loose    stands nearly twice as wide, poor in a melee, hard to shoot
+	shield   heavy frontal protection, very slow to turn, braced
+
+Picking a shape resets the frontage to what that shape wants; `[` and `]` then adjust it.
+Either counts as re-forming, which takes `FORMATION_CHANGE_SECONDS` and costs
+`REFORM_PENALTY` while it happens, so the shape has to be chosen before the moment it is
+needed rather than at it.
+
+Measured (`tests/test_formations.gd` prints these):
+
+	24 files vs 6 files      15 killed against 3 over 12s
+	spears vs cavalry, 8s    a line loses 4 and kills 5
+	                         a shield wall loses 1 and kills 8
+
+Two things that are easy to get wrong here:
+
+- **Contact is front rank to front rank, so a wider regiment is a shallower one and
+  reaches less far forward.** Two regiments placed at the same centre distance may be
+  locked together or not touching at all depending only on their shapes. Tests that set
+  up a fight have to position them from `BattleState.reach()`, not from a fixed gap.
+- A square is deliberately narrow, so its brace bonus cannot out-kill a full line however
+  well it is set. Its job is not being flanked; the shield wall's is standing in front of
+  horses.
+
 ## The men
 
 `view/battle/bodies.gd` draws the soldiers, and everything in it is built on the **file**

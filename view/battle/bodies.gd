@@ -70,6 +70,7 @@ class Troop extends RefCounted:
 	var phase := 0.0
 	var centre := Vector2.ZERO
 	var relief := 0.0
+	var spacing := 1.0
 
 
 var _troops := {}                        # regiment id -> Troop
@@ -115,6 +116,7 @@ func _advance(id: int, p: Dictionary, delta: float) -> int:
 			troop.face[i] = float(p["facing"])
 		return strength
 
+	troop.spacing = float(p.get("spacing", 1.0))
 	if troop.width != int(p["width"]):
 		_reform(troop, int(p["width"]))                      # walk into the new shape
 
@@ -403,7 +405,7 @@ func _shallowest_file(troop: Troop) -> int:
 ## turns or marches drags its men round after it and they catch up. Easing in local
 ## space instead would spin the whole block rigidly, which is the glued look.
 static func _place_of(troop: Troop, p: Dictionary, i: int) -> Vector2:
-	var offset := Formation.slot(troop.file[i], troop.depth[i], troop.width, troop.ranks)
+	var offset := Formation.slot(troop.file[i], troop.depth[i], troop.width, troop.ranks, troop.spacing)
 	return p["pos"] + offset.rotated(float(p["facing"]))
 
 
@@ -466,7 +468,7 @@ func slots(id: int) -> Dictionary:
 	if troop == null:
 		return out
 	for i in troop.file.size():
-		out[troop.man_id[i]] = Formation.slot(troop.file[i], troop.depth[i], troop.width, troop.ranks)
+		out[troop.man_id[i]] = Formation.slot(troop.file[i], troop.depth[i], troop.width, troop.ranks, troop.spacing)
 	return out
 
 

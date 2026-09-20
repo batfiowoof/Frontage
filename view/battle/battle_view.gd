@@ -30,6 +30,7 @@ var _frames: Array = []                  # [{state, at_ms}] for interpolation
 var _drag_select_from := Vector2.INF
 var _order_from := Vector2.INF
 var _panning := false
+var _formation_bar: HBoxContainer
 
 
 func _ready() -> void:
@@ -68,8 +69,18 @@ func _build_hud() -> void:
 	layer.add_child(_status)
 	_hint = Label.new()
 	_hint.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
-	_hint.position = Vector2(12, -34)
+	_hint.position = Vector2(12, -64)
 	layer.add_child(_hint)
+
+	_formation_bar = HBoxContainer.new()
+	_formation_bar.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	_formation_bar.position = Vector2(12, -34)
+	layer.add_child(_formation_bar)
+	for shape: StringName in Rules.FORMATIONS:
+		var b := Button.new()
+		b.text = String(shape)
+		b.pressed.connect(_on_formation.bind(shape))
+		_formation_bar.add_child(b)
 
 
 # --- what we are drawing --------------------------------------------------
@@ -155,6 +166,7 @@ func _pose_of(a, b, alpha: float) -> Dictionary:
 			"pos": pos, "facing": facing, "owner": r.owner_id, "kind": r.kind,
 			"strength": r.strength, "max_strength": r.max_strength,
 			"morale": r.morale, "stamina": r.stamina, "width": r.width, "state": r.state,
+			"formation": r.formation, "reforming": r.reforming, "spacing": r.spacing(),
 			"hits": fights[id]["sides"] if fights.has(id) else [],
 			"threats": fights[id]["threats"] if fights.has(id) else PackedVector2Array(),
 		}
@@ -229,6 +241,19 @@ func _update_hud(pose: Dictionary) -> void:
 			theirs += int(pose[id]["strength"])
 	_status.text = "your men %d      theirs %d      %d selected" % [mine, theirs, selected.size()]
 
+	_formation_bar.visible = not selected.is_empty()
+	if selected.is_empty() or not pose.has(selected[0]):
+		_hint.text = "drag to select, right-click to move, right-drag to set the facing"
+		return
+	var lead: Dictionary = pose[selected[0]]
+	var busy: float = lead["reforming"]
+	_hint.text = "%s, %d across%s      [ and ] change the frontage" % [
+		lead["formation"], int(lead["width"]),
+		"      RE-FORMING %.0fs" % busy if busy > 0.0 else ""]
+	for b: Button in _formation_bar.get_children():
+		b.disabled = busy > 0.0
+		b.modulate = Color("9fd8a0") if StringName(b.text) == lead["formation"] else Color.WHITE
+
 
 # --- camera ---------------------------------------------------------------
 
@@ -289,6 +314,28 @@ func _unhandled_input(event: InputEvent) -> void:
 					_finish_order()
 	elif event is InputEventMouseMotion and _panning:
 		_camera.position -= event.relative / _camera.zoom
+	elif event is InputEventKey and event.pressed and not event.echo:
+		if event.keycode == KEY_BRACKETRIGHT:
+			_widen(2)
+		elif event.keycode == KEY_BRACKETLEFT:
+			_widen(-2)
+
+
+func _on_formation(shape: StringName) -> void:
+	if not selected.is_empty():
+		Net.order_set_formation(selected, shape, 0)
+
+
+## Frontage by the bracket keys. Total War drags a unit wider with the mouse, but the
+## right button is already spending its drag on the facing you arrive at.
+func _widen(by: int) -> void:
+	if selected.is_empty():
+		return
+	var pose := _display_state()
+	for id in selected:
+		if pose.has(id):
+			Net.order_set_formation(PackedInt32Array([id]), pose[id]["formation"],
+				clampi(int(pose[id]["width"]) + by, Rules.MIN_WIDTH, Rules.MAX_WIDTH))
 
 
 func _finish_selection() -> void:

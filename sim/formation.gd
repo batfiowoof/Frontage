@@ -15,9 +15,9 @@ const Rules := preload("res://sim/rules.gd")
 ## shifts as the ranks behind him thin out. `offsets()` below re-centres a partial rear
 ## rank, which is the right answer for laying out a block from scratch and the wrong one
 ## for men who are standing somewhere already.
-static func slot(file: int, depth: int, width: int, ranks: int) -> Vector2:
-	var x := (float(ranks - 1) * 0.5 - float(depth)) * Rules.RANK_SPACING
-	var y := (float(file) - float(width - 1) * 0.5) * Rules.FILE_SPACING
+static func slot(file: int, depth: int, width: int, ranks: int, spacing := 1.0) -> Vector2:
+	var x := (float(ranks - 1) * 0.5 - float(depth)) * Rules.RANK_SPACING * spacing
+	var y := (float(file) - float(width - 1) * 0.5) * Rules.FILE_SPACING * spacing
 	return Vector2(x, y)
 
 
@@ -63,14 +63,14 @@ static func ranks_deep(count: int, width: int) -> int:
 
 ## Half the formation's depth: how far it reaches forward of its centre, which is
 ## where its front rank stands and therefore where it meets an enemy.
-static func half_depth(count: int, width: int) -> float:
+static func half_depth(count: int, width: int, spacing := 1.0) -> float:
 	if count <= 0:
 		return 0.0
-	return float(ranks_deep(count, width) - 1) * Rules.RANK_SPACING * 0.5
+	return float(ranks_deep(count, width) - 1) * Rules.RANK_SPACING * spacing * 0.5
 
 
 ## Half-width of the formation's frontage, used for contact and flank tests.
-static func frontage(count: int, width: int) -> float:
+static func frontage(count: int, width: int, spacing := 1.0) -> float:
 	if count <= 0:
 		return 0.0
-	return float(clampi(width, 1, count) - 1) * Rules.FILE_SPACING * 0.5
+	return float(clampi(width, 1, count) - 1) * Rules.FILE_SPACING * spacing * 0.5

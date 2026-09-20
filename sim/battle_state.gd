@@ -120,8 +120,8 @@ func step() -> void:
 ## keeps a full block's footprint. Give it a real occupied depth if that ever shows.
 static func reach(r: Regiment, exposure: Exposure) -> float:
 	if exposure == Exposure.FLANK:
-		return Formation.frontage(r.max_strength, r.width)
-	return Formation.half_depth(r.max_strength, r.width)
+		return Formation.frontage(r.max_strength, r.width, r.spacing())
+	return Formation.half_depth(r.max_strength, r.width, r.spacing())
 
 
 ## The space between two regiments' facing edges. Negative means they overlap.
@@ -212,6 +212,10 @@ func _accumulate_strike(attacker: Regiment, defender: Regiment, dt: float, kills
 	# one is what makes a flank one-sided instead of merely favourable.
 	var hit_from := exposure_of(defender, attacker)
 	var swinging_from := exposure_of(attacker, defender)
+	if bool(defender.form()["all_round"]):
+		hit_from = Exposure.FRONT          # a square has no flank to find
+	if bool(attacker.form()["all_round"]):
+		swinging_from = Exposure.FRONT
 
 	var damage_mult := 1.0
 	var morale_drain := Rules.MORALE_DRAIN_FIGHTING
@@ -225,10 +229,18 @@ func _accumulate_strike(attacker: Regiment, defender: Regiment, dt: float, kills
 	if defender.state == Regiment.State.ROUTING:
 		damage_mult *= Rules.RUNDOWN_DAMAGE_MULT
 
+	# Spears set against a charge hurt a horse, and are hurt rather less by one.
+	if bool(attacker.form()["brace"]) and defender.is_cavalry():
+		damage_mult *= Rules.BRACE_DAMAGE_MULT
+	var braced := 1.0
+	if bool(defender.form()["brace"]) and attacker.is_cavalry():
+		braced = 1.0 - Rules.BRACE_PROTECTION
+
 	var files := contact_files(attacker, defender, swinging_from, hit_from)
 	var output := Rules.KILLS_PER_FILE_PER_SEC * float(files) * response_of(swinging_from)
 	output *= attacker.readiness() * damage_mult * dt
-	output *= 1.0 - clampf(defender.defense, 0.0, 0.9)
+	output *= float(attacker.form()["damage"]) * attacker.order_factor() * braced
+	output *= 1.0 - clampf(defender.defense + float(defender.form()["defense"]) * defender.order_factor(), 0.0, 0.9)
 
 	kills[defender.id] = float(kills.get(defender.id, 0.0)) + output
 	shocks[defender.id] = float(shocks.get(defender.id, 0.0)) + morale_drain * dt
@@ -287,6 +299,8 @@ static func exposure_of(defender: Regiment, attacker: Regiment) -> Exposure:
 # --- movement -------------------------------------------------------------
 
 func _step_regiment(r: Regiment, dt: float) -> void:
+	if r.reforming > 0.0:
+		r.reforming = maxf(0.0, r.reforming - dt)
 	match r.state:
 		Regiment.State.DEAD:
 			return
@@ -307,7 +321,7 @@ func _step_regiment(r: Regiment, dt: float) -> void:
 
 func _advance(r: Regiment, dt: float) -> void:
 	var routing: bool = r.state == Regiment.State.ROUTING
-	var speed: float = Rules.MOVE_SPEED * float(Rules.KINDS[r.kind]["speed"])
+	var speed: float = Rules.MOVE_SPEED * float(Rules.KINDS[r.kind]["speed"]) * float(r.form()["speed"])
 	if routing:
 		speed *= Rules.ROUT_SPEED_MULT
 	var to_target: Vector2 = r.target - r.pos
@@ -326,4 +340,4 @@ func _advance(r: Regiment, dt: float) -> void:
 
 
 func _turn_toward(r: Regiment, desired: float, dt: float) -> void:
-	r.facing = rotate_toward(r.facing, desired, Rules.TURN_SPEED * dt)
+	r.facing = rotate_toward(r.facing, desired, Rules.TURN_SPEED * float(r.form()["turn"]) * dt)

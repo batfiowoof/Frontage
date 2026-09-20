@@ -16,7 +16,7 @@ const BattleState := preload("res://sim/battle_state.gd")
 const CampaignState := preload("res://sim/campaign_state.gd")
 const Rules := preload("res://sim/rules.gd")
 
-const VERSION := 2
+const VERSION := 3
 
 ## Field order on the wire.  Add a field here and the round-trip test covers it.
 const REGIMENT_FIELDS := [
@@ -30,6 +30,8 @@ const REGIMENT_FIELDS := [
 	["pos", TYPE_VECTOR2],
 	["facing", TYPE_FLOAT],
 	["width", TYPE_INT],
+	["formation", TYPE_STRING_NAME],
+	["reforming", TYPE_FLOAT],
 	["state", TYPE_INT],
 	["target", TYPE_VECTOR2],
 	["target_facing", TYPE_FLOAT],
@@ -73,6 +75,10 @@ static func decode_battle(bytes: PackedByteArray):
 				# ints arriving where floats are expected is the one benign case
 				if not (field[1] == TYPE_FLOAT and typeof(row[i]) == TYPE_INT):
 					return null
+			if field[0] == "formation" and not Rules.FORMATIONS.has(row[i]):
+				return null
+			if field[0] == "width" and (row[i] < 1 or row[i] > Rules.MAX_WIDTH):
+				return null
 			r.set(field[0], row[i])
 		if bs.regiments.has(r.id):
 			return null                     # duplicate ids would silently drop a regiment

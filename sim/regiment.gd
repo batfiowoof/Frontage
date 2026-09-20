@@ -17,6 +17,8 @@ var stamina := 1.0
 var pos := Vector2.ZERO
 var facing := 0.0                  # radians; 0 = +X
 var width := Rules.DEFAULT_WIDTH
+var formation := Rules.DEFAULT_FORMATION
+var reforming := 0.0
 var state := State.IDLE
 var target := Vector2.ZERO         # move order destination
 var target_facing := 0.0
@@ -58,6 +60,55 @@ func tire(amount: float) -> void:
 
 func rest(amount: float) -> void:
 	stamina = minf(1.0, stamina + amount)
+
+
+## The formation's numbers. Anything asking "how fast, how hard, how tough" goes
+## through here rather than reaching into the table itself.
+func form() -> Dictionary:
+	return Rules.FORMATIONS.get(formation, Rules.FORMATIONS[Rules.DEFAULT_FORMATION])
+
+
+func spacing() -> float:
+	return float(form()["spacing"])
+
+
+## Caught mid-change, a regiment is worth rather less than either shape it is between.
+func order_factor() -> float:
+	return Rules.REFORM_PENALTY if reforming > 0.0 else 1.0
+
+
+func is_cavalry() -> bool:
+	return float(Rules.KINDS[kind]["speed"]) >= Rules.CAVALRY_SPEED
+
+
+## Change shape. Refused while already re-forming, or the player could flicker between
+## formations to dodge the penalty for doing it at the wrong moment.
+func set_formation(name: StringName) -> bool:
+	if state == State.DEAD or reforming > 0.0 or not Rules.FORMATIONS.has(name):
+		return false
+	if name == formation:
+		return false
+	formation = name
+	width = natural_width()
+	reforming = Rules.FORMATION_CHANGE_SECONDS
+	return true
+
+
+## The frontage this kind wants in this formation, before the player adjusts it.
+func natural_width() -> int:
+	var base := float(Rules.KINDS[kind]["width"]) * float(form()["width"])
+	return clampi(int(round(base)), Rules.MIN_WIDTH, maxi(Rules.MIN_WIDTH, max_strength))
+
+
+func set_width(w: int) -> bool:
+	if state == State.DEAD or reforming > 0.0:
+		return false
+	var wanted := clampi(w, Rules.MIN_WIDTH, mini(Rules.MAX_WIDTH, maxi(Rules.MIN_WIDTH, max_strength)))
+	if wanted == width:
+		return false
+	width = wanted
+	reforming = Rules.FORMATION_CHANGE_SECONDS
+	return true
 
 
 func is_alive() -> bool:

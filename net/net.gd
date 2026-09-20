@@ -319,12 +319,17 @@ func order_build(tile: int, building: StringName) -> void:
 	submit(Orders.build(tile, building))
 
 
+func order_set_formation(ids: PackedInt32Array, shape: StringName, width := 0) -> void:
+	submit(Orders.set_formation(ids, shape, width))
+
+
 func _receive_order(sender: int, bytes: PackedByteArray) -> void:
 	var order := Orders.decode(bytes)
 	if order.is_empty():
 		_reject(sender, "malformed order")
 		return
-	if order["type"] == Orders.Type.BATTLE_MOVE and battle != null and _recorder != null:
+	if battle != null and _recorder != null and (order["type"] == Orders.Type.BATTLE_MOVE
+			or order["type"] == Orders.Type.SET_FORMATION):
 		_recorder.note(battle.tick, sender, bytes)
 	match order["type"]:
 		Orders.Type.BATTLE_MOVE:
@@ -337,6 +342,8 @@ func _receive_order(sender: int, bytes: PackedByteArray) -> void:
 			_set_ready(sender, order)
 		Orders.Type.BUILD:
 			_build(sender, order)
+		Orders.Type.SET_FORMATION:
+			_set_formation(sender, order)
 
 
 # --- campaign orders ------------------------------------------------------
@@ -374,6 +381,25 @@ func _recruit(sender: int, order: Dictionary) -> void:
 		return
 	broadcast_campaign()
 	campaign_updated.emit(campaign)
+
+
+func _set_formation(sender: int, order: Dictionary) -> void:
+	if battle == null:
+		_reject(sender, "no battle in progress")
+		return
+	for id in order["ids"]:
+		var r = battle.get_regiment(id)
+		if r == null:
+			_reject(sender, "regiment %d does not exist" % id)
+			continue
+		if r.owner_id != sender:
+			_reject(sender, "regiment %d belongs to %d" % [id, r.owner_id])
+			continue
+		# Shape first, then frontage: picking a formation resets the width to what that
+		# formation wants, and a width of 0 means the player did not ask for more.
+		var changed: bool = r.set_formation(order["formation"])
+		if int(order["width"]) > 0 and not changed:
+			r.set_width(int(order["width"]))
 
 
 func _build(sender: int, order: Dictionary) -> void:

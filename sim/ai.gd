@@ -31,6 +31,9 @@ const SWEEP_ARRIVED := 90.0
 ## units to the side of the only remaining enemy, politely not joining in.
 const ENGAGE_RANGE := 320.0
 
+## How close a horseman has to be before the foot forms square.
+const HORSE_ALARM := 430.0
+
 ## Buildings it wants, cheapest first once it can afford them.
 const BUILD_ORDER := [&"barracks", &"farm", &"market", &"walls"]
 
@@ -174,6 +177,8 @@ func battle_orders(bs) -> Array:
 		else:
 			foot.append(r)
 
+	_mind_the_cavalry(mine, foes, out)
+
 	# Everything slow forms one line and walks at them -- unless somebody is already
 	# within reach, in which case it goes and fights instead of dressing ranks.
 	for i in foot.size():
@@ -193,6 +198,23 @@ func battle_orders(bs) -> Array:
 		if r.pos.distance_to(target) > 20.0:
 			out.append(Orders.battle_move(PackedInt32Array([r.id]), target, face))
 	return out
+
+
+## Foot with horsemen bearing down on it forms square; once they are gone it goes back
+## to a line, because a square is a poor way to kill anybody.
+func _mind_the_cavalry(mine: Array, foes: Array, out: Array) -> void:
+	var horses := []
+	for f: Regiment in foes:
+		if f.is_cavalry():
+			horses.append(f)
+	for r: Regiment in mine:
+		if r.is_cavalry() or r.reforming > 0.0 or r.state == Regiment.State.ROUTING:
+			continue
+		var near = _nearest(r, horses)
+		var threatened: bool = near != null and r.pos.distance_to(near.pos) < HORSE_ALARM
+		var wanted: StringName = &"square" if threatened else &"line"
+		if r.formation != wanted:
+			out.append(Orders.set_formation(PackedInt32Array([r.id]), wanted, 0))
 
 
 static func _nearest(r: Regiment, others: Array):

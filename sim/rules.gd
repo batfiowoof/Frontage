@@ -118,6 +118,47 @@ const KINDS := {
 	&"cavalry": {"strength": 70,  "width": 10, "cost": 280, "upkeep": 5, "speed": 1.75, "requires": &"barracks"},
 }
 
+# --- formations ---------------------------------------------------------
+## What a regiment can be told to do with its shape. Under frontage-limited combat
+## these are real decisions rather than costumes: width buys output, depth buys
+## endurance, and every one of these numbers feeds something the fight already reads.
+##
+##   width     the frontage this formation naturally wants, as a multiple of the
+##             kind's own. The player can then set it exactly; see MIN/MAX_WIDTH.
+##   spacing   how far apart the men stand, which widens or narrows the whole block
+##             and therefore what a flanker has to reach across
+##   speed     movement, turn: how fast it moves and how fast it wheels
+##   damage    what it deals; defense: what it shrugs off, 0..1
+##   all_round no flank or rear penalty -- the answer to being surrounded
+##   brace     spears set against a charge: hurts cavalry, and is hurt less by it
+##   missile   resistance to shooting, unused until M19
+const FORMATIONS := {
+	&"line":   {"width": 1.0,  "spacing": 1.0,  "speed": 1.0,  "turn": 1.0,  "damage": 1.0, "defense": 0.0,  "all_round": false, "brace": false, "missile": 0.0},
+	&"column": {"width": 0.35, "spacing": 1.0,  "speed": 1.3,  "turn": 1.4,  "damage": 1.0, "defense": 0.0,  "all_round": false, "brace": false, "missile": 0.0},
+	&"square": {"width": 0.55, "spacing": 1.0,  "speed": 0.55, "turn": 0.6,  "damage": 0.85, "defense": 0.1, "all_round": true,  "brace": true,  "missile": -0.25},
+	&"wedge":  {"width": 0.6,  "spacing": 1.0,  "speed": 1.15, "turn": 1.1,  "damage": 1.25, "defense": 0.0, "all_round": false, "brace": false, "missile": 0.0},
+	&"loose":  {"width": 1.0,  "spacing": 1.9,  "speed": 1.15, "turn": 1.3,  "damage": 0.55, "defense": 0.0, "all_round": false, "brace": false, "missile": 0.6},
+	&"shield": {"width": 1.0,  "spacing": 0.85, "speed": 0.5,  "turn": 0.35, "damage": 0.9, "defense": 0.35, "all_round": false, "brace": true,  "missile": 0.45},
+}
+const DEFAULT_FORMATION := &"line"
+
+## Frontage the player may ask for. Two is a file of one man wide either side of
+## nothing; forty is wider than any regiment we field.
+const MIN_WIDTH := 2
+const MAX_WIDTH := 40
+
+## Re-forming is not free, or picking the right shape would just be a click made at the
+## last possible moment. While it is happening the regiment fights at REFORM_PENALTY and
+## cannot be told to do it again.
+const FORMATION_CHANGE_SECONDS := 6.0
+const REFORM_PENALTY := 0.55
+
+## Bracing: what a set spear does to a horse, and what a horse fails to do to it.
+const BRACE_DAMAGE_MULT := 1.8
+const BRACE_PROTECTION := 0.45
+## A kind at or above this speed counts as cavalry for bracing and for the AI.
+const CAVALRY_SPEED := 1.4
+
 # --- buildings ----------------------------------------------------------
 ## What a settlement can be made into. `gold` and `food` are added to that
 ## settlement's income each turn, `unlocks` lets you recruit new kinds there, and

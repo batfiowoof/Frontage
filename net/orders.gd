@@ -15,7 +15,7 @@ const VERSION := 1
 const MAX_IDS_PER_ORDER := 64          # a box selection, not a whole army list
 const TILE_COUNT := Rules.MAP_W * Rules.MAP_H
 
-enum Type { BATTLE_MOVE, ARMY_MOVE, RECRUIT, READY, BUILD }
+enum Type { BATTLE_MOVE, ARMY_MOVE, RECRUIT, READY, BUILD, SET_FORMATION }
 
 
 # --- encoding -------------------------------------------------------------
@@ -38,6 +38,12 @@ static func ready(value: bool) -> PackedByteArray:
 
 static func build(tile: int, building: StringName) -> PackedByteArray:
 	return var_to_bytes([VERSION, Type.BUILD, tile, building])
+
+
+## One order for both, because changing either is the same manoeuvre. A width of 0
+## means "whatever this formation naturally wants".
+static func set_formation(ids: PackedInt32Array, shape: StringName, width: int) -> PackedByteArray:
+	return var_to_bytes([VERSION, Type.SET_FORMATION, ids, shape, width])
 
 
 # --- decoding -------------------------------------------------------------
@@ -64,6 +70,8 @@ static func decode(bytes: PackedByteArray) -> Dictionary:
 			return _decode_ready(d)
 		Type.BUILD:
 			return _decode_build(d)
+		Type.SET_FORMATION:
+			return _decode_set_formation(d)
 	return {}
 
 
@@ -123,6 +131,21 @@ static func _decode_build(d: Array) -> Dictionary:
 	if typeof(d[3]) != TYPE_STRING_NAME or not Rules.BUILDINGS.has(d[3]):
 		return {}
 	return {"type": Type.BUILD, "tile": d[2], "building": d[3]}
+
+
+static func _decode_set_formation(d: Array) -> Dictionary:
+	if d.size() != 5:
+		return {}
+	if typeof(d[2]) != TYPE_PACKED_INT32_ARRAY:
+		return {}
+	var ids: PackedInt32Array = d[2]
+	if ids.is_empty() or ids.size() > MAX_IDS_PER_ORDER:
+		return {}
+	if typeof(d[3]) != TYPE_STRING_NAME or not Rules.FORMATIONS.has(d[3]):
+		return {}
+	if typeof(d[4]) != TYPE_INT or d[4] < 0 or d[4] > Rules.MAX_WIDTH:
+		return {}
+	return {"type": Type.SET_FORMATION, "ids": ids, "formation": d[3], "width": d[4]}
 
 
 static func _is_tile(i: int) -> bool:
