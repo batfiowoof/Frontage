@@ -34,7 +34,14 @@ These are not style preferences. Breaking one costs a rewrite.
 
 	play.cmd            two windowed clients; the campaign is dealt once both are up
 	play.cmd demo       two windowed clients dropped straight into a staged battle,
-						for tuning how the battle feels to drive
+	                    for tuning how the battle feels to drive
+	play.cmd solo       one window, you against an AI opponent
+
+An AI is a seat with a NEGATIVE id, which no ENet peer can ever be, so it is a player
+everywhere that matters -- seating, colours, the end-turn ready check -- with no special
+case anywhere in the order pipeline. It submits encoded orders through the same
+`_receive_order` a remote packet lands in, so it passes the same validation a human does.
+`host(port, false)` runs the server without taking a seat, for watching AIs play.
 
 Campaign: left-click your army, click a tile to march, click your own settlement to
 recruit or build, End Turn bottom-right. The turn advances when every player has

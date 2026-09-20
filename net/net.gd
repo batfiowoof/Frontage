@@ -9,6 +9,7 @@ const Rules := preload("res://sim/rules.gd")
 const BattleState := preload("res://sim/battle_state.gd")
 const CampaignState := preload("res://sim/campaign_state.gd")
 const Autoresolve := preload("res://sim/autoresolve.gd")
+const Ai := preload("res://sim/ai.gd")
 const Regiment := preload("res://sim/regiment.gd")
 const Snapshot := preload("res://net/snapshot.gd")
 const Orders := preload("res://net/orders.gd")
@@ -16,6 +17,9 @@ const Orders := preload("res://net/orders.gd")
 const PORT := 7777
 const MAX_CLIENTS := 7
 const MAX_CATCHUP := 0.25          # seconds of simulation we will chew in one frame
+## How often an AI reconsiders a battle. Every tick would be pointless -- orders take
+## seconds to carry out -- and it would also thrash the order log.
+const AI_THINK_TICKS := 20
 
 signal battle_updated(battle)      # server: stepped. client: snapshot decoded.
 signal campaign_updated(campaign)  # turn-based, so this fires on every change
@@ -40,6 +44,12 @@ var _accum := 0.0
 var _since_snapshot := 0
 var _rng := RandomNumberGenerator.new()
 
+## AI seats. Keyed by a NEGATIVE id, which no ENet peer can ever be, so an AI is a
+## player everywhere that matters -- seating, colours, the end-turn ready check --
+## without any special case in the order pipeline.
+var _ais := {}                     # seat id -> Ai
+var _ai_ticks := 0
+
 ## While a battle runs the campaign is frozen. These remember what to put back.
 var _battle_armies := {}           # owner_id -> campaign army id
 var _battle_tile := -1
@@ -63,7 +73,10 @@ func my_id() -> int:
 	return multiplayer.get_unique_id() if multiplayer.has_multiplayer_peer() else 0
 
 
-func host(port := PORT) -> Error:
+## `as_player` false runs the server without taking a seat, which is what a machine
+## watching two AIs play needs -- otherwise the host holds a seat nobody is playing
+## and the end-turn ready check waits on it forever.
+func host(port := PORT, as_player := true) -> Error:
 	var peer := ENetMultiplayerPeer.new()
 	var err := peer.create_server(port, MAX_CLIENTS)
 	if err != OK:
@@ -71,7 +84,7 @@ func host(port := PORT) -> Error:
 	multiplayer.multiplayer_peer = peer
 	multiplayer.peer_connected.connect(_on_peer_connected)
 	multiplayer.peer_disconnected.connect(_on_peer_disconnected)
-	players = {1: "host"}
+	players = {1: "host"} if as_player else {}
 	players_changed.emit()
 	return OK
 
@@ -94,11 +107,28 @@ func player_ids() -> Array:
 	return ids
 
 
+## Server only. Add an AI player; call before start_campaign().
+func add_ai() -> int:
+	assert(is_server(), "only the server runs the opposition")
+	var seat := -1
+	while players.has(seat):
+		seat -= 1
+	players[seat] = "AI %d" % (-seat)
+	_ais[seat] = Ai.new(seat)
+	players_changed.emit()
+	return seat
+
+
+func ai_count() -> int:
+	return _ais.size()
+
+
 func close() -> void:
 	if multiplayer.has_multiplayer_peer():
 		multiplayer.multiplayer_peer.close()
 		multiplayer.multiplayer_peer = null
 	players.clear()
+	_ais.clear()
 	battle = null
 	campaign = null
 	running = false
@@ -160,7 +190,10 @@ func stop_battle() -> void:
 # --- simulation -----------------------------------------------------------
 
 func _process(delta: float) -> void:
-	if not running or battle == null or not is_server():
+	if not is_server():
+		return
+	_think_for_ais()
+	if not running or battle == null:
 		return
 	# A long frame (loading, a breakpoint) must not make us simulate for a minute
 	# afterwards; drop the excess rather than stall every client.
@@ -178,6 +211,26 @@ func _process(delta: float) -> void:
 			broadcast_battle()
 			_finish_battle()
 			return
+
+
+## Polled from _process rather than hung off campaign_updated: an AI order triggers
+## that signal, and an AI that thinks on its own output recurses until the stack ends.
+func _think_for_ais() -> void:
+	if _ais.is_empty():
+		return
+	if battle != null:
+		_ai_ticks += 1
+		if _ai_ticks < AI_THINK_TICKS:
+			return
+		_ai_ticks = 0
+		for seat in _ais:
+			for bytes: PackedByteArray in _ais[seat].battle_orders(battle):
+				_receive_order(seat, bytes)
+		return
+	if campaign != null:
+		for seat in _ais:
+			for bytes: PackedByteArray in _ais[seat].campaign_orders(campaign):
+				_receive_order(seat, bytes)
 
 
 func broadcast_battle() -> void:

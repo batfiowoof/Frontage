@@ -10,6 +10,7 @@ var _status: Label
 var _roster: Label
 var _address: LineEdit
 var _start: Button
+var _add_ai: Button
 var _autostart := false
 var _demo_battle := false
 
@@ -36,6 +37,10 @@ func _ready() -> void:
 		elif args[i] == "--demo-battle":
 			_autostart = true
 			_demo_battle = true
+		elif args[i] == "--ai" and i + 1 < args.size():
+			for n in int(args[i + 1]):
+				Net.add_ai()
+			_autostart = true
 
 
 ## Deal the campaign as soon as somebody else turns up.
@@ -83,6 +88,14 @@ func _build_lobby() -> void:
 	join.pressed.connect(_on_join)
 	box.add_child(join)
 
+	_add_ai = Button.new()
+	_add_ai.text = "Add AI opponent"
+	_add_ai.visible = false
+	_add_ai.pressed.connect(func() -> void:
+		Net.add_ai()
+		_refresh_lobby())
+	box.add_child(_add_ai)
+
 	_start = Button.new()
 	_start.text = "Start Campaign"
 	_start.visible = false
@@ -118,6 +131,7 @@ func _refresh_lobby() -> void:
 	# Solo start is allowed on purpose: it is the fastest way to check a change to
 	# the map or the economy without launching a second process.
 	_start.visible = Net.is_server() and Net.campaign == null
+	_add_ai.visible = _start.visible
 	var names := PackedStringArray()
 	for id: int in Net.player_ids():
 		names.append("player %d%s" % [id, "  (you)" if id == Net.my_id() else ""])

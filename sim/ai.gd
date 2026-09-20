@@ -1,0 +1,238 @@
+extends RefCounted
+## A crude opponent, so the game can be played and tuned by one person.
+##
+## It produces ORDERS and never touches the world. Every decision it makes is encoded
+## and fed through the same `_receive_order` a remote client's packet lands in, so it
+## passes the same shape validation and the same ownership checks a human does. That
+## is deliberate and stronger than it looks: if the AI cannot express something as a
+## legal order, neither could a player, and no AI mistake can corrupt the world.
+##
+## It holds a little memory of its own (which cavalry are mid-sweep, which turn it
+## last acted on). That is the AI's notebook, not world state -- nothing here is
+## authoritative and nothing here is on the wire.
+
+const Rules := preload("res://sim/rules.gd")
+const Campaign := preload("res://sim/campaign_state.gd")
+const Regiment := preload("res://sim/regiment.gd")
+const Formation := preload("res://sim/formation.gd")
+const Orders := preload("res://net/orders.gd")
+
+## Where an advancing line stops relative to the enemy: just inside contact, so it
+## arrives formed rather than trickling in one regiment at a time.
+const STANDOFF := 40.0
+const LINE_SPACING := 110.0
+## How far round the enemy a cavalry sweep goes before turning in.
+const SWEEP_WIDE := 420.0
+const SWEEP_DEPTH := 260.0
+const SWEEP_ARRIVED := 90.0
+## Close enough that a regiment should stop dressing its line and just go and hit
+## somebody. Without this the last few regiments stand in their slots a hundred
+## units to the side of the only remaining enemy, politely not joining in.
+const ENGAGE_RANGE := 320.0
+
+## Buildings it wants, cheapest first once it can afford them.
+const BUILD_ORDER := [&"barracks", &"farm", &"market", &"walls"]
+
+var seat := 0
+var _acted_on_turn := -1
+var _sweep_to := {}                # regiment id -> latched waypoint, or null once past it
+
+
+func _init(owner_id: int) -> void:
+	seat = owner_id
+
+
+# --- campaign -------------------------------------------------------------
+
+## One turn's worth of decisions, ending with End Turn.
+##
+## Whether it has finished its turn is read from the world, not remembered. Marching
+## can start a battle, and every order after that one -- including End Turn -- is
+## refused while the battle runs. An AI that trusted its own memory therefore thought
+## it had ended a turn it had not, and the game waited on it forever.
+func campaign_orders(cs) -> Array:
+	if cs == null or bool(cs.ready.get(seat, false)):
+		return []
+	var out := []
+	if cs.turn != _acted_on_turn:
+		_acted_on_turn = cs.turn          # spend money once a turn, not once a frame
+		_build_something(cs, out)
+		_recruit_something(cs, out)
+		_march(cs, out)
+	out.append(Orders.ready(true))
+	return out
+
+
+func _build_something(cs, out: Array) -> void:
+	var purse := int(cs.gold.get(seat, 0))
+	for s: Dictionary in cs.settlements:
+		if s["owner"] != seat:
+			continue
+		for building: StringName in BUILD_ORDER:
+			if s["buildings"].has(building):
+				continue
+			var cost := int(Rules.BUILDINGS[building]["cost"])
+			if purse >= cost:
+				out.append(Orders.build(s["tile"], building))
+				return                     # one a turn; the rest can wait for income
+
+
+func _recruit_something(cs, out: Array) -> void:
+	# Only raise what it can feed, or it starves itself into a rout on turn six.
+	if int(cs.food.get(seat, 0)) < cs.upkeep_of(seat):
+		return
+	var purse := int(cs.gold.get(seat, 0))
+	for s: Dictionary in cs.settlements:
+		if s["owner"] != seat:
+			continue
+		var best := &""
+		var best_cost := 0
+		for kind: StringName in cs.recruitable_at(s["tile"]):
+			var cost := int(Rules.KINDS[kind]["cost"])
+			if cost <= purse and cost > best_cost:
+				best = kind                # the best it can afford, not the cheapest
+				best_cost = cost
+		if best != &"":
+			out.append(Orders.recruit(s["tile"], best))
+			return
+
+
+func _march(cs, out: Array) -> void:
+	var target := _nearest_prize(cs)
+	if target < 0:
+		return
+	for id in cs.sorted_army_ids():
+		var a = cs.armies[id]
+		if a["owner"] == seat and a["move_left"] > 0:
+			out.append(Orders.army_move(id, target))
+
+
+## The nearest thing worth walking to: an enemy or neutral settlement.
+func _nearest_prize(cs) -> int:
+	var home := -1
+	for id in cs.sorted_army_ids():
+		if cs.armies[id]["owner"] == seat:
+			home = cs.armies[id]["tile"]
+			break
+	if home < 0:
+		return -1
+	var best := -1
+	var best_distance := 1 << 30
+	for s: Dictionary in cs.settlements:
+		if s["owner"] == seat:
+			continue
+		var d := _tile_distance(home, s["tile"])
+		if d < best_distance:
+			best_distance = d
+			best = s["tile"]
+	return best
+
+
+static func _tile_distance(a: int, b: int) -> int:
+	return absi(Campaign.tile_x(a) - Campaign.tile_x(b)) + absi(Campaign.tile_y(a) - Campaign.tile_y(b))
+
+
+# --- battle ---------------------------------------------------------------
+
+## Orders for this instant. Regiments already FIGHTING are left alone: re-issuing a
+## move order would set them back to MOVING and pull them out of the melee, so an AI
+## that "helpfully" re-ordered every second would never actually fight anybody.
+func battle_orders(bs) -> Array:
+	if bs == null:
+		return []
+	var mine := []
+	var foes := []
+	for id in bs.sorted_ids():
+		var r: Regiment = bs.regiments[id]
+		if not r.is_alive():
+			continue
+		if r.owner_id == seat:
+			mine.append(r)
+		elif r.state != Regiment.State.ROUTING:
+			# Broken regiments are not targets and must not count toward the enemy
+			# centre. Routers flee a thousand units in any direction, so averaging
+			# them in sent the whole line marching to an empty patch of field, where
+			# it arrived, stopped, and stood there while the battle never ended.
+			foes.append(r)
+	if mine.is_empty() or foes.is_empty():
+		return []
+
+	var enemy_centre := _centre(foes)
+	var my_centre := _centre(mine)
+	var approach := (enemy_centre - my_centre)
+	if approach.length_squared() < 1.0:
+		approach = Vector2.RIGHT
+	approach = approach.normalized()
+	var across := Vector2(-approach.y, approach.x)
+
+	var out := []
+	var foot := []
+	for r: Regiment in mine:
+		if float(Rules.KINDS[r.kind]["speed"]) >= 1.4:
+			_sweep(r, out, enemy_centre, approach, across)
+		else:
+			foot.append(r)
+
+	# Everything slow forms one line and walks at them -- unless somebody is already
+	# within reach, in which case it goes and fights instead of dressing ranks.
+	for i in foot.size():
+		var r: Regiment = foot[i]
+		if r.state != Regiment.State.IDLE and r.state != Regiment.State.MOVING:
+			continue
+		var near = _nearest(r, foes)
+		var target: Vector2
+		var face: float
+		if near != null and r.pos.distance_to(near.pos) < ENGAGE_RANGE:
+			target = near.pos
+			face = (near.pos - r.pos).angle()
+		else:
+			target = enemy_centre + across * (float(i) - float(foot.size() - 1) * 0.5) * LINE_SPACING
+			target -= approach * STANDOFF
+			face = approach.angle()
+		if r.pos.distance_to(target) > 20.0:
+			out.append(Orders.battle_move(PackedInt32Array([r.id]), target, face))
+	return out
+
+
+static func _nearest(r: Regiment, others: Array):
+	var best = null
+	var best_distance := INF
+	for o: Regiment in others:
+		var d := r.pos.distance_squared_to(o.pos)
+		if d < best_distance:
+			best_distance = d
+			best = o
+	return best
+
+
+## Cavalry goes round rather than into the front. Two stages, because a single order
+## at the enemy's back sends it straight through the melee it was supposed to avoid.
+##
+## The waypoint is LATCHED the first time. Recomputing it each second from a moving
+## enemy centre had the horse chasing a point that receded as fast as it rode, so it
+## circled the battle forever and the battle never ended.
+func _sweep(r: Regiment, out: Array, enemy_centre: Vector2, approach: Vector2, across: Vector2) -> void:
+	if r.state == Regiment.State.FIGHTING or r.state == Regiment.State.ROUTING:
+		return
+
+	if not _sweep_to.has(r.id):
+		var side: float = 1.0 if r.pos.dot(across) >= 0.0 else -1.0
+		_sweep_to[r.id] = enemy_centre + across * SWEEP_WIDE * side - approach * SWEEP_DEPTH * 0.2
+
+	var waypoint = _sweep_to[r.id]
+	if waypoint != null:
+		if r.pos.distance_to(waypoint) < SWEEP_ARRIVED:
+			_sweep_to[r.id] = null         # round the side; now turn in
+		else:
+			out.append(Orders.battle_move(PackedInt32Array([r.id]), waypoint, (waypoint - r.pos).angle()))
+			return
+
+	var behind: Vector2 = enemy_centre + approach * SWEEP_DEPTH
+	out.append(Orders.battle_move(PackedInt32Array([r.id]), behind, (enemy_centre - behind).angle()))
+
+
+static func _centre(regiments: Array) -> Vector2:
+	var sum := Vector2.ZERO
+	for r: Regiment in regiments:
+		sum += r.pos
+	return sum / float(regiments.size())
