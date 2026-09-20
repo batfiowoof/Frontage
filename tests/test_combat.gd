@@ -5,6 +5,7 @@ extends RefCounted
 const BattleState := preload("res://sim/battle_state.gd")
 const Regiment := preload("res://sim/regiment.gd")
 const Rules := preload("res://sim/rules.gd")
+const Formation := preload("res://sim/formation.gd")
 
 
 func _facing_each_other(gap := 30.0) -> Array:
@@ -74,17 +75,32 @@ func test_casualties_are_not_decided_by_regiment_id(t) -> void:
 	t.eq(bs.regiments[1].strength, bs.regiments[2].strength)
 
 
-func test_a_weakened_regiment_kills_more_slowly(t) -> void:
-	var strong := _facing_each_other()
-	_run(strong[0], Rules.TICK_HZ)
-	var losses_to_full: int = strong[1].max_strength - strong[1].strength
+func test_output_follows_frontage_not_headcount(t) -> void:
+	# Under frontage-limited combat a half-strength regiment still fills its front
+	# rank, so it hits just as hard. That is the point: attrition does not spiral.
+	var full := _facing_each_other()
+	_run(full[0], Rules.TICK_HZ * 20)
+	var losses_to_full: int = full[1].max_strength - full[1].strength
 
-	var weak := _facing_each_other()
-	weak[2].strength = int(weak[2].max_strength * 0.25)
-	_run(weak[0], Rules.TICK_HZ)
-	var losses_to_quarter: int = weak[1].max_strength - weak[1].strength
-	t.ok(losses_to_quarter < losses_to_full,
-		"a quarter-strength regiment should not hit as hard (%d vs %d)" % [losses_to_quarter, losses_to_full])
+	var half := _facing_each_other()
+	half[2].strength = int(half[2].max_strength / 2)
+	_run(half[0], Rules.TICK_HZ * 20)
+	var losses_to_half: int = half[1].max_strength - half[1].strength
+	t.eq(losses_to_half, losses_to_full, "half the men, same frontage, same output")
+
+
+func test_a_regiment_worn_below_its_frontage_hits_less_hard(t) -> void:
+	# Once there are fewer men than files, it cannot fill its own front any more.
+	var full := _facing_each_other()
+	_run(full[0], Rules.TICK_HZ * 20)
+	var losses_to_full: int = full[1].max_strength - full[1].strength
+
+	var remnant := _facing_each_other()
+	remnant[2].strength = 3                       # width is 12
+	_run(remnant[0], Rules.TICK_HZ * 20)
+	var losses_to_remnant: int = remnant[1].max_strength - remnant[1].strength
+	t.ok(losses_to_remnant < losses_to_full,
+		"a 3-man remnant cannot hit like a full front (%d vs %d)" % [losses_to_remnant, losses_to_full])
 
 
 # --- the flank ------------------------------------------------------------
@@ -118,26 +134,71 @@ func test_being_hit_in_the_rear_hurts_more_than_being_hit_in_the_front(t) -> voi
 		"and must cost more nerve (%.1f vs %.1f)" % [victim.morale, frontal_morale])
 
 
+## A victim pinned from the front and taken in the flank -- the actual manoeuvre.
+## A lone regiment attacked from the side is allowed to turn and face it, and should.
+func _pinned_and_flanked() -> Array:
+	var bs = BattleState.new()
+	var victim = bs.add(1, &"spear", Vector2.ZERO, 0.0)              # facing +X
+	bs.add(2, &"spear", Vector2(30, 0), PI)                          # pins its front
+	var flanker = bs.add(2, &"spear", Vector2(0, -30), PI / 2)       # hits its side
+	return [bs, victim, flanker]
+
+
 func test_a_flanked_regiment_breaks_before_a_fronted_one(t) -> void:
 	var front := _facing_each_other()
-	var flanked = BattleState.new()
-	var victim = flanked.add(1, &"spear", Vector2.ZERO, 0.0)
-	flanked.add(2, &"spear", Vector2(0, -25), PI / 2)                # from the side
+	var flank := _pinned_and_flanked()
 
 	var front_broke := -1
 	var flank_broke := -1
-	for i in Rules.TICK_HZ * 30:
+	for i in Rules.TICK_HZ * 200:
 		front[0].step()
-		flanked.step()
+		flank[0].step()
 		if front_broke < 0 and front[1].state == Regiment.State.ROUTING:
 			front_broke = i
-		if flank_broke < 0 and victim.state == Regiment.State.ROUTING:
+		if flank_broke < 0 and flank[1].state == Regiment.State.ROUTING:
 			flank_broke = i
 		if front_broke >= 0 and flank_broke >= 0:
 			break
-	t.ok(flank_broke >= 0, "a flanked regiment must eventually break")
+	t.ok(flank_broke >= 0, "a pinned and flanked regiment must break")
 	t.ok(front_broke < 0 or flank_broke < front_broke,
-		"and must break sooner than one fighting to its front (%d vs %d)" % [flank_broke, front_broke])
+		"and far sooner than one fighting only to its front (%.0fs vs %.0fs)" % [
+			flank_broke / float(Rules.TICK_HZ), front_broke / float(Rules.TICK_HZ)])
+	print("  [feel] pinned+flanked breaks at %.0fs; frontal %s" % [
+		flank_broke / float(Rules.TICK_HZ),
+		"never in 200s" if front_broke < 0 else "%.0fs" % (front_broke / float(Rules.TICK_HZ))])
+
+
+func test_a_pinned_regiment_keeps_facing_the_enemy_in_front(t) -> void:
+	var s := _pinned_and_flanked()
+	_run(s[0], Rules.TICK_HZ * 5)
+	t.ok(absf(angle_difference(s[1].facing, 0.0)) < deg_to_rad(40.0),
+		"it must not turn its back on the regiment pinning it")
+	t.eq(BattleState.exposure_of(s[1], s[2]), BattleState.Exposure.FLANK,
+		"so the flanker is still hitting a flank five seconds later")
+
+
+func test_a_lone_regiment_may_turn_to_meet_a_flanker(t) -> void:
+	var bs = BattleState.new()
+	var victim = bs.add(1, &"spear", Vector2.ZERO, 0.0)
+	var flanker = bs.add(2, &"spear", Vector2(0, -30), PI / 2)
+	for i in Rules.TICK_HZ * 40:
+		bs.step()
+	t.eq(BattleState.exposure_of(victim, flanker), BattleState.Exposure.FRONT,
+		"with nothing pinning it, it should eventually face the threat")
+
+
+func test_a_flank_kills_several_times_faster(t) -> void:
+	var front := _facing_each_other()
+	var flank := _pinned_and_flanked()
+	# Measured over 8s: a flanked regiment BREAKS at around eleven, and after that it
+	# is running rather than dying, so a longer window would measure its absence.
+	_run(front[0], Rules.TICK_HZ * 8)
+	_run(flank[0], Rules.TICK_HZ * 8)
+	var frontal: int = front[1].max_strength - front[1].strength
+	var flanked: int = flank[1].max_strength - flank[1].strength
+	t.ok(flanked > frontal * 2,
+		"a flank must be worth manoeuvring for (%d dead vs %d in 8s)" % [flanked, frontal])
+	print("  [feel] 8s of fighting: %d lost frontally, %d lost pinned+flanked" % [frontal, flanked])
 
 
 func test_a_regiment_wheels_to_face_its_attacker(t) -> void:
@@ -188,18 +249,30 @@ func test_routers_do_not_recover_while_being_chased(t) -> void:
 
 # --- the end --------------------------------------------------------------
 
-func test_a_battle_ends_when_one_side_will_not_stand(t) -> void:
+func test_an_even_fight_locks_instead_of_collapsing(t) -> void:
+	# The headline change. Two identical regiments head-on used to wipe each other out
+	# in under half a minute; now neither can break the other, and the fight has to be
+	# decided by something the player does.
 	var s := _facing_each_other()
-	t.ok(not s[0].is_over())
-	for i in Rules.TICK_HZ * 60:
+	_run(s[0], Rules.TICK_HZ * 60)
+	t.ok(not s[0].is_over(), "a head-on tie must still be a tie after a minute")
+	t.ok(s[1].strength > s[1].max_strength / 2, "and both sides must still be armies")
+	t.eq(s[1].strength, s[2].strength, "taking identical losses, as they should")
+	print("  [feel] 60s head-on: %d/%d men left, morale %.0f, stamina %.2f" % [
+		s[1].strength, s[1].max_strength, s[1].morale, s[1].stamina])
+
+
+func test_an_even_fight_still_ends_eventually(t) -> void:
+	# Locked is not the same as endless: attrition and exhaustion still get there.
+	var s := _facing_each_other()
+	var ticks := 0
+	for i in int(Rules.TICK_HZ * Rules.BATTLE_TIME_LIMIT):
 		s[0].step()
+		ticks = i
 		if s[0].is_over():
 			break
-	t.ok(s[0].is_over(), "an even fight still has to end within a minute")
-	# A perfectly mirrored fight breaks on the same tick for both sides, and a mutual
-	# collapse is the honest answer -- there is no tie-break in the rules and inventing
-	# one here would only hide it.
-	t.eq(s[0].winner(), 0, "nobody holds the field after a mutual collapse")
+	t.ok(s[0].is_over(), "it still has to finish inside the battle time limit")
+	print("  [feel] head-on tie resolves itself at %.0fs" % (ticks / float(Rules.TICK_HZ)))
 
 
 func test_the_stronger_side_carries_the_field(t) -> void:
@@ -226,3 +299,104 @@ func test_a_whole_battle_is_reproducible(t) -> void:
 		t.eq(first[0].regiments[id].strength, second[0].regiments[id].strength, "strength of %d" % id)
 		t.eq(first[0].regiments[id].pos, second[0].regiments[id].pos, "position of %d" % id)
 		t.near(first[0].regiments[id].morale, second[0].regiments[id].morale, 0.0001)
+
+
+# --- depth, stamina and relief --------------------------------------------
+
+func test_depth_buys_endurance(t) -> void:
+	# Same frontage, three times the men. Both take casualties at the same rate, so
+	# the deep one lasts about three times as long. This is what makes a formation
+	# decision matter and what stops a battle being decided in ten seconds.
+	var deep = BattleState.new()
+	var deep_block = deep.add(1, &"spear", Vector2(-15, 0), 0.0)
+	deep.add(2, &"spear", Vector2(15, 0), PI)
+
+	var thin = BattleState.new()
+	var thin_block = thin.add(1, &"spear", Vector2(-15, 0), 0.0)
+	thin_block.strength = thin_block.max_strength / 3
+	thin.add(2, &"spear", Vector2(15, 0), PI)
+
+	t.eq(Formation.files_across(deep_block.strength, deep_block.width),
+		Formation.files_across(thin_block.strength, thin_block.width), "same frontage")
+	t.ok(Formation.ranks_deep(deep_block.strength, deep_block.width)
+		> Formation.ranks_deep(thin_block.strength, thin_block.width), "different depth")
+
+	var deep_broke := -1
+	var thin_broke := -1
+	for i in Rules.TICK_HZ * 300:
+		deep.step()
+		thin.step()
+		if deep_broke < 0 and deep_block.state == Regiment.State.ROUTING:
+			deep_broke = i
+		if thin_broke < 0 and thin_block.state == Regiment.State.ROUTING:
+			thin_broke = i
+		if deep_broke >= 0 and thin_broke >= 0:
+			break
+	t.ok(thin_broke > 0, "the thin block should break inside 300s")
+	t.ok(deep_broke < 0 or deep_broke > thin_broke * 1.8,
+		"depth must buy real endurance (deep %.0fs vs thin %.0fs)" % [
+			deep_broke / float(Rules.TICK_HZ), thin_broke / float(Rules.TICK_HZ)])
+	print("  [feel] same frontage: 3-deep breaks at %.0fs, 10-deep at %s" % [
+		thin_broke / float(Rules.TICK_HZ),
+		"never in 300s" if deep_broke < 0 else "%.0fs" % (deep_broke / float(Rules.TICK_HZ))])
+
+
+func test_stamina_drains_in_melee_and_recovers_at_rest(t) -> void:
+	var s := _facing_each_other()
+	t.near(s[1].stamina, 1.0)
+	_run(s[0], Rules.TICK_HZ * 10)
+	var tired: float = s[1].stamina
+	t.ok(tired < 1.0, "ten seconds of melee should tell")
+	t.near(tired, 1.0 - Rules.STAMINA_DRAIN_FIGHTING * 10.0, 0.02)
+
+	s[1].order_move(Vector2(-3000, 0), PI)        # pull it out of the line
+	_run(s[0], Rules.TICK_HZ * 4)
+	t.eq(s[1].state, Regiment.State.MOVING, "a withdrawal order must survive contact")
+	_run(s[0], Rules.TICK_HZ * 90)
+	t.ok(s[1].stamina > tired, "and standing clear should give some of it back")
+
+
+func test_an_exhausted_regiment_hits_softer(t) -> void:
+	var fresh = Regiment.make(1, 1, &"spear", Vector2.ZERO)
+	var spent = Regiment.make(2, 1, &"spear", Vector2.ZERO)
+	spent.stamina = 0.0
+	t.near(fresh.readiness(), 1.0)
+	t.near(spent.readiness(), Rules.TIRED_EFFECTIVENESS)
+	t.ok(spent.readiness() < fresh.readiness() * 0.6, "exhaustion has to be worth avoiding")
+
+
+func test_relieving_a_tired_unit_turns_a_stalled_fight(t) -> void:
+	# The tie-breaker the whole milestone exists for: two lines locked, one side feeds
+	# in a fresh regiment and pulls the spent one out, and the balance actually moves.
+	var bs = BattleState.new()
+	var tired = bs.add(1, &"spear", Vector2(-15, 0), 0.0)
+	var enemy = bs.add(2, &"spear", Vector2(15, 0), PI)
+	var reserve = bs.add(1, &"spear", Vector2(-400, 0), 0.0)
+	_run(bs, Rules.TICK_HZ * 40)                  # both sides grind down
+
+	t.ok(tired.stamina < 0.5, "the front rank should be spent by now")
+	var enemy_before: int = enemy.strength
+
+	tired.order_move(Vector2(-600, 0), 0.0)       # withdraw the spent regiment
+	reserve.order_move(Vector2(15 - 25, 0), 0.0)  # feed the fresh one in
+	_run(bs, Rules.TICK_HZ * 30)
+
+	var enemy_losses: int = enemy_before - enemy.strength
+	t.ok(reserve.stamina > enemy.stamina, "the relief arrives fresher than what it faces")
+	t.ok(enemy_losses > 0, "and the fight goes on rather than stalling (%d lost)" % enemy_losses)
+	print("  [feel] after relief: reserve stamina %.2f vs enemy %.2f, enemy lost %d more" % [
+		reserve.stamina, enemy.stamina, enemy_losses])
+
+
+func test_contact_files_cannot_exceed_what_the_enemy_offers(t) -> void:
+	# Twenty files cannot all land on a two-file target, or a wide unit would delete
+	# a narrow one instantly instead of merely beating it.
+	var bs = BattleState.new()
+	var wide = bs.add(1, &"archer", Vector2(-15, 0), 0.0)        # width 16
+	var narrow = bs.add(2, &"sword", Vector2(15, 0), PI)         # width 10
+	narrow.strength = 4
+	var files := BattleState.contact_files(wide, narrow,
+		BattleState.Exposure.FRONT, BattleState.Exposure.FRONT)
+	t.ok(files <= ceili(4 * Rules.WRAP_ALLOWANCE),
+		"capped by the enemy's edge plus a lap round the ends, got %d" % files)
+	t.ok(files > 0, "but never nothing")

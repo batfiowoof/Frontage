@@ -63,10 +63,32 @@ means green. Add a test file to the `TESTS` list in `run.gd` to register it.
 ## Measured
 
 Snapshot cost with the `var_to_bytes` encoder (`tests/test_snapshot.gd` prints it):
-**128 B/regiment**, so 100 regiments = 12.8 KB/snapshot = 125 KB/s per client at 10 Hz.
-A realistic 40-regiment battle is ~50 KB/s per client. Fine on LAN, marginal over the
+**135 B/regiment**, so 100 regiments = 13.6 KB/snapshot = 133 KB/s per client at 10 Hz.
+A realistic 40-regiment battle is ~53 KB/s per client. Fine on LAN, marginal over the
 internet with several clients. Hand-roll a `PackedFloat32Array` codec (roughly halves it)
 when that number starts to hurt, delta encoding after that.
+
+## Combat model
+
+Battles are **frontage-limited**: output scales with the number of FILES in contact,
+never with how many men a regiment contains. A regiment at half strength still fills its
+front rank and hits just as hard; only one worn below its own width hits softer. Two
+things follow, and they are the whole shape of a fight:
+
+- Depth buys endurance, width buys output. Same casualties per second either way.
+- A head-on tie **cannot break itself**. It is broken by widening, wrapping a flank,
+  relieving a tired regiment, or shooting it.
+
+Two angles matter per strike, not one. How the *defender* is hit sets what it suffers;
+how the *attacker* stands sets how much of itself it can bring. That second one is what
+makes a flank one-sided rather than merely favourable.
+
+Measured (`tests/test_combat.gd` prints these):
+
+	head-on, 60s        94/120 men left, still locked
+	pinned + flanked    breaks at 11s, versus 75s frontally
+	8s of fighting      13 lost when flanked, 5 when fronted
+	same frontage       3-deep breaks at 32s, 10-deep at 75s
 
 ## Things that were not obvious
 
@@ -83,6 +105,17 @@ when that number starts to hurt, delta encoding after that.
   loaded later, at runtime.
 - `func f(): ... return null` infers the return type as `null`, and you cannot
   subscript that. Annotate `-> Variant`.
+- Contact stops a march INTO the enemy, not a march away from it. `_settle_state` used
+  to force FIGHTING every tick while in contact, which silently cancelled a withdrawal
+  order on the next tick and made relieving a tired regiment impossible.
+- A regiment fights whichever foe is most nearly in front of it, not whichever has the
+  lowest id. A unit pinned frontally must not turn its back to answer a flanker --
+  that is the entire reason pinning-and-flanking works.
+- Morale loss from casualties is measured against the men the regiment HAD when it was
+  hit, not its paper `max_strength`. Against max_strength a regiment already down to a
+  third felt each loss as lightly as a fresh one, so depth bought nothing.
+- Wheeling in contact runs at `ENGAGED_TURN_MULT`. At full turn speed a flanked
+  regiment simply faced its attacker within half a second and the flank evaporated.
 
 ## Deliberate shortcuts
 

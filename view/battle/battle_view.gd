@@ -119,7 +119,7 @@ func _pose_of(a, b, alpha: float) -> Dictionary:
 		out[id] = {
 			"pos": pos, "facing": facing, "owner": r.owner_id, "kind": r.kind,
 			"strength": r.strength, "max_strength": r.max_strength,
-			"morale": r.morale, "width": r.width, "state": r.state,
+			"morale": r.morale, "stamina": r.stamina, "width": r.width, "state": r.state,
 		}
 	return out
 
@@ -196,6 +196,13 @@ func _draw() -> void:
 		draw_rect(Rect2(top + Vector2(0, 5), bar), Color(0, 0, 0, 0.5))
 		draw_rect(Rect2(top + Vector2(0, 5), Vector2(bar.x * morale, bar.y)),
 			Color("d8c66a") if morale > 0.35 else Color("c25b3a"))
+
+		# Stamina, thinner and below: you need to see which of your regiments is
+		# spent, because relieving it is the way to break a locked line.
+		var stamina: float = clampf(p["stamina"], 0.0, 1.0)
+		draw_rect(Rect2(top + Vector2(0, 10), Vector2(bar.x, 3.0)), Color(0, 0, 0, 0.5))
+		draw_rect(Rect2(top + Vector2(0, 10), Vector2(bar.x * stamina, 3.0)),
+			Color("6fa8c9") if stamina > 0.3 else Color("8a6fc9"))
 
 	if _drag_select_from != Vector2.INF:
 		var box := Rect2(_drag_select_from, get_global_mouse_position() - _drag_select_from).abs()

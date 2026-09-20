@@ -13,6 +13,7 @@ var kind := &"spear"
 var strength := 0
 var max_strength := 0
 var morale := Rules.MORALE_MAX
+var stamina := 1.0
 var pos := Vector2.ZERO
 var facing := 0.0                  # radians; 0 = +X
 var width := Rules.DEFAULT_WIDTH
@@ -46,6 +47,19 @@ static func make(p_id: int, p_owner: int, p_kind: StringName, p_pos: Vector2, p_
 	return r
 
 
+## How hard it can still swing, 0..1, between exhausted and fresh.
+func readiness() -> float:
+	return lerpf(Rules.TIRED_EFFECTIVENESS, 1.0, clampf(stamina, 0.0, 1.0))
+
+
+func tire(amount: float) -> void:
+	stamina = maxf(0.0, stamina - amount)
+
+
+func rest(amount: float) -> void:
+	stamina = minf(1.0, stamina + amount)
+
+
 func is_alive() -> bool:
 	return state != State.DEAD
 
@@ -73,7 +87,12 @@ func take_casualties(n: int) -> int:
 		return 0
 	var lost := mini(n, strength)
 	strength -= lost
-	morale = maxf(0.0, morale - Rules.MORALE_DRAIN_PER_FRACTION * float(lost) / float(max_strength))
+	# Against the men it HAD when it was hit, not its paper strength. Measured against
+	# max_strength, a regiment already down to a third felt each loss as lightly as a
+	# fresh one, so a thin line endured exactly as long as a deep one and depth bought
+	# nothing. Losing a fifth of who is left is losing a fifth.
+	var had := maxi(1, strength + lost)
+	morale = maxf(0.0, morale - Rules.MORALE_DRAIN_PER_FRACTION * float(lost) / float(had))
 	if strength <= 0:
 		strength = 0
 		state = State.DEAD

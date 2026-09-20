@@ -30,6 +30,24 @@ static func offsets(count: int, width: int) -> PackedVector2Array:
 	return out
 
 
+## How many files a regiment presents to its front. A regiment worn below its
+## nominal width cannot fill its frontage any more and fights on a narrower one --
+## which is the only way attrition reduces a unit's output under frontage-limited
+## combat, and the reason a 120-man block and an 80-man block hit equally hard.
+static func files_across(count: int, width: int) -> int:
+	if count <= 0:
+		return 0
+	return clampi(width, 1, count)
+
+
+## How many ranks deep it stands: what it turns to face when hit from the side,
+## and the reason a deep formation endures where a wide one dies.
+static func ranks_deep(count: int, width: int) -> int:
+	if count <= 0:
+		return 0
+	return ceili(float(count) / float(clampi(width, 1, count)))
+
+
 ## Half-width of the formation's frontage, used for contact and flank tests.
 static func frontage(count: int, width: int) -> float:
 	if count <= 0:

@@ -11,6 +11,10 @@ const INTERP_DELAY_MS := 100               # client renders this far in the past
 # --- battle: movement ---------------------------------------------------
 const MOVE_SPEED := 70.0                   # world units / second
 const TURN_SPEED := 3.0                    # radians / second
+## A regiment locked in melee cannot pivot. Without this a flanked unit simply turns
+## to face in half a second and the flank becomes a frontal attack before it has cost
+## anybody anything -- which is precisely what made flanking decorative.
+const ENGAGED_TURN_MULT := 0.15
 const ARRIVE_EPSILON := 4.0
 const CONTACT_RANGE := 46.0                # centre-to-centre to count as engaged
 const ROUT_SPEED_MULT := 1.35              # routers run faster than they marched
@@ -19,10 +23,32 @@ const ROUT_SPEED_MULT := 1.35              # routers run faster than they marche
 const DEPLOY_SEPARATION := 520.0
 const DEPLOY_SPACING := 110.0
 ## A battle nobody can win still has to end, or the campaign never resumes.
-const BATTLE_TIME_LIMIT := 300.0
+const BATTLE_TIME_LIMIT := 420.0
 
 # --- battle: attrition --------------------------------------------------
-const KILLS_PER_SECOND := 5.0              # a full-strength regiment's output
+## Combat is frontage-limited: only the men who can physically reach the enemy
+## fight. Output scales with the number of FILES in contact, never with how many men
+## the regiment happens to contain.
+##
+## This is the whole shape of a battle. Because a wider unit is not a stronger unit
+## but a unit that kills faster and dies wider, and because depth costs nothing at
+## the fighting line, two identical regiments head-on take identical losses forever
+## and the tie cannot break itself. It is broken by widening, by wrapping a flank,
+## by relieving a tired unit, or by shooting it -- which is the point.
+const KILLS_PER_FILE_PER_SEC := 0.06
+
+## An attacker can reach a little way round the ends of a narrower enemy, but not
+## indefinitely: twenty files cannot all land on a two-file target.
+const WRAP_ALLOWANCE := 2.0
+
+## How much of itself a regiment can bring to bear, by the angle IT is fighting at.
+## Men facing the wrong way cannot fight, and this is what makes a flank one-sided
+## rather than merely favourable: the flanker fights with its whole front, the
+## flanked with the ends of its ranks at half effect.
+const RESPONSE_FRONT := 1.0
+const RESPONSE_FLANK := 0.5
+const RESPONSE_REAR := 0.2
+
 const FLANK_DAMAGE_MULT := 1.6
 const REAR_DAMAGE_MULT := 2.2
 ## A regiment that has broken cannot fight back, so chasing one down is nearly free.
@@ -30,19 +56,34 @@ const REAR_DAMAGE_MULT := 2.2
 ## which keeps the flank legible instead of resolving itself off-screen.
 const RUNDOWN_DAMAGE_MULT := 3.0
 
+# --- battle: stamina ----------------------------------------------------
+## The second half of why a tie breaks. Fighting tires a regiment, standing still
+## rests it, and a tired one hits at TIRED_EFFECTIVENESS. Pulling an exhausted unit
+## out of a locked line and feeding a fresh one in roughly doubles that stretch of
+## the line, which is a decision rather than a click.
+## Resting is slower than tiring on purpose: relief is worth something because it
+## cannot be done twice in a hurry.
+const STAMINA_DRAIN_FIGHTING := 0.03       # ~33s of melee to exhaust
+const STAMINA_RECOVERY := 0.015            # ~67s standing to recover
+const TIRED_EFFECTIVENESS := 0.45
+
 # --- battle: morale -----------------------------------------------------
+## Frontal shock is deliberately tiny. At 3.0/s a head-on fight broke somebody in
+## under thirty seconds no matter what either player did, which is exactly the
+## mutual collapse that made battles feel wrong. Breaking a formed enemy from the
+## front should take minutes; from the flank, seconds.
 const MORALE_MAX := 100.0
 const MORALE_ROUT_THRESHOLD := 20.0
 const MORALE_RALLY_THRESHOLD := 45.0
-const MORALE_DRAIN_FIGHTING := 3.0         # per second while engaged frontally
-const MORALE_DRAIN_FLANKED := 9.0          # per second while engaged from the side
-const MORALE_DRAIN_REAR := 16.0            # per second while engaged from behind
+const MORALE_DRAIN_FIGHTING := 0.6         # per second while engaged frontally
+const MORALE_DRAIN_FLANKED := 5.0          # per second while engaged from the side
+const MORALE_DRAIN_REAR := 12.0            # per second while engaged from behind
 ## Morale lost for losing the WHOLE regiment, scaled by the fraction actually lost.
 ## Per-man drain would be scale-dependent: a 12-man skirmisher and a 120-man block
 ## would break at wildly different casualty rates, and big blocks would never break
 ## at all — they would die first, which deletes morale as a mechanic.
 ## At 200, a regiment routs at roughly 40% losses.
-const MORALE_DRAIN_PER_FRACTION := 200.0
+const MORALE_DRAIN_PER_FRACTION := 120.0
 const MORALE_RECOVERY := 4.0               # per second while idle and unengaged
 
 # --- battle: geometry ---------------------------------------------------

@@ -5,6 +5,7 @@ extends RefCounted
 
 const Rules := preload("res://sim/rules.gd")
 const Regiment := preload("res://sim/regiment.gd")
+const Formation := preload("res://sim/formation.gd")
 
 enum Exposure { FRONT, FLANK, REAR }
 
@@ -134,20 +135,60 @@ func _settle_state(r: Regiment, foes: Array) -> void:
 			r.target = r.pos
 		r.engaged_with = -1
 		return
-	r.engaged_with = foes[0]
-	if r.state != Regiment.State.ROUTING:
-		# Contact stops a march. The player can always order it to disengage again.
-		r.state = Regiment.State.FIGHTING
-		r.target = r.pos
+	r.engaged_with = _primary_foe(r, foes)
+	if r.state == Regiment.State.ROUTING:
+		return
+	# Contact stops a march -- but only a march INTO the enemy. A regiment ordered
+	# away from the fight is disengaging, and forcing it back into FIGHTING every
+	# tick silently cancelled the order, which made relieving a tired unit impossible
+	# and quietly deleted the tactic frontage-limited combat exists to create.
+	# It still takes hits while it pulls back, and it turns its back to do it.
+	if r.state == Regiment.State.MOVING and _withdrawing(r, foes):
+		return
+	r.state = Regiment.State.FIGHTING
+	r.target = r.pos
+
+
+func _withdrawing(r: Regiment, foes: Array) -> bool:
+	var foe = regiments.get(r.engaged_with)
+	if foe == null:
+		return false
+	var away := r.target - r.pos
+	if away.length_squared() < 1.0:
+		return false
+	return away.normalized().dot((foe.pos - r.pos).normalized()) < 0.0
+
+
+## The enemy a regiment considers itself to be fighting: the one most nearly in
+## front of it. A unit pinned from the front does not turn its back on that enemy to
+## answer a flanker, which is the whole reason pinning-and-flanking works.
+func _primary_foe(r: Regiment, foes: Array) -> int:
+	var best: int = foes[0]
+	var best_off := TAU
+	for id: int in foes:
+		var foe = regiments.get(id)
+		if foe == null:
+			continue
+		var off := absf(angle_difference(r.facing, (foe.pos - r.pos).angle()))
+		if off < best_off:
+			best_off = off
+			best = id
+	return best
 
 
 func _accumulate_strike(attacker: Regiment, defender: Regiment, dt: float, kills: Dictionary, shocks: Dictionary) -> void:
 	if not attacker.is_alive() or attacker.state == Regiment.State.ROUTING:
 		return                             # a broken regiment does not swing back
-	var exposure := exposure_of(defender, attacker)
+
+	# Two angles matter, not one. How the DEFENDER is hit decides what it suffers;
+	# how the ATTACKER stands decides how much of itself it can bring. That second
+	# one is what makes a flank one-sided instead of merely favourable.
+	var hit_from := exposure_of(defender, attacker)
+	var swinging_from := exposure_of(attacker, defender)
+
 	var damage_mult := 1.0
 	var morale_drain := Rules.MORALE_DRAIN_FIGHTING
-	match exposure:
+	match hit_from:
 		Exposure.FLANK:
 			damage_mult = Rules.FLANK_DAMAGE_MULT
 			morale_drain = Rules.MORALE_DRAIN_FLANKED
@@ -157,10 +198,38 @@ func _accumulate_strike(attacker: Regiment, defender: Regiment, dt: float, kills
 	if defender.state == Regiment.State.ROUTING:
 		damage_mult *= Rules.RUNDOWN_DAMAGE_MULT
 
-	var output := Rules.KILLS_PER_SECOND * attacker.fraction() * damage_mult * dt
+	var files := contact_files(attacker, defender, swinging_from, hit_from)
+	var output := Rules.KILLS_PER_FILE_PER_SEC * float(files) * response_of(swinging_from)
+	output *= attacker.readiness() * damage_mult * dt
 	output *= 1.0 - clampf(defender.defense, 0.0, 0.9)
+
 	kills[defender.id] = float(kills.get(defender.id, 0.0)) + output
 	shocks[defender.id] = float(shocks.get(defender.id, 0.0)) + morale_drain * dt
+
+
+## How many files a regiment can turn toward an enemy at this angle. Frontally it
+## fights on its full width; from the side or behind, only the ends of its ranks.
+static func files_engaged(r: Regiment, exposure: Exposure) -> int:
+	if exposure == Exposure.FRONT:
+		return Formation.files_across(r.strength, r.width)
+	return Formation.ranks_deep(r.strength, r.width)
+
+
+## Men fight only where the formations actually touch, so an attacker cannot bring
+## more files than the defender offers edge for -- plus a little for lapping round
+## the ends of a narrower enemy.
+static func contact_files(attacker: Regiment, defender: Regiment, swinging_from: Exposure, hit_from: Exposure) -> int:
+	var brought := files_engaged(attacker, swinging_from)
+	var offered := files_engaged(defender, hit_from)
+	return mini(brought, maxi(1, ceili(float(offered) * Rules.WRAP_ALLOWANCE)))
+
+
+static func response_of(exposure: Exposure) -> float:
+	if exposure == Exposure.FLANK:
+		return Rules.RESPONSE_FLANK
+	if exposure == Exposure.REAR:
+		return Rules.RESPONSE_REAR
+	return Rules.RESPONSE_FRONT
 
 
 ## Where is `attacker` hitting `defender` from, relative to the way it is facing?
@@ -183,14 +252,14 @@ func _step_regiment(r: Regiment, dt: float) -> void:
 		Regiment.State.IDLE:
 			if r.engaged_with == -1:
 				r.recover(Rules.MORALE_RECOVERY * dt)
+				r.rest(Rules.STAMINA_RECOVERY * dt)
 			_turn_toward(r, r.target_facing, dt)
 		Regiment.State.FIGHTING:
-			# Turn to face whoever it is fighting: a regiment that has noticed an
-			# attack from the side will try to wheel, which is what makes a flank a
-			# race rather than an instant loss.
+			r.tire(Rules.STAMINA_DRAIN_FIGHTING * dt)
+			# Wheeling in contact is slow, so a flank is a race the victim can lose.
 			var foe = regiments.get(r.engaged_with)
 			if foe != null:
-				_turn_toward(r, (foe.pos - r.pos).angle(), dt)
+				_turn_toward(r, (foe.pos - r.pos).angle(), dt * Rules.ENGAGED_TURN_MULT)
 
 
 func _advance(r: Regiment, dt: float) -> void:

@@ -16,7 +16,7 @@ const BattleState := preload("res://sim/battle_state.gd")
 const CampaignState := preload("res://sim/campaign_state.gd")
 const Rules := preload("res://sim/rules.gd")
 
-const VERSION := 1
+const VERSION := 2
 
 ## Field order on the wire.  Add a field here and the round-trip test covers it.
 const REGIMENT_FIELDS := [
@@ -26,6 +26,7 @@ const REGIMENT_FIELDS := [
 	["strength", TYPE_INT],
 	["max_strength", TYPE_INT],
 	["morale", TYPE_FLOAT],
+	["stamina", TYPE_FLOAT],
 	["pos", TYPE_VECTOR2],
 	["facing", TYPE_FLOAT],
 	["width", TYPE_INT],
