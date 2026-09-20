@@ -9,6 +9,15 @@ const Formation := preload("res://sim/formation.gd")
 
 enum Exposure { FRONT, FLANK, REAR }
 
+## Which edge of a regiment an attack lands on. Combat only cares whether that is the
+## front, a flank or the back, but the men need to know WHICH flank, so they die on the
+## side being hit and the block is eaten from there.
+##
+## LEFT is the low-file end of the line and RIGHT the high-file end. A regiment's local
+## +Y runs toward higher files, so an attacker at a positive angle from its facing is
+## standing off its RIGHT.
+enum Side { FRONT, LEFT, RIGHT, REAR }
+
 var tick := 0
 var regiments := {}                # id -> Regiment
 var _next_id := 1
@@ -251,12 +260,28 @@ static func response_of(exposure: Exposure) -> float:
 
 
 ## Where is `attacker` hitting `defender` from, relative to the way it is facing?
-static func exposure_of(defender: Regiment, attacker: Regiment) -> Exposure:
+## Returns a `Side`. Typed as int because GDScript will not let a static function
+## hand its own script's enum to another function in the same script.
+static func side_of(defender: Regiment, attacker: Regiment) -> int:
 	var bearing := (attacker.pos - defender.pos).angle()
-	var off := absf(angle_difference(defender.facing, bearing))
-	if off <= Rules.FLANK_ANGLE:
+	var off := angle_difference(defender.facing, bearing)
+	var away := absf(off)
+	if away <= Rules.FLANK_ANGLE:
+		return Side.FRONT
+	if away >= Rules.REAR_ANGLE:
+		return Side.REAR
+	return Side.RIGHT if off > 0.0 else Side.LEFT
+
+
+## What the fight cares about. Both flanks are the same to the damage maths, which is
+## why this is a view of `side_of` rather than a second angle calculation.
+static func exposure_of(defender: Regiment, attacker: Regiment) -> Exposure:
+	var side := side_of(defender, attacker)
+	if side == Side.FRONT:
 		return Exposure.FRONT
-	return Exposure.FLANK if off <= Rules.REAR_ANGLE else Exposure.REAR
+	if side == Side.REAR:
+		return Exposure.REAR
+	return Exposure.FLANK
 
 
 # --- movement -------------------------------------------------------------

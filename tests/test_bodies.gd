@@ -6,16 +6,42 @@ const Bodies := preload("res://view/battle/bodies.gd")
 const Formation := preload("res://sim/formation.gd")
 const Regiment := preload("res://sim/regiment.gd")
 const Rules := preload("res://sim/rules.gd")
+const BattleState := preload("res://sim/battle_state.gd")
 
 const ID := 7
 
 
-func _pose(strength: int, pos := Vector2.ZERO, facing := 0.0) -> Dictionary:
+func _pose(strength: int, pos := Vector2.ZERO, facing := 0.0, hits := [],
+		state := Regiment.State.FIGHTING, width := 12) -> Dictionary:
 	return {ID: {
 		"pos": pos, "facing": facing, "owner": 1, "kind": &"spear",
 		"strength": strength, "max_strength": 120, "morale": 100.0,
-		"stamina": 1.0, "width": 12, "state": Regiment.State.FIGHTING,
+		"stamina": 1.0, "width": width, "state": state, "hits": hits,
 	}}
+
+
+func _front_men(men) -> Array:
+	var out := []
+	for man in men.places(ID):
+		if men.places(ID)[man].y == 0:
+			out.append(man)
+	out.sort()
+	return out
+
+
+func _deepest(men) -> int:
+	var worst := 0
+	for place in men.places(ID).values():
+		worst = maxi(worst, place.y)
+	return worst
+
+
+func _men_at_depth(men, d: int) -> int:
+	var n := 0
+	for place in men.places(ID).values():
+		if place.y == d:
+			n += 1
+	return n
 
 
 func _settle(men, strength: int, seconds := 3.0) -> void:
@@ -182,3 +208,167 @@ func test_a_full_battle_of_men_fits_in_a_frame(t) -> void:
 	print("  [perf] 16 regiments x 120 men: %.2f ms/frame (%d bodies)" % [per_frame, 16 * 120])
 	t.ok(per_frame < 16.0,
 		"1920 bodies must fit in a 60fps frame, took %.2f ms" % per_frame)
+
+
+# --- the file steps up ----------------------------------------------------
+
+func test_the_man_directly_behind_steps_into_the_gap(t) -> void:
+	var men = Bodies.new()
+	men.build(_pose(120), [1], 0.016)
+	var before: Dictionary = men.places(ID)
+
+	men.build(_pose(119), [1], 0.016)              # exactly one casualty
+	var after: Dictionary = men.places(ID)
+	t.eq(after.size(), 119)
+
+	var fallen := -1
+	for man in before:
+		if not after.has(man):
+			fallen = man
+	t.ok(fallen >= 0, "somebody died")
+	var lost: Vector2i = before[fallen]
+	t.eq(lost.y, 0, "and he was standing at the head of his file")
+
+	# The man who was immediately behind him is now standing in his place.
+	var heir := -1
+	for man in before:
+		if before[man] == Vector2i(lost.x, 1):
+			heir = man
+	t.ok(heir >= 0, "there was a man behind him")
+	if heir >= 0:
+		t.eq(after[heir], Vector2i(lost.x, 0),
+			"the man DIRECTLY BEHIND takes his place, not one from along the rank")
+
+
+func test_a_death_leaves_every_other_file_exactly_where_it_was(t) -> void:
+	var men = Bodies.new()
+	men.build(_pose(120), [1], 0.016)
+	var before: Dictionary = men.places(ID)
+	men.build(_pose(119), [1], 0.016)
+	var after: Dictionary = men.places(ID)
+
+	var lost_file := -1
+	for man in before:
+		if not after.has(man):
+			lost_file = before[man].x
+	for man in after:
+		if before[man].x != lost_file:
+			t.eq(after[man], before[man],
+				"a man in another file must not so much as shuffle (man %d)" % man)
+
+
+func test_a_worn_regiment_keeps_a_full_front_rank(t) -> void:
+	var men = Bodies.new()
+	men.build(_pose(120), [1], 0.016)
+	for strength in [100, 80, 60, 40, 24]:
+		men.build(_pose(strength), [1], 0.016)
+		t.eq(_front_men(men).size(), 12,
+			"all twelve files should still have a man in the line at %d" % strength)
+
+
+func test_the_line_stays_dressed_as_it_is_worn_down(t) -> void:
+	var men = Bodies.new()
+	men.build(_pose(120), [1], 0.016)
+	for strength in range(119, 47, -1):
+		men.build(_pose(strength), [1], 0.016)
+	var per_file: PackedInt32Array = men.men_per_file(ID)
+	var deepest := 0
+	var shallowest := 1 << 20
+	for n in per_file:
+		deepest = maxi(deepest, n)
+		shallowest = mini(shallowest, n)
+	t.ok(deepest - shallowest <= 2,
+		"the file-closer should keep the files within a man or two (%d vs %d)" % [deepest, shallowest])
+
+
+# --- hit from every side --------------------------------------------------
+
+func test_a_flank_attack_eats_the_block_from_that_side(t) -> void:
+	var men = Bodies.new()
+	men.build(_pose(120), [1], 0.016)
+	for strength in range(119, 99, -1):
+		men.build(_pose(strength, Vector2.ZERO, 0.0, [BattleState.Side.LEFT]), [1], 0.016)
+
+	var per_file: PackedInt32Array = men.men_per_file(ID)
+	t.eq(per_file[0], 0, "the file on the struck side should be gone")
+	t.eq(per_file[11], 10, "and the far side untouched")
+
+
+func test_the_other_flank_eats_the_other_side(t) -> void:
+	var men = Bodies.new()
+	men.build(_pose(120), [1], 0.016)
+	for strength in range(119, 99, -1):
+		men.build(_pose(strength, Vector2.ZERO, 0.0, [BattleState.Side.RIGHT]), [1], 0.016)
+
+	var per_file: PackedInt32Array = men.men_per_file(ID)
+	t.eq(per_file[11], 0, "struck from the other side, the other end goes")
+	t.eq(per_file[0], 10)
+
+
+func test_a_rear_attack_takes_men_off_the_back(t) -> void:
+	var men = Bodies.new()
+	men.build(_pose(120), [1], 0.016)
+	var front_before := _front_men(men)
+	var rear_rank := _deepest(men)
+	var rear_before := _men_at_depth(men, rear_rank)
+
+	for strength in range(119, 99, -1):
+		men.build(_pose(strength, Vector2.ZERO, 0.0, [BattleState.Side.REAR]), [1], 0.016)
+
+	t.eq(_front_men(men), front_before,
+		"nobody in the front rank should have died to an attack from behind")
+	t.ok(_men_at_depth(men, rear_rank) < rear_before,
+		"the back rank is where the losses land (%d men there, was %d)" % [
+			_men_at_depth(men, rear_rank), rear_before])
+	t.eq(men.men_per_file(ID).size(), 12, "and the block is no narrower for it")
+
+
+func test_a_frontal_attack_changes_who_is_standing_in_the_line(t) -> void:
+	var men = Bodies.new()
+	men.build(_pose(120), [1], 0.016)
+	var front_before := _front_men(men)
+	for strength in range(119, 99, -1):
+		men.build(_pose(strength, Vector2.ZERO, 0.0, [BattleState.Side.FRONT]), [1], 0.016)
+	t.ok(_front_men(men) != front_before,
+		"the men who were at the front should be the ones who fell")
+
+
+# --- relief ---------------------------------------------------------------
+
+func test_fighting_men_are_relieved_through_the_line(t) -> void:
+	var men = Bodies.new()
+	men.build(_pose(120), [1], 0.016)
+	var front_before := _front_men(men)
+	for i in int((Bodies.RELIEF_INTERVAL * 3.0) * 60.0):
+		men.build(_pose(120), [1], 1.0 / 60.0)
+	t.eq(men.living(ID), 120, "relief kills nobody")
+	t.ok(_front_men(men) != front_before,
+		"after a few minutes of fighting the same men should not still be at the front")
+
+
+func test_a_regiment_standing_idle_does_not_rotate(t) -> void:
+	var men = Bodies.new()
+	men.build(_pose(120, Vector2.ZERO, 0.0, [], Regiment.State.IDLE), [1], 0.016)
+	var front_before := _front_men(men)
+	for i in int((Bodies.RELIEF_INTERVAL * 3.0) * 60.0):
+		men.build(_pose(120, Vector2.ZERO, 0.0, [], Regiment.State.IDLE), [1], 1.0 / 60.0)
+	t.eq(_front_men(men), front_before, "nobody swaps places when there is nothing to do")
+
+
+# --- re-forming, which M17 hands to the player ----------------------------
+
+func test_changing_frontage_makes_the_men_walk_rather_than_teleport(t) -> void:
+	var men = Bodies.new()
+	_settle(men, 120)
+	var before: Vector2 = men.centre_of(ID, Vector2.ZERO)
+
+	men.build(_pose(120, Vector2.ZERO, 0.0, [], Regiment.State.IDLE, 20), [1], 1.0 / 60.0)
+	t.eq(men.living(ID), 120, "re-forming loses nobody")
+	t.ok(men.centre_of(ID, Vector2.ZERO).distance_to(before) < 12.0,
+		"one frame into a new frontage they should have barely moved")
+
+	for i in 240:
+		men.build(_pose(120, Vector2.ZERO, 0.0, [], Regiment.State.IDLE, 20), [1], 1.0 / 60.0)
+	var per_file: PackedInt32Array = men.men_per_file(ID)
+	t.eq(per_file.size(), 20, "and then they are standing twenty across")
+	t.eq(per_file[0], 6, "120 men in 20 files is six deep")

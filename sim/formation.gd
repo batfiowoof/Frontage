@@ -8,6 +8,19 @@ extends RefCounted
 const Rules := preload("res://sim/rules.gd")
 
 
+## Where the man standing in (file, depth) belongs, in the regiment's local space.
+##
+## Files are straight columns front to back. That is not a detail: a file was the
+## fundamental unit of a real formation, and it is why a man's lateral place never
+## shifts as the ranks behind him thin out. `offsets()` below re-centres a partial rear
+## rank, which is the right answer for laying out a block from scratch and the wrong one
+## for men who are standing somewhere already.
+static func slot(file: int, depth: int, width: int, ranks: int) -> Vector2:
+	var x := (float(ranks - 1) * 0.5 - float(depth)) * Rules.RANK_SPACING
+	var y := (float(file) - float(width - 1) * 0.5) * Rules.FILE_SPACING
+	return Vector2(x, y)
+
+
 ## Offsets for `count` men in a formation `width` men wide, centred on (0, 0).
 static func offsets(count: int, width: int) -> PackedVector2Array:
 	var out := PackedVector2Array()

@@ -457,3 +457,29 @@ func test_two_blocks_charging_stop_with_their_fronts_touching(t) -> void:
 		"centres at least two half-depths apart (%.0f vs %.0f)" % [a.pos.distance_to(b.pos), depth * 2.0])
 	print("  [feel] two blocks meet: centres %.0f apart, front gap %.1f" % [
 		a.pos.distance_to(b.pos), gap])
+
+
+func test_side_of_tells_the_two_flanks_apart(t) -> void:
+	var bs = BattleState.new()
+	var d = bs.add(1, &"spear", Vector2.ZERO, 0.0)        # facing +X
+	var ahead = bs.add(2, &"spear", Vector2(200, 0), PI)
+	var behind = bs.add(2, &"spear", Vector2(-200, 0), 0.0)
+	# Local +Y runs toward higher files, so an enemy at +Y is off the regiment's RIGHT.
+	var right = bs.add(2, &"spear", Vector2(0, 200), -PI / 2)
+	var left = bs.add(2, &"spear", Vector2(0, -200), PI / 2)
+
+	t.eq(BattleState.side_of(d, ahead), BattleState.Side.FRONT)
+	t.eq(BattleState.side_of(d, behind), BattleState.Side.REAR)
+	t.eq(BattleState.side_of(d, right), BattleState.Side.RIGHT)
+	t.eq(BattleState.side_of(d, left), BattleState.Side.LEFT)
+
+
+func test_both_flanks_are_the_same_to_the_damage_maths(t) -> void:
+	# The men care which flank; the fight does not. If these ever disagree, one side of
+	# a regiment is quietly tougher than the other.
+	var bs = BattleState.new()
+	var d = bs.add(1, &"spear", Vector2.ZERO, 0.0)
+	var right = bs.add(2, &"spear", Vector2(0, 200), -PI / 2)
+	var left = bs.add(2, &"spear", Vector2(0, -200), PI / 2)
+	t.eq(BattleState.exposure_of(d, right), BattleState.Exposure.FLANK)
+	t.eq(BattleState.exposure_of(d, left), BattleState.Exposure.FLANK)

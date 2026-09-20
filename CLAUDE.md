@@ -107,21 +107,46 @@ Measured (`tests/test_combat.gd` prints these):
 
 ## The men
 
-`view/battle/bodies.gd` draws the soldiers, and the whole mechanism is one line of
-bookkeeping: living soldier `i` stands in slot `i`, slots run **front rank first**, and
-casualties are removed from the FRONT of the array. Everyone behind a hole shifts down an
-index, so his target slot moves one place forward and the block steps up into the gap.
-Depth is lost from the back and the fighting line holds its ground.
+`view/battle/bodies.gd` draws the soldiers, and everything in it is built on the **file**
+-- the column running front to back -- because that was the fundamental unit of a real
+formation, not the rank. A man is stored as `(file, depth)`, never as an index into a
+flat array, and one rule covers every case:
+
+> A man falls and the man **directly behind him in his own file** steps into his place.
+> Everyone further back in that file closes up. No other file moves at all.
+
+What changes with the angle of attack is only which man was standing in the way:
+
+	front   the head of a file, so the file collapses forward
+	rear    the tail of a file, so the file simply shortens
+	flank   anywhere down the file at the struck end of the line, eaten inward
+
+`BattleState.side_of()` gives FRONT / LEFT / RIGHT / REAR; `exposure_of()` is a view of it
+that folds both flanks together, so the men know which flank while the damage maths does
+not care. The engaged edges are worked out on the client from the mirror it already holds
+and never go on the wire -- they decide which men fall, which is decoration.
+
+Two more behaviours, both from how real formations worked:
+
+- **The line is dressed.** After a frontal casualty a man crosses from the deepest file to
+  the shallowest, so an emptied file does not leave a permanent hole. Not done after a
+  flank or rear attack: the block has genuinely been eaten from that side and evening it
+  up would undo the damage.
+- **Men are relieved.** While fighting, a file rotates every `RELIEF_INTERVAL` seconds --
+  front man to the back, everyone else up one. Cosmetic, and it is what makes a held line
+  look like men working rather than a diagram.
 
 Slots come from `max_strength`, computed once. Recomputing them from current strength --
-which is what it used to do -- walked a regiment's drawn front rank backwards by 22 units
-as it bled, so the men retreated from the fight they were in.
+which this used to do -- walked a regiment's drawn front rank backwards by 22 units as it
+bled, so the men retreated from the fight they were in. Keying men by array index -- which
+it also used to do -- made the man to the LEFT inherit a dead man's place instead of the
+man behind him, so the block rippled sideways and nobody stepped forward.
 
 Men chase their slots in **world** space, not local, so a regiment that turns or marches
 drags them after it and they catch up. Easing in local space rotates the block rigidly,
 which is the glued look.
 
-Measured: 16 regiments x 120 men costs **2.46 ms/frame**, about 15% of a 60fps budget.
+Measured: 16 regiments x 120 men costs **3.25 ms/frame**, about 20% of a 60fps budget.
 `tests/test_bodies.gd` prints it. If it ever stops fitting, the integration moves to a
 shader rather than the look being abandoned.
 

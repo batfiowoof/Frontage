@@ -106,10 +106,42 @@ func _display_state() -> Dictionary:
 	return _pose_of(older["state"], newer["state"], alpha)
 
 
+## Which edges each regiment is currently taking hits on, worked out from the mirror
+## we already hold. Nothing new goes on the wire for this: it decides which men fall and
+## which way the block is eaten, and that is decoration.
+##
+## ponytail: O(n^2) over the pairs, twice a frame. Fold it into one pass a snapshot if a
+## battle ever gets big enough for it to show.
+static func _sides_under_attack(state) -> Dictionary:
+	var out := {}
+	var ids: Array = state.sorted_ids()
+	for i in ids.size():
+		var d = state.regiments[ids[i]]
+		if not d.is_alive():
+			continue
+		for j in range(i + 1, ids.size()):
+			var e = state.regiments[ids[j]]
+			if not e.is_alive() or e.owner_id == d.owner_id:
+				continue
+			if BattleState.gap_between(d, e) > Rules.CONTACT_GAP:
+				continue
+			_note(out, d.id, BattleState.side_of(d, e))
+			_note(out, e.id, BattleState.side_of(e, d))
+	return out
+
+
+static func _note(out: Dictionary, id: int, side: int) -> void:
+	if not out.has(id):
+		out[id] = []
+	if not out[id].has(side):
+		out[id].append(side)
+
+
 func _pose_of(a, b, alpha: float) -> Dictionary:
 	var out := {}
 	if a == null:
 		return out
+	var hits := _sides_under_attack(a)
 	for id in a.sorted_ids():
 		var r = a.regiments[id]
 		var pos: Vector2 = r.pos
@@ -122,6 +154,7 @@ func _pose_of(a, b, alpha: float) -> Dictionary:
 			"pos": pos, "facing": facing, "owner": r.owner_id, "kind": r.kind,
 			"strength": r.strength, "max_strength": r.max_strength,
 			"morale": r.morale, "stamina": r.stamina, "width": r.width, "state": r.state,
+			"hits": hits.get(id, []),
 		}
 	return out
 
