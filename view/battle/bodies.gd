@@ -42,6 +42,19 @@ const SNAP_DISTANCE := 400.0
 ## Zero turns relief off. Too short and the line reads as fidgeting rather than working.
 const RELIEF_INTERVAL := 3.0
 
+## How fast a man swivels to meet something, radians per second. Far quicker than a
+## regiment can wheel, because turning your own body is not a manoeuvre.
+const MAN_TURN_RATE := 2.4
+const MAN_TURN_SPREAD := 0.5
+## How far back from the man closest to a threat the reaction reaches. Measured from the
+## regiment's own nearest approach rather than as a fixed radius, so it means the same
+## thing for a 140-man pike block and a 70-man cavalry wedge.
+const NOTICE_BAND := 55.0
+## How far a man edges toward what he has turned to face. Enough to thicken the struck
+## edge into a hook; more than this and men drift out of their files and the formation
+## stops reading as one.
+const LEAN := 7.0
+
 
 class Troop extends RefCounted:
 	var width := 0
@@ -51,6 +64,7 @@ class Troop extends RefCounted:
 	var file := PackedInt32Array()       # his column
 	var depth := PackedInt32Array()      # his place in it, 0 = front rank
 	var man_id := PackedInt32Array()     # stable identity, so his gait survives a death
+	var face := PackedFloat32Array()     # which way he is looking, his own business
 	var per_file := PackedInt32Array()   # how many men each column holds
 	var next_id := 0
 	var phase := 0.0
@@ -98,6 +112,7 @@ func _advance(id: int, p: Dictionary, delta: float) -> int:
 		_troops[id] = troop
 		for i in troop.world.size():
 			troop.world[i] = _place_of(troop, p, i)          # arrive already formed
+			troop.face[i] = float(p["facing"])
 		return strength
 
 	if troop.width != int(p["width"]):
@@ -119,11 +134,30 @@ func _advance(id: int, p: Dictionary, delta: float) -> int:
 			troop.relief -= RELIEF_INTERVAL
 			_relieve_a_file(troop)
 
+	var threats: PackedVector2Array = p.get("threats", PackedVector2Array())
+	var reach := _nearest_approach(troop, threats)
+	var facing := float(p["facing"])
+
 	var ease := 1.0 - exp(-CATCH_UP * delta)
 	var sum := Vector2.ZERO
 	for i in troop.world.size():
-		var target := _place_of(troop, p, i)
 		var here: Vector2 = troop.world[i]
+		var target := _place_of(troop, p, i)
+
+		# Whichever enemy is nearest to HIM, not the one his regiment is nominally
+		# fighting. A man at the far end of a flanked line has no business turning round.
+		var want := facing
+		var t := _threat_for(threats, reach, here)
+		if t >= 0:
+			var toward: Vector2 = threats[t] - here
+			if toward.length_squared() > 1.0:
+				want = toward.angle()
+				# ...and he edges toward it, so the struck edge thickens and bows into a
+				# hook while the rest of the line keeps facing its own front.
+				target += toward.normalized() * LEAN * _closeness(t, threats, reach, here)
+		troop.face[i] = rotate_toward(troop.face[i], want,
+			MAN_TURN_RATE * (1.0 + MAN_TURN_SPREAD * _wobble(troop.man_id[i])) * delta)
+
 		if here.distance_squared_to(target) > SNAP_DISTANCE * SNAP_DISTANCE:
 			troop.world[i] = target
 		else:
@@ -132,6 +166,40 @@ func _advance(id: int, p: Dictionary, delta: float) -> int:
 		sum += troop.world[i]
 	troop.centre = sum / float(maxi(1, troop.world.size()))
 	return strength
+
+
+## How close this regiment's nearest man gets to each threat. The reaction is measured
+## from here rather than from a fixed radius, so "near the fighting" means the same for
+## a deep pike block as for a small cavalry wedge.
+func _nearest_approach(troop: Troop, threats: PackedVector2Array) -> PackedFloat32Array:
+	var out := PackedFloat32Array()
+	out.resize(threats.size())
+	for t in threats.size():
+		var best := INF
+		for i in troop.world.size():
+			best = minf(best, troop.world[i].distance_squared_to(threats[t]))
+		out[t] = sqrt(best) if best < INF else 0.0
+	return out
+
+
+## Index of the threat this man should be dealing with, or -1 if he is well out of it.
+static func _threat_for(threats: PackedVector2Array, reach: PackedFloat32Array, man: Vector2) -> int:
+	var best := -1
+	var best_distance := INF
+	for t in threats.size():
+		var d := man.distance_to(threats[t])
+		if d > reach[t] + NOTICE_BAND:
+			continue                     # the fighting is happening somewhere else
+		if d < best_distance:
+			best_distance = d
+			best = t
+	return best
+
+
+## 1 for the man closest to the fighting, fading to 0 at the back of the notice band.
+static func _closeness(t: int, threats: PackedVector2Array, reach: PackedFloat32Array, man: Vector2) -> float:
+	var over := man.distance_to(threats[t]) - reach[t]
+	return clampf(1.0 - over / NOTICE_BAND, 0.0, 1.0)
 
 
 # --- forming --------------------------------------------------------------
@@ -152,6 +220,7 @@ func _raise(width: int, max_strength: int, strength: int, id: int) -> Troop:
 		troop.depth.append(n / troop.width)
 		troop.man_id.append(troop.next_id)
 		troop.world.append(Vector2.ZERO)
+		troop.face.append(0.0)
 		troop.per_file[f] += 1
 		troop.next_id += 1
 	return troop
@@ -187,6 +256,7 @@ func _enlist(troop: Troop, p: Dictionary) -> void:
 	troop.depth.append(troop.per_file[f])
 	troop.man_id.append(troop.next_id)
 	troop.world.append(Vector2.ZERO)
+	troop.face.append(float(p["facing"]))
 	troop.next_id += 1
 	troop.per_file[f] += 1
 	troop.world[troop.world.size() - 1] = _place_of(troop, p, troop.world.size() - 1)
@@ -306,6 +376,7 @@ func _discharge(troop: Troop, i: int) -> void:
 	troop.file.remove_at(i)
 	troop.depth.remove_at(i)
 	troop.man_id.remove_at(i)
+	troop.face.remove_at(i)
 
 
 ## Deliberately not deterministic: this is decoration, it never reaches the server, and
@@ -347,11 +418,11 @@ func _write(id: int, p: Dictionary, seating: Array, buffer: PackedFloat32Array, 
 	var c := Colors.of_owner(int(p["owner"]), seating)
 	if p["state"] == Regiment.State.ROUTING:
 		c = c.darkened(0.45)
-	var facing := float(p["facing"])
-	var ax := Vector2(cos(facing), sin(facing))
-	var ay := Vector2(-ax.y, ax.x)
-
 	for i in troop.world.size():
+		# Each man's own basis. One regiment-wide basis is what made a flanked block
+		# read as a single sprite swinging round.
+		var ax := Vector2.from_angle(troop.face[i])
+		var ay := Vector2(-ax.y, ax.x)
 		var shuffle := sin(_time * SWAY_RATE + troop.phase + float(troop.man_id[i]) * 1.7) * SWAY
 		var here: Vector2 = troop.world[i] + Vector2(shuffle, shuffle * 0.6)
 		buffer[at + 0] = ax.x
@@ -404,6 +475,28 @@ func occupied_slots(id: int) -> PackedVector2Array:
 	var out := PackedVector2Array()
 	for offset in slots(id).values():
 		out.append(offset)
+	return out
+
+
+## Every living man's facing, as man_id -> radians.
+func facings(id: int) -> Dictionary:
+	var out := {}
+	var troop = _troops.get(id)
+	if troop == null:
+		return out
+	for i in troop.face.size():
+		out[troop.man_id[i]] = troop.face[i]
+	return out
+
+
+## Every living man's position, as man_id -> where he is standing.
+func positions(id: int) -> Dictionary:
+	var out := {}
+	var troop = _troops.get(id)
+	if troop == null:
+		return out
+	for i in troop.world.size():
+		out[troop.man_id[i]] = troop.world[i]
 	return out
 
 

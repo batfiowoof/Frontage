@@ -12,12 +12,67 @@ const ID := 7
 
 
 func _pose(strength: int, pos := Vector2.ZERO, facing := 0.0, hits := [],
-		state := Regiment.State.FIGHTING, width := 12) -> Dictionary:
+		state := Regiment.State.FIGHTING, width := 12,
+		threats := PackedVector2Array()) -> Dictionary:
 	return {ID: {
 		"pos": pos, "facing": facing, "owner": 1, "kind": &"spear",
 		"strength": strength, "max_strength": 120, "morale": 100.0,
 		"stamina": 1.0, "width": width, "state": state, "hits": hits,
+		"threats": threats,
 	}}
+
+
+## Men whose file index is at or above `from_file`, by man id.
+func _men_in_files(men, from_file: int, to_file: int) -> Array:
+	var out := []
+	var where: Dictionary = men.places(ID)
+	for man in where:
+		if where[man].x >= from_file and where[man].x <= to_file:
+			out.append(man)
+	return out
+
+
+func _men_at_depths(men, from_depth: int, to_depth: int) -> Array:
+	var out := []
+	var where: Dictionary = men.places(ID)
+	for man in where:
+		if where[man].y >= from_depth and where[man].y <= to_depth:
+			out.append(man)
+	return out
+
+
+func _mean_angle_error(men, who: Array, want: float) -> float:
+	if who.is_empty():
+		return 0.0
+	var facing: Dictionary = men.facings(ID)
+	var worst := 0.0
+	for man in who:
+		worst = maxf(worst, absf(angle_difference(facing[man], want)))
+	return worst
+
+
+func _mean_y(men, who: Array) -> float:
+	var where: Dictionary = men.positions(ID)
+	var sum := 0.0
+	for man in who:
+		sum += where[man].y
+	return 0.0 if who.is_empty() else sum / float(who.size())
+
+
+## Settle with a threat standing off the regiment.
+##
+## IDLE rather than FIGHTING on purpose: relief rotation moves men between depths, and a
+## man who has just been sent to the back is still standing near the front while he walks
+## there, which makes "what are the back ranks looking at" unanswerable.
+func _settle_with(men, threat: Vector2, seconds := 4.0, state := Regiment.State.IDLE) -> void:
+	for i in int(seconds * 60.0):
+		men.build(_pose(120, Vector2.ZERO, 0.0, [], state, 12,
+			PackedVector2Array([threat])), [1], 1.0 / 60.0)
+
+
+func _settle_still(men, seconds := 2.0) -> void:
+	for i in int(seconds * 60.0):
+		men.build(_pose(120, Vector2.ZERO, 0.0, [], Regiment.State.IDLE), [1], 1.0 / 60.0)
 
 
 func _front_men(men) -> Array:
@@ -372,3 +427,81 @@ func test_changing_frontage_makes_the_men_walk_rather_than_teleport(t) -> void:
 	var per_file: PackedInt32Array = men.men_per_file(ID)
 	t.eq(per_file.size(), 20, "and then they are standing twenty across")
 	t.eq(per_file[0], 6, "120 men in 20 files is six deep")
+
+
+# --- men turn, the block does not -----------------------------------------
+
+func test_with_nobody_about_every_man_keeps_the_regiments_facing(t) -> void:
+	var men = Bodies.new()
+	_settle(men, 120)
+	t.near(_mean_angle_error(men, men.facings(ID).keys(), 0.0), 0.0, 0.001,
+		"no threat, no reason for anyone to look anywhere else")
+
+
+func test_the_struck_flank_turns_and_the_far_side_does_not(t) -> void:
+	# Regiment faces +X. Local +Y is toward higher files, so a threat at +Y is off its
+	# right, and the right-hand files are the ones that should come round.
+	var men = Bodies.new()
+	_settle(men, 120)
+	_settle_with(men, Vector2(0, 200))
+
+	var struck := _men_in_files(men, 9, 11)
+	var far := _men_in_files(men, 0, 2)
+	t.ok(_mean_angle_error(men, struck, PI / 2.0) < deg_to_rad(25.0),
+		"the files being hit should be facing their attacker")
+	t.ok(_mean_angle_error(men, far, 0.0) < deg_to_rad(5.0),
+		"the far end of the line has no business turning round")
+
+
+func test_the_other_flank_turns_the_other_way(t) -> void:
+	var men = Bodies.new()
+	_settle(men, 120)
+	_settle_with(men, Vector2(0, -200))
+	t.ok(_mean_angle_error(men, _men_in_files(men, 0, 2), -PI / 2.0) < deg_to_rad(25.0),
+		"hit on the left, the left files come round")
+	t.ok(_mean_angle_error(men, _men_in_files(men, 9, 11), 0.0) < deg_to_rad(5.0))
+
+
+func test_something_behind_turns_the_back_ranks_about(t) -> void:
+	var men = Bodies.new()
+	_settle_still(men)
+	_settle_with(men, Vector2(-320, 0))
+	t.ok(_mean_angle_error(men, _men_at_depths(men, 8, 9), PI) < deg_to_rad(25.0),
+		"the back ranks should face what is behind them")
+	t.ok(_mean_angle_error(men, _men_at_depths(men, 0, 1), 0.0) < deg_to_rad(5.0),
+		"while the front rank keeps fighting its own fight")
+
+
+func test_turning_takes_time(t) -> void:
+	var men = Bodies.new()
+	_settle(men, 120)
+	men.build(_pose(120, Vector2.ZERO, 0.0, [], Regiment.State.FIGHTING, 12,
+		PackedVector2Array([Vector2(0, 200)])), [1], 1.0 / 60.0)
+	t.ok(_mean_angle_error(men, _men_in_files(men, 9, 11), PI / 2.0) > deg_to_rad(60.0),
+		"one frame in, nobody should have snapped round")
+
+
+func test_the_struck_edge_leans_into_the_attack(t) -> void:
+	var men = Bodies.new()
+	_settle(men, 120)
+	var struck := _men_in_files(men, 10, 11)
+	var before := _mean_y(men, struck)
+	_settle_with(men, Vector2(0, 200))
+	var after := _mean_y(men, struck)
+	t.ok(after > before + 1.0,
+		"the struck files should edge toward the fight (%.1f -> %.1f)" % [before, after])
+
+	var far := _men_in_files(men, 0, 1)
+	t.near(_mean_y(men, far), -38.5, 4.0, "the far files stay where they were standing")
+
+
+func test_a_man_in_the_middle_of_the_block_is_left_alone(t) -> void:
+	# The notice band is measured from the regiment's own closest approach, so a threat
+	# at one end must not drag the whole formation round to look at it.
+	var men = Bodies.new()
+	_settle(men, 120)
+	_settle_with(men, Vector2(0, 400))
+	# Files 4 and 5 are genuinely inside the band at this range; 0 to 3 are not, and
+	# nothing that far from the fighting should be looking at it.
+	t.ok(_mean_angle_error(men, _men_in_files(men, 0, 3), 0.0) < deg_to_rad(5.0),
+		"the far half of the line should not be rubbernecking at something 400 units away")

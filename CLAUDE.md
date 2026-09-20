@@ -126,6 +126,19 @@ that folds both flanks together, so the men know which flank while the damage ma
 not care. The engaged edges are worked out on the client from the mirror it already holds
 and never go on the wire -- they decide which men fall, which is decoration.
 
+**Every man has his own facing**, and turns toward whichever enemy is nearest to *him*
+rather than the one his regiment is nominally fighting. A flanked regiment therefore has
+its end files coming round while its front rank keeps fighting forward, and something
+hitting the rear turns the back ranks about while the front is undisturbed. Men who turn
+also edge toward what they have turned to face, so the struck edge thickens and bows into
+a hook -- refusing the flank, arrived at by men reacting rather than by the block being
+re-laid out.
+
+How far back the reaction reaches is measured from the regiment's own closest approach to
+that enemy, not a fixed radius, so it means the same thing for a 140-man pike block as for
+a 70-man cavalry wedge. One regiment-wide basis is what used to make a flanked block read
+as a single sprite swinging round.
+
 Two more behaviours, both from how real formations worked:
 
 - **The line is dressed.** After a frontal casualty a man crosses from the deepest file to
@@ -146,7 +159,7 @@ Men chase their slots in **world** space, not local, so a regiment that turns or
 drags them after it and they catch up. Easing in local space rotates the block rigidly,
 which is the glued look.
 
-Measured: 16 regiments x 120 men costs **3.25 ms/frame**, about 20% of a 60fps budget.
+Measured: 16 regiments x 120 men costs **5.45 ms/frame**, about a third of a 60fps budget.
 `tests/test_bodies.gd` prints it. If it ever stops fitting, the integration moves to a
 shader rather than the look being abandoned.
 

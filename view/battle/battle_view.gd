@@ -112,7 +112,7 @@ func _display_state() -> Dictionary:
 ##
 ## ponytail: O(n^2) over the pairs, twice a frame. Fold it into one pass a snapshot if a
 ## battle ever gets big enough for it to show.
-static func _sides_under_attack(state) -> Dictionary:
+static func _engagements(state) -> Dictionary:
 	var out := {}
 	var ids: Array = state.sorted_ids()
 	for i in ids.size():
@@ -125,23 +125,24 @@ static func _sides_under_attack(state) -> Dictionary:
 				continue
 			if BattleState.gap_between(d, e) > Rules.CONTACT_GAP:
 				continue
-			_note(out, d.id, BattleState.side_of(d, e))
-			_note(out, e.id, BattleState.side_of(e, d))
+			_note(out, d.id, BattleState.side_of(d, e), e.pos)
+			_note(out, e.id, BattleState.side_of(e, d), d.pos)
 	return out
 
 
-static func _note(out: Dictionary, id: int, side: int) -> void:
+static func _note(out: Dictionary, id: int, side: int, at: Vector2) -> void:
 	if not out.has(id):
-		out[id] = []
-	if not out[id].has(side):
-		out[id].append(side)
+		out[id] = {"sides": [], "threats": PackedVector2Array()}
+	if not out[id]["sides"].has(side):
+		out[id]["sides"].append(side)
+	out[id]["threats"].append(at)
 
 
 func _pose_of(a, b, alpha: float) -> Dictionary:
 	var out := {}
 	if a == null:
 		return out
-	var hits := _sides_under_attack(a)
+	var fights := _engagements(a)
 	for id in a.sorted_ids():
 		var r = a.regiments[id]
 		var pos: Vector2 = r.pos
@@ -154,7 +155,8 @@ func _pose_of(a, b, alpha: float) -> Dictionary:
 			"pos": pos, "facing": facing, "owner": r.owner_id, "kind": r.kind,
 			"strength": r.strength, "max_strength": r.max_strength,
 			"morale": r.morale, "stamina": r.stamina, "width": r.width, "state": r.state,
-			"hits": hits.get(id, []),
+			"hits": fights[id]["sides"] if fights.has(id) else [],
+			"threats": fights[id]["threats"] if fights.has(id) else PackedVector2Array(),
 		}
 	return out
 
