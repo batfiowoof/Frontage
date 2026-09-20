@@ -140,3 +140,37 @@ func test_an_unrecorded_replay_saves_nothing(t) -> void:
 	t.ok(not r.recording())
 	t.eq(r.save("user://replays/should_not_exist.rpl"), "", "nothing to save, nothing written")
 	t.ok(not FileAccess.file_exists("user://replays/should_not_exist.rpl"))
+
+
+func test_a_battle_behind_walls_replays(t) -> void:
+	# The case that was quietly broken: `defense` comes from the defending settlement's
+	# walls and is set at deploy, so a replay that rebuilt the battle from the opening
+	# snapshot without it fought a different fight. Every recorded battle until now
+	# happened in open field, so verify() never had the chance to notice.
+	var bs = BattleState.new()
+	for i in 3:
+		var y := (float(i) - 1.0) * Rules.DEPLOY_SPACING
+		bs.add(1, &"spear", Vector2(-Rules.DEPLOY_SEPARATION * 0.5, y), 0.0)
+		var holding = bs.add(2, &"spear", Vector2(Rules.DEPLOY_SEPARATION * 0.5, y), PI)
+		holding.defense = 0.3                  # behind walls
+
+	var r = Replay.new()
+	r.begin(Snapshot.encode_battle(bs))
+	for n in int(30.0 * Rules.TICK_HZ):
+		if n == 10:
+			var ids := PackedInt32Array()
+			for id in bs.sorted_ids():
+				if bs.regiments[id].owner_id == 1:
+					ids.append(id)
+			var bytes := Orders.battle_move(ids, Vector2(120, 0), 0.0)
+			r.note(bs.tick, 1, bytes)
+			Replay.apply_order(bs, 1, bytes)
+		bs.step()
+	r.finish(Snapshot.encode_battle(bs), bs.tick)
+
+	t.ok(r.verify(), "a battle fought behind walls has to reproduce itself too")
+	var again = r.replay()
+	if again != null:
+		for id in bs.sorted_ids():
+			t.near(again.regiments[id].defense, bs.regiments[id].defense, 0.0001,
+				"and the walls have to come back with it")

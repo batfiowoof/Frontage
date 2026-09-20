@@ -35,7 +35,11 @@ var reload := 0.0
 var focus := -1
 
 ## Fortification credit from whatever the regiment is standing behind, 0..1.
-## Server-side only, like damage_pool: it comes from the campaign, not the wire.
+##
+## This one IS on the wire, unlike damage_pool and reload. It is set at deploy from the
+## defending settlement's walls, and a replay rebuilds the battle from the opening
+## snapshot -- so leaving it off meant a battle fought at a walled town did not
+## reproduce itself. Nothing caught it because every recorded battle had been in a field.
 var defense := 0.0
 
 
