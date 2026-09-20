@@ -191,9 +191,68 @@ func _fill_bodies(pose: Dictionary, delta: float) -> void:
 		mm.set_buffer(buffer)
 
 
+## Which enemies a shooter could actually hit right now, as id -> is the line clear.
+##
+## A range ring on its own would lie: nobody shoots through their own line, so half of
+## what falls inside the circle may be unshootable. The ring says how far, this says
+## whether -- and the second one is what you are really asking when you select archers.
+static func targets_in_reach(state, shooter_id: int) -> Dictionary:
+	var out := {}
+	if state == null:
+		return out
+	var shooter = state.get_regiment(shooter_id)
+	if shooter == null or shooter.range_of() <= 0.0:
+		return out
+	var everyone: Array = state.regiments.values()
+	for id in state.sorted_ids():
+		var e = state.regiments[id]
+		if not e.is_alive() or e.owner_id == shooter.owner_id:
+			continue
+		if shooter.pos.distance_to(e.pos) > shooter.range_of():
+			continue
+		out[id] = BattleState.line_is_clear(shooter, e, everyone)
+	return out
+
+
+## How far a regiment of this kind can shoot, or 0 if it has nothing to shoot with.
+static func range_of_kind(kind: StringName) -> float:
+	return float(Rules.KINDS.get(kind, {}).get("range", 0.0))
+
+
+func _draw_reach(pose: Dictionary) -> void:
+	for id in selected:
+		if not pose.has(id):
+			continue
+		var p: Dictionary = pose[id]
+		var reach := range_of_kind(p["kind"])
+		if reach <= 0.0:
+			continue
+
+		# Grey once the quiver is empty: the reach is still true and no longer useful.
+		var spent: bool = int(p.get("ammo", 0)) <= 0
+		var ring := Color(0.55, 0.55, 0.55, 0.3) if spent else Color(0.85, 0.78, 0.42, 0.5)
+		draw_arc(p["pos"], reach, 0.0, TAU, 72, ring, 1.5)
+		if spent:
+			continue
+
+		var reachable := targets_in_reach(Net.battle, id)
+		for mark in reachable:
+			if not pose.has(mark):
+				continue
+			var at: Vector2 = pose[mark]["pos"]
+			var half: float = Formation.frontage(pose[mark]["max_strength"], pose[mark]["width"]) + 16.0
+			if reachable[mark]:
+				draw_arc(at, half, 0.0, TAU, 28, Color("d8c66a"), 2.0)
+			else:
+				# In range, but one of ours is standing in the way.
+				draw_arc(at, half, 0.0, TAU, 28, Color(0.76, 0.36, 0.23, 0.55), 1.5)
+				draw_line(p["pos"], at, Color(0.76, 0.36, 0.23, 0.3), 1.0)
+
+
 func _draw() -> void:
 	var pose := _display_state()
 	var seating: Array = Net.player_ids()
+	_draw_reach(pose)
 	for id in pose:
 		var p: Dictionary = pose[id]
 		var half: float = Formation.frontage(p["max_strength"], p["width"]) + 10.0
@@ -256,6 +315,11 @@ func _draw_ghost(row: Dictionary) -> void:
 	draw_line(at, at + ahead * (half_d + 22.0), Color("cfeecf"), 2.0)
 	draw_line(row["from"], at, Color(0.62, 0.85, 0.63, 0.35), 1.0)
 
+	# Where an archer would reach from there, which is most of why you move one.
+	var reach: float = row.get("reach", 0.0)
+	if reach > 0.0:
+		draw_arc(at, reach, 0.0, TAU, 72, Color(0.85, 0.78, 0.42, 0.35), 1.5)
+
 
 func _update_hud(pose: Dictionary) -> void:
 	var mine := 0
@@ -274,9 +338,10 @@ func _update_hud(pose: Dictionary) -> void:
 	var lead: Dictionary = pose[selected[0]]
 	var busy: float = lead["reforming"]
 	var quiver: int = lead.get("ammo", 0)
+	var reach := range_of_kind(lead["kind"])
 	_hint.text = "%s, %d across%s%s      [ and ] change the frontage" % [
 		lead["formation"], int(lead["width"]),
-		"      %d volleys left" % quiver if quiver > 0 else "",
+		"      %d volleys left, range %.0f" % [quiver, reach] if quiver > 0 else "",
 		"      RE-FORMING %.0fs" % busy if busy > 0.0 else ""]
 	for b: Button in _formation_bar.get_children():
 		b.disabled = busy > 0.0
@@ -428,6 +493,7 @@ static func plan_order(pose: Dictionary, chosen: PackedInt32Array, from: Vector2
 		var target: Vector2 = from + slot
 		out.append({
 			"id": id,
+			"reach": range_of_kind(p["kind"]) if int(p.get("ammo", 0)) > 0 else 0.0,
 			"target": target,
 			"face": facing if explicit else (target - p["pos"]).angle(),
 			"from": p["pos"],

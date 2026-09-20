@@ -192,3 +192,57 @@ func test_ammo_survives_the_wire(t) -> void:
 	if back != null:
 		t.eq(back.regiments[s[1].id].ammo, s[1].ammo)
 		t.ok(back.regiments[s[1].id].ammo < int(Rules.KINDS[&"archer"]["ammo"]))
+
+
+# --- what the range ring shows --------------------------------------------
+
+const BattleView := preload("res://view/battle/battle_view.gd")
+
+
+func test_range_is_read_from_the_kind(t) -> void:
+	t.near(BattleView.range_of_kind(&"archer"), float(Rules.KINDS[&"archer"]["range"]))
+	t.near(BattleView.range_of_kind(&"spear"), 0.0, 0.0001, "a spearman draws no ring")
+	t.near(BattleView.range_of_kind(&"nobody"), 0.0, 0.0001, "and neither does a typo")
+
+
+func test_only_enemies_inside_the_ring_are_listed(t) -> void:
+	var bs = BattleState.new()
+	var bows = bs.add(1, &"archer", Vector2.ZERO, 0.0)
+	var near_mark = bs.add(2, &"spear", Vector2(bows.range_of() * 0.5, 0), PI)
+	var far_mark = bs.add(2, &"spear", Vector2(bows.range_of() * 2.0, 0), PI)
+	var friend = bs.add(1, &"spear", Vector2(0, 200), 0.0)
+
+	var reachable := BattleView.targets_in_reach(bs, bows.id)
+	t.ok(reachable.has(near_mark.id), "the one in range is listed")
+	t.ok(not reachable.has(far_mark.id), "the one beyond it is not")
+	t.ok(not reachable.has(friend.id), "and neither are our own")
+
+
+func test_the_ring_distinguishes_blocked_from_shootable(t) -> void:
+	# The whole reason the ring is not enough on its own: nobody shoots through their
+	# own line, so half of what falls inside the circle may be unshootable.
+	var bs = BattleState.new()
+	var bows = bs.add(1, &"archer", Vector2.ZERO, 0.0)
+	var mark = bs.add(2, &"spear", Vector2(bows.range_of() * 0.6, 0), PI)
+	t.eq(BattleView.targets_in_reach(bs, bows.id)[mark.id], true, "clear to start with")
+
+	bs.add(1, &"spear", Vector2(bows.range_of() * 0.3, 0), 0.0)   # one of ours in the way
+	t.eq(BattleView.targets_in_reach(bs, bows.id)[mark.id], false,
+		"in range, but there is a friend standing in front of it")
+
+
+func test_a_regiment_with_no_bow_reaches_nobody(t) -> void:
+	var bs = BattleState.new()
+	var foot = bs.add(1, &"spear", Vector2.ZERO, 0.0)
+	bs.add(2, &"spear", Vector2(60, 0), PI)
+	t.eq(BattleView.targets_in_reach(bs, foot.id).size(), 0)
+	t.eq(BattleView.targets_in_reach(bs, 9999).size(), 0, "nor does a regiment that is not there")
+	t.eq(BattleView.targets_in_reach(null, 1).size(), 0, "nor one in a battle that is not running")
+
+
+func test_the_dead_are_not_listed_as_targets(t) -> void:
+	var bs = BattleState.new()
+	var bows = bs.add(1, &"archer", Vector2.ZERO, 0.0)
+	var mark = bs.add(2, &"spear", Vector2(bows.range_of() * 0.5, 0), PI)
+	mark.take_casualties(mark.strength)
+	t.ok(not BattleView.targets_in_reach(bs, bows.id).has(mark.id))

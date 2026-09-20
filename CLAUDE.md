@@ -167,6 +167,14 @@ Out of arrows they are simply bad infantry, which is what stops a missile duel b
 Formation matters more here than anywhere: over 16 seconds under the same archers, a line
 loses 48 men, loose order 18, and a square 60.
 
+Selecting archers draws their reach as a ring, and rings the enemies inside it: gold for
+the ones they can actually hit, red with a line back to the shooter for the ones a friend
+is standing in front of. **The ring alone would lie** -- nobody shoots through their own
+line, so half of what falls inside the circle may be unshootable, and which is which is
+the thing you are really asking. The ring greys out once the quiver is empty, and the
+order preview draws it at the destination too, since reaching further is most of why you
+move an archer at all.
+
 The AI holds its archers back until something is in range and then **stops re-ordering
 them**. This is the third time that shape of bug has appeared -- a unit chasing a point
 computed from a moving enemy centre never arrives, so it never does the thing arriving was
