@@ -39,6 +39,10 @@ const MORALE_RECOVERY := 4.0               # per second while idle and unengaged
 const FLANK_ANGLE := deg_to_rad(60.0)      # attack within this of facing = frontal
 const REAR_ANGLE := deg_to_rad(120.0)      # beyond this = rear
 
+## Half-size of the battlefield. Move orders are clamped to it, so a hostile or
+## buggy client cannot send a regiment to infinity.
+const BATTLE_HALF_EXTENT := 3000.0
+
 # --- formation ----------------------------------------------------------
 const FILE_SPACING := 7.0                  # sideways gap between men in a rank
 const RANK_SPACING := 9.0                  # depth gap between ranks

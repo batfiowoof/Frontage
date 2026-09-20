@@ -37,6 +37,14 @@ These are not style preferences. Breaking one costs a rewrite.
 `tests/run.gd` extends `SceneTree` (Godot rejects a plain script for `--script`). Exit code 0
 means green. Add a test file to the `TESTS` list in `run.gd` to register it.
 
+## Measured
+
+Snapshot cost with the `var_to_bytes` encoder (`tests/test_snapshot.gd` prints it):
+**128 B/regiment**, so 100 regiments = 12.8 KB/snapshot = 125 KB/s per client at 10 Hz.
+A realistic 40-regiment battle is ~50 KB/s per client. Fine on LAN, marginal over the
+internet with several clients. Hand-roll a `PackedFloat32Array` codec (roughly halves it)
+when that number starts to hurt, delta encoding after that.
+
 ## Deliberate shortcuts
 
 Marked in code with `# ponytail:` comments naming the ceiling and the upgrade path.

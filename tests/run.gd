@@ -7,6 +7,8 @@ const TESTS := [
 	"res://tests/test_smoke.gd",
 	"res://tests/test_formation.gd",
 	"res://tests/test_regiment.gd",
+	"res://tests/test_battle_state.gd",
+	"res://tests/test_snapshot.gd",
 ]
 
 
@@ -35,10 +37,13 @@ func _initialize() -> void:
 	var t := Check.new()
 	for path in TESTS:
 		var script := load(path) as GDScript
-		if script == null:
-			t.failures.append("%s: failed to load" % path)
+		if script == null or not script.can_instantiate():
+			t.failures.append("%s: will not compile" % path)
 			continue
 		var obj: RefCounted = script.new()
+		if obj == null:
+			t.failures.append("%s: would not instantiate" % path)
+			continue
 		for m in script.get_script_method_list():
 			var name: String = m.name
 			if not name.begins_with("test_"):
