@@ -6,8 +6,8 @@ extends SceneTree
 ##   godot --headless -- --join 127.0.0.1
 ##
 ## The client is the judge, and it needs no digest exchange with the server: if
-## encode(decode(bytes)) == bytes, its mirror is byte-identical to the state the
-## server encoded. The server's encoder walks regiments in sorted id order precisely
+## its re-encoded mirror equals the bytes the server sent, the mirror is exactly the
+## server's state. The server's encoder walks regiments in sorted id order precisely
 ## so that this holds.
 
 const Rules := preload("res://sim/rules.gd")
@@ -149,11 +149,10 @@ func _client_tick(delta: float) -> void:
 
 
 func _check_mirror_is_exact(bs) -> void:
-	# Re-encoding the mirror must reproduce the server's bytes exactly.
-	var mine := Snapshot.encode_battle(bs)
-	var theirs := Snapshot.encode_battle(Snapshot.decode_battle(mine))
-	if mine != theirs:
-		_fail("mirror does not re-encode identically at tick %d" % bs.tick)
+	# Against the bytes the SERVER sent, not against a re-encode of our own encode --
+	# the latter only proves the codec is stable, which is a much weaker claim.
+	if Snapshot.encode_battle(bs) != net.last_battle_bytes:
+		_fail("mirror does not re-encode to the server's bytes at tick %d" % bs.tick)
 
 
 func _check_things_moved(bs) -> void:

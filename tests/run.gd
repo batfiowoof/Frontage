@@ -9,6 +9,7 @@ const TESTS := [
 	"res://tests/test_regiment.gd",
 	"res://tests/test_battle_state.gd",
 	"res://tests/test_snapshot.gd",
+	"res://tests/test_campaign.gd",
 ]
 
 
@@ -33,8 +34,35 @@ class Check extends RefCounted:
 			failures.append("%s: %f !~ %f (eps %f)  %s" % [where, a, b, eps, msg])
 
 
+const SOURCE_DIRS := ["res://sim", "res://net", "res://view", "res://tests"]
+
+
+func _gd_files(dir: String) -> PackedStringArray:
+	var out := PackedStringArray()
+	var d := DirAccess.open(dir)
+	if d == null:
+		return out
+	for f in d.get_files():
+		if f.ends_with(".gd"):
+			out.append(dir.path_join(f))
+	for sub in d.get_directories():
+		out.append_array(_gd_files(dir.path_join(sub)))
+	return out
+
+
+## A test file can compile perfectly while something it preloads does not, which
+## reads as a green run with a screen full of red. Check the whole tree.
+func _check_everything_compiles(t: Check) -> void:
+	t.where = "compile"
+	for dir in SOURCE_DIRS:
+		for path in _gd_files(dir):
+			var script := load(path) as GDScript
+			t.ok(script != null and script.can_instantiate(), "%s does not compile" % path)
+
+
 func _initialize() -> void:
 	var t := Check.new()
+	_check_everything_compiles(t)
 	for path in TESTS:
 		var script := load(path) as GDScript
 		if script == null or not script.can_instantiate():

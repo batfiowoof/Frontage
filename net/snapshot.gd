@@ -13,6 +13,8 @@ extends RefCounted
 
 const Regiment := preload("res://sim/regiment.gd")
 const BattleState := preload("res://sim/battle_state.gd")
+const CampaignState := preload("res://sim/campaign_state.gd")
+const Rules := preload("res://sim/rules.gd")
 
 const VERSION := 1
 
@@ -75,3 +77,107 @@ static func decode_battle(bytes: PackedByteArray):
 			return null                     # duplicate ids would silently drop a regiment
 		bs.regiments[r.id] = r
 	return bs
+
+
+# --- campaign -------------------------------------------------------------
+# Turn-based, so a full snapshot per change is cheap and there is nothing to
+# interpolate. Flat rows rather than dictionaries: a row of known length and known
+# types is something decode can actually check.
+
+static func encode_campaign(cs) -> PackedByteArray:
+	var settlements := []
+	for s in cs.settlements:
+		settlements.append([s["tile"], s["owner"], s["name"]])
+	var armies := []
+	for id in cs.sorted_army_ids():
+		var a = cs.armies[id]
+		armies.append([a["id"], a["owner"], a["tile"], a["move_left"], a["regiments"]])
+	return var_to_bytes([
+		VERSION, cs.turn, cs._next_army, cs.terrain,
+		settlements, armies, cs.gold, cs.food, cs.ready,
+	])
+
+
+static func decode_campaign(bytes: PackedByteArray):
+	if bytes.size() < 4:
+		return null
+	var d = bytes_to_var(bytes)
+	if typeof(d) != TYPE_ARRAY or d.size() != 9:
+		return null
+	if typeof(d[0]) != TYPE_INT or d[0] != VERSION:
+		return null
+	if typeof(d[1]) != TYPE_INT or typeof(d[2]) != TYPE_INT:
+		return null
+	if typeof(d[3]) != TYPE_PACKED_BYTE_ARRAY or d[3].size() != Rules.MAP_W * Rules.MAP_H:
+		return null
+	if typeof(d[4]) != TYPE_ARRAY or typeof(d[5]) != TYPE_ARRAY:
+		return null
+
+	var cs = CampaignState.new()
+	cs.turn = d[1]
+	cs._next_army = d[2]
+	cs.terrain = d[3]
+	for t in cs.terrain:
+		if t >= CampaignState.Terrain.size():
+			return null
+
+	for row in d[4]:
+		if typeof(row) != TYPE_ARRAY or row.size() != 3:
+			return null
+		if typeof(row[0]) != TYPE_INT or typeof(row[1]) != TYPE_INT or typeof(row[2]) != TYPE_STRING:
+			return null
+		if not _is_tile(row[0]):
+			return null
+		cs.settlements.append({"tile": row[0], "owner": row[1], "name": row[2]})
+
+	for row in d[5]:
+		if typeof(row) != TYPE_ARRAY or row.size() != 5:
+			return null
+		for i in 4:
+			if typeof(row[i]) != TYPE_INT:
+				return null
+		if not _is_tile(row[2]):
+			return null
+		if typeof(row[4]) != TYPE_ARRAY or row[4].size() > CampaignState.MAX_REGIMENTS_PER_ARMY:
+			return null
+		for kind in row[4]:
+			if typeof(kind) != TYPE_STRING_NAME or not Rules.KINDS.has(kind):
+				return null
+		if cs.armies.has(row[0]):
+			return null                     # duplicate ids would silently drop an army
+		cs.armies[row[0]] = {
+			"id": row[0], "owner": row[1], "tile": row[2],
+			"move_left": row[3], "regiments": row[4],
+		}
+
+	var purse = _int_map(d[6])
+	var larder = _int_map(d[7])
+	var flags = _bool_map(d[8])
+	if purse == null or larder == null or flags == null:
+		return null
+	cs.gold = purse
+	cs.food = larder
+	cs.ready = flags
+	return cs
+
+
+static func _is_tile(i: int) -> bool:
+	return i >= 0 and i < Rules.MAP_W * Rules.MAP_H
+
+
+static func _int_map(v):
+	if typeof(v) != TYPE_DICTIONARY:
+		return null
+	for k in v:
+		if typeof(k) != TYPE_INT or typeof(v[k]) != TYPE_INT:
+			return null
+	return v
+
+
+static func _bool_map(v):
+	if typeof(v) != TYPE_DICTIONARY:
+		return null
+	for k in v:
+		if typeof(k) != TYPE_INT or typeof(v[k]) != TYPE_BOOL:
+			return null
+	return v

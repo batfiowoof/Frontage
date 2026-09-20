@@ -18,7 +18,7 @@ func add(owner_id: int, kind: StringName, pos: Vector2, facing := 0.0) -> Regime
 	return r
 
 
-func get_regiment(id: int) -> Regiment:
+func get_regiment(id: int) -> Variant:
 	return regiments.get(id)
 
 

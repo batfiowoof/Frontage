@@ -7,6 +7,7 @@ extends Node
 
 const Rules := preload("res://sim/rules.gd")
 const BattleState := preload("res://sim/battle_state.gd")
+const CampaignState := preload("res://sim/campaign_state.gd")
 const Regiment := preload("res://sim/regiment.gd")
 const Snapshot := preload("res://net/snapshot.gd")
 const Orders := preload("res://net/orders.gd")
@@ -16,15 +17,22 @@ const MAX_CLIENTS := 7
 const MAX_CATCHUP := 0.25          # seconds of simulation we will chew in one frame
 
 signal battle_updated(battle)      # server: stepped. client: snapshot decoded.
+signal campaign_updated(campaign)  # turn-based, so this fires on every change
 signal players_changed
 signal order_rejected(peer_id, reason)
 signal connection_failed
 signal server_left
 
-## Server: the authoritative battle. Client: a decoded mirror, never stepped locally.
+## Server: the authoritative world. Client: a decoded mirror, never stepped locally.
 var battle: BattleState = null
+var campaign: CampaignState = null
 var players := {}                  # peer_id -> display name
 var running := false               # is the battle sim ticking?
+
+## The exact bytes the server last sent us. Kept so a client can prove its mirror is
+## the server's state and not merely a self-consistent decode of its own encode.
+var last_battle_bytes := PackedByteArray()
+var last_campaign_bytes := PackedByteArray()
 
 var _accum := 0.0
 var _since_snapshot := 0
@@ -62,13 +70,36 @@ func join(address: String, port := PORT) -> Error:
 	return OK
 
 
+## Everyone in the lobby, in a stable order, so colours and turn order agree.
+func player_ids() -> Array:
+	var ids := players.keys()
+	ids.sort()
+	return ids
+
+
 func close() -> void:
 	if multiplayer.has_multiplayer_peer():
 		multiplayer.multiplayer_peer.close()
 		multiplayer.multiplayer_peer = null
 	players.clear()
 	battle = null
+	campaign = null
 	running = false
+
+
+## Server only: deal a fresh campaign and tell everyone about it.
+func start_campaign(map_seed := 0) -> void:
+	assert(is_server(), "only the server owns the world")
+	if map_seed == 0:
+		map_seed = randi()
+	campaign = CampaignState.generate(player_ids(), map_seed)
+	broadcast_campaign()
+	campaign_updated.emit(campaign)
+
+
+func broadcast_campaign() -> void:
+	if campaign != null and multiplayer.has_multiplayer_peer() and is_server():
+		_campaign_snapshot.rpc(Snapshot.encode_campaign(campaign))
 
 
 ## Server only: put a battle on the table and start ticking it.
@@ -131,16 +162,89 @@ func submit_order(bytes: PackedByteArray) -> void:
 	_receive_order(multiplayer.get_remote_sender_id(), bytes)
 
 
+func order_army_move(army_id: int, dest_tile: int) -> void:
+	submit(Orders.army_move(army_id, dest_tile))
+
+
+func order_recruit(tile: int, kind: StringName) -> void:
+	submit(Orders.recruit(tile, kind))
+
+
+func order_ready(value: bool) -> void:
+	submit(Orders.ready(value))
+
+
 func _receive_order(sender: int, bytes: PackedByteArray) -> void:
 	var order := Orders.decode(bytes)
 	if order.is_empty():
 		_reject(sender, "malformed order")
 		return
+	match order["type"]:
+		Orders.Type.BATTLE_MOVE:
+			_battle_move(sender, order)
+		Orders.Type.ARMY_MOVE:
+			_army_move(sender, order)
+		Orders.Type.RECRUIT:
+			_recruit(sender, order)
+		Orders.Type.READY:
+			_set_ready(sender, order)
+
+
+# --- campaign orders ------------------------------------------------------
+
+func _army_move(sender: int, order: Dictionary) -> void:
+	if campaign == null:
+		_reject(sender, "no campaign in progress")
+		return
+	var a = campaign.armies.get(order["army_id"])
+	if a == null:
+		_reject(sender, "army %d does not exist" % order["army_id"])
+		return
+	if a["owner"] != sender:
+		_reject(sender, "army %d belongs to %d" % [order["army_id"], a["owner"]])
+		return
+	var result: Dictionary = campaign.move_army(order["army_id"], order["dest"])
+	broadcast_campaign()
+	campaign_updated.emit(campaign)
+	if not result["collision"].is_empty():
+		_on_armies_met(result["collision"])
+
+
+func _recruit(sender: int, order: Dictionary) -> void:
+	if campaign == null:
+		_reject(sender, "no campaign in progress")
+		return
+	if not campaign.recruit(sender, order["tile"], order["kind"]):
+		_reject(sender, "cannot recruit %s at tile %d" % [order["kind"], order["tile"]])
+		return
+	broadcast_campaign()
+	campaign_updated.emit(campaign)
+
+
+func _set_ready(sender: int, order: Dictionary) -> void:
+	if campaign == null:
+		_reject(sender, "no campaign in progress")
+		return
+	campaign.set_ready(sender, order["value"])
+	if campaign.all_ready(player_ids()):
+		campaign.end_turn()
+	broadcast_campaign()
+	campaign_updated.emit(campaign)
+
+
+## Two armies have met. M6 turns this into a battle; until then it is only news.
+func _on_armies_met(pair: Array) -> void:
+	print("[net] armies %d and %d have met" % [pair[0], pair[1]])
+
+
+# --- battle orders --------------------------------------------------------
+
+func _battle_move(sender: int, order: Dictionary) -> void:
 	if battle == null:
 		_reject(sender, "no battle in progress")
 		return
 	for id in order["ids"]:
-		var r := battle.get_regiment(id)
+		var r = battle.get_regiment(id)
 		if r == null:
 			_reject(sender, "regiment %d does not exist" % id)
 			continue
@@ -157,6 +261,17 @@ func _reject(peer_id: int, reason: String) -> void:
 
 # --- snapshots ------------------------------------------------------------
 
+@rpc("authority", "call_remote", "reliable")
+func _campaign_snapshot(bytes: PackedByteArray) -> void:
+	var cs = Snapshot.decode_campaign(bytes)
+	if cs == null:
+		push_warning("[net] dropped an undecodable campaign snapshot (%d bytes)" % bytes.size())
+		return
+	campaign = cs
+	last_campaign_bytes = bytes
+	campaign_updated.emit(campaign)
+
+
 @rpc("authority", "call_remote", "unreliable_ordered")
 func _battle_snapshot(bytes: PackedByteArray) -> void:
 	var bs = Snapshot.decode_battle(bytes)
@@ -168,6 +283,7 @@ func _battle_snapshot(bytes: PackedByteArray) -> void:
 	if battle != null and bs.tick < battle.tick:
 		return
 	battle = bs
+	last_battle_bytes = bytes
 	battle_updated.emit(battle)
 
 
@@ -178,6 +294,8 @@ func _on_peer_connected(id: int) -> void:
 	players_changed.emit()
 	if battle != null:
 		broadcast_battle()
+	if campaign != null:
+		broadcast_campaign()
 
 
 func _on_peer_disconnected(id: int) -> void:
