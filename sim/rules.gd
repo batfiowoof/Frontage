@@ -90,6 +90,22 @@ const MORALE_DRAIN_REAR := 12.0            # per second while engaged from behin
 const MORALE_DRAIN_PER_FRACTION := 120.0
 const MORALE_RECOVERY := 4.0               # per second while idle and unengaged
 
+# --- battle: ground -----------------------------------------------------
+## The battlefield is not a table. A few patches of ground, carried in from the hex the
+## armies met on, so WHERE you fight is a decision and not scenery.
+##
+## Circles rather than a grid: a handful of them says everything a prototype needs about
+## a wood or a hill, and costs nothing to send or to test against.
+const GROUND := {
+	0: {"speed": 0.72, "damage": 0.9,  "cover": 0.5,  "range": 1.0},    # wood
+	1: {"speed": 0.9,  "damage": 1.18, "cover": 0.0,  "range": 1.2},    # hill
+	2: {"speed": 0.45, "damage": 0.65, "cover": 0.0,  "range": 0.9},    # marsh or ford
+}
+const GROUND_WOOD := 0
+const GROUND_HILL := 1
+const GROUND_MARSH := 2
+const MAX_FEATURES := 12
+
 # --- battle: geometry ---------------------------------------------------
 const FLANK_ANGLE := deg_to_rad(60.0)      # attack within this of facing = frontal
 const REAR_ANGLE := deg_to_rad(120.0)      # beyond this = rear

@@ -191,6 +191,7 @@ func start_demo_battle() -> void:
 	# and a line with nothing that can outrun it cannot produce one.
 	var line := [&"cavalry", &"spear", &"pike", &"sword", &"archer"]
 	var bs = BattleState.new()
+	bs.lay_ground(1, 20260921)          # a wooded field, so the demo has ground to use
 	for i in line.size():
 		var y := (float(i) - float(line.size() - 1) * 0.5) * Rules.DEPLOY_SPACING
 		bs.add(left, line[i], Vector2(-Rules.DEPLOY_SEPARATION * 0.5, y), 0.0)
@@ -504,6 +505,7 @@ func _begin_battle(attacker: Dictionary, defender: Dictionary) -> void:
 	_battle_seconds = 0.0
 
 	var bs = BattleState.new()
+	bs.lay_ground(int(campaign.terrain[_battle_tile]), _battle_tile * 7919 + campaign.turn)
 	var fortified := campaign.defense_at(_battle_tile, defender["owner"])
 	_deploy(bs, attacker, -Rules.DEPLOY_SEPARATION * 0.5, 0.0, 0.0)
 	_deploy(bs, defender, Rules.DEPLOY_SEPARATION * 0.5, PI, fortified)

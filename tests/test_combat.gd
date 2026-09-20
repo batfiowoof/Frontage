@@ -483,3 +483,73 @@ func test_both_flanks_are_the_same_to_the_damage_maths(t) -> void:
 	var left = bs.add(2, &"spear", Vector2(0, -200), PI / 2)
 	t.eq(BattleState.exposure_of(d, right), BattleState.Exposure.FLANK)
 	t.eq(BattleState.exposure_of(d, left), BattleState.Exposure.FLANK)
+
+
+# --- the ground -----------------------------------------------------------
+
+func test_open_field_does_nothing(t) -> void:
+	var bs = BattleState.new()
+	var here := bs.ground_at(Vector2.ZERO)
+	t.near(here["speed"], 1.0)
+	t.near(here["damage"], 1.0)
+	t.near(here["cover"], 0.0)
+
+
+func test_ground_only_applies_where_it_is(t) -> void:
+	var bs = BattleState.new()
+	bs.features = [[Rules.GROUND_WOOD, 0.0, 0.0, 120.0]]
+	t.ok(bs.ground_at(Vector2.ZERO)["speed"] < 1.0, "inside the wood")
+	t.near(bs.ground_at(Vector2(400, 0))["speed"], 1.0, 0.0001, "and not outside it")
+
+
+func test_a_wood_slows_men_down_and_hides_them(t) -> void:
+	var bs = BattleState.new()
+	bs.features = [[Rules.GROUND_WOOD, 0.0, 0.0, 600.0]]
+	var inside = bs.add(1, &"spear", Vector2.ZERO, 0.0)
+	inside.order_move(Vector2(100000, 0), 0.0)
+
+	var open = BattleState.new()
+	var outside = open.add(1, &"spear", Vector2.ZERO, 0.0)
+	outside.order_move(Vector2(100000, 0), 0.0)
+	for i in Rules.TICK_HZ:
+		bs.step()
+		open.step()
+	t.ok(inside.pos.x < outside.pos.x * 0.85, "marching through a wood is slower")
+	t.ok(bs.ground_at(Vector2.ZERO)["cover"] > 0.0, "and there is something to hide behind")
+
+
+func test_high_ground_hits_harder(t) -> void:
+	var low := _facing_each_other()
+	var high = BattleState.new()
+	var uphill = high.add(1, &"spear", Vector2(-45, 0), 0.0)
+	var downhill = high.add(2, &"spear", Vector2(45, 0), PI)
+	high.features = [[Rules.GROUND_HILL, -45.0, 0.0, 120.0]]   # only the first one stands on it
+
+	_run(low[0], 20)
+	for i in Rules.TICK_HZ * 20:
+		high.step()
+	t.ok(downhill.max_strength - downhill.strength > low[2].max_strength - low[2].strength,
+		"the man on the hill should be doing more damage")
+
+
+func test_the_ground_is_the_same_every_time_for_the_same_meeting(t) -> void:
+	# A replay of a battle has to find the same wood in the same place.
+	var a = BattleState.new()
+	var b = BattleState.new()
+	a.lay_ground(1, 4242)
+	b.lay_ground(1, 4242)
+	t.eq(a.features, b.features)
+	var elsewhere = BattleState.new()
+	elsewhere.lay_ground(1, 99)
+	t.ok(elsewhere.features != a.features, "a different meeting, a different field")
+
+
+func test_wooded_country_gives_a_woodier_field(t) -> void:
+	var wood = BattleState.new()
+	wood.lay_ground(1, 7)                     # forest
+	var plain = BattleState.new()
+	plain.lay_ground(0, 7)                    # plains
+	t.ok(wood.features.size() > plain.features.size(),
+		"a battle in the woods should be fought among more of them")
+	for f: Array in wood.features:
+		t.eq(int(f[0]), Rules.GROUND_WOOD)

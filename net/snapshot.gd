@@ -48,7 +48,7 @@ static func encode_battle(bs) -> PackedByteArray:
 		for field in REGIMENT_FIELDS:
 			row.append(r.get(field[0]))
 		rows.append(row)
-	return var_to_bytes([VERSION, bs.tick, bs._next_id, rows])
+	return var_to_bytes([VERSION, bs.tick, bs._next_id, rows, bs.features])
 
 
 ## Returns a BattleState, or null if the bytes are not a snapshot we understand.
@@ -56,7 +56,7 @@ static func decode_battle(bytes: PackedByteArray):
 	if bytes.size() < 4:
 		return null                         # too short for bytes_to_var to even look at
 	var data = bytes_to_var(bytes)          # never _with_objects: that is remote code execution
-	if typeof(data) != TYPE_ARRAY or data.size() != 4:
+	if typeof(data) != TYPE_ARRAY or data.size() != 5:
 		return null
 	if typeof(data[0]) != TYPE_INT or data[0] != VERSION:
 		return null
@@ -84,6 +84,20 @@ static func decode_battle(bytes: PackedByteArray):
 		if bs.regiments.has(r.id):
 			return null                     # duplicate ids would silently drop a regiment
 		bs.regiments[r.id] = r
+
+	if typeof(data[4]) != TYPE_ARRAY or data[4].size() > Rules.MAX_FEATURES:
+		return null
+	for f in data[4]:
+		if typeof(f) != TYPE_ARRAY or f.size() != 4:
+			return null
+		if typeof(f[0]) != TYPE_INT or not Rules.GROUND.has(f[0]):
+			return null
+		for i in range(1, 4):
+			if typeof(f[i]) != TYPE_FLOAT or not is_finite(f[i]):
+				return null
+		if f[3] <= 0.0 or f[3] > Rules.BATTLE_HALF_EXTENT:
+			return null
+	bs.features = data[4]
 	return bs
 
 

@@ -21,6 +21,8 @@ enum Side { FRONT, LEFT, RIGHT, REAR }
 var tick := 0
 var regiments := {}                # id -> Regiment
 var _next_id := 1
+## [[kind, x, y, radius], ...]. Rows rather than objects because they go on the wire.
+var features := []
 
 
 func add(owner_id: int, kind: StringName, pos: Vector2, facing := 0.0) -> Regiment:
@@ -111,6 +113,60 @@ func step() -> void:
 
 	for id in sorted_ids():
 		_step_regiment(regiments[id], dt)
+
+
+## What the ground does where a regiment is standing. Overlapping patches take the
+## worst of each, so a wood on a hillside is slow AND gives cover rather than cancelling
+## out into open field.
+func ground_at(pos: Vector2) -> Dictionary:
+	var out := {"speed": 1.0, "damage": 1.0, "cover": 0.0, "range": 1.0}
+	for f: Array in features:
+		var centre := Vector2(f[1], f[2])
+		if pos.distance_squared_to(centre) > f[3] * f[3]:
+			continue
+		var g: Dictionary = Rules.GROUND.get(int(f[0]), {})
+		if g.is_empty():
+			continue
+		out["speed"] = minf(out["speed"], float(g["speed"]))
+		out["damage"] = maxf(out["damage"], float(g["damage"])) if float(g["damage"]) > 1.0 \
+			else minf(out["damage"], float(g["damage"]))
+		out["cover"] = maxf(out["cover"], float(g["cover"]))
+		out["range"] = minf(out["range"], float(g["range"])) if float(g["range"]) < 1.0 \
+			else maxf(out["range"], float(g["range"]))
+	return out
+
+
+## Lay out a battlefield for the hex the armies met on. Deterministic from the seed, so
+## the same meeting always produces the same ground and a replay of it still lines up.
+func lay_ground(terrain: int, seed_value: int) -> void:
+	features = []
+	var rng := RandomNumberGenerator.new()
+	rng.seed = seed_value
+	var reach := Rules.DEPLOY_SEPARATION * 0.9
+
+	var wanted := 2
+	var kind := Rules.GROUND_WOOD
+	match terrain:
+		1:                                 # forest
+			wanted = 5
+			kind = Rules.GROUND_WOOD
+		3:                                 # hills
+			wanted = 4
+			kind = Rules.GROUND_HILL
+		2:                                 # mountain, so rocky going
+			wanted = 4
+			kind = Rules.GROUND_HILL
+		4:                                 # water, so the field is half marsh
+			wanted = 4
+			kind = Rules.GROUND_MARSH
+		_:
+			wanted = 2
+			kind = Rules.GROUND_WOOD
+
+	for i in mini(wanted, Rules.MAX_FEATURES):
+		features.append([kind,
+			rng.randf_range(-reach, reach), rng.randf_range(-reach * 0.7, reach * 0.7),
+			rng.randf_range(90.0, 190.0)])
 
 
 ## How far a regiment's formation extends toward an enemy at this angle: half its
@@ -210,7 +266,7 @@ func _land_volley(shooter: Regiment, mark: Regiment) -> void:
 	var distance := shooter.pos.distance_to(mark.pos)
 	var reach := maxf(1.0, shooter.range_of())
 	var falloff := lerpf(1.0, Rules.MISSILE_FALLOFF, clampf(distance / reach, 0.0, 1.0))
-	var cover := clampf(float(mark.form()["missile"]), -1.0, 0.95)
+	var cover := clampf(float(mark.form()["missile"]) + float(ground_at(mark.pos)["cover"]), -1.0, 0.95)
 	var kills := float(Rules.KINDS[shooter.kind]["volley"]) * shooter.fraction() * falloff
 	kills *= (1.0 - cover) * shooter.order_factor()
 	mark.take_casualties(int(round(maxf(0.0, kills))))
@@ -328,6 +384,7 @@ func _accumulate_strike(attacker: Regiment, defender: Regiment, dt: float, kills
 	var output := Rules.KILLS_PER_FILE_PER_SEC * float(files) * response_of(swinging_from)
 	output *= attacker.readiness() * damage_mult * dt
 	output *= float(attacker.form()["damage"]) * attacker.order_factor() * braced
+	output *= float(ground_at(attacker.pos)["damage"])
 	output *= 1.0 - clampf(defender.defense + float(defender.form()["defense"]) * defender.order_factor(), 0.0, 0.9)
 
 	kills[defender.id] = float(kills.get(defender.id, 0.0)) + output
@@ -410,6 +467,7 @@ func _step_regiment(r: Regiment, dt: float) -> void:
 func _advance(r: Regiment, dt: float) -> void:
 	var routing: bool = r.state == Regiment.State.ROUTING
 	var speed: float = Rules.MOVE_SPEED * float(Rules.KINDS[r.kind]["speed"]) * float(r.form()["speed"])
+	speed *= float(ground_at(r.pos)["speed"])
 	if routing:
 		speed *= Rules.ROUT_SPEED_MULT
 	var to_target: Vector2 = r.target - r.pos

@@ -140,6 +140,18 @@ Two things that are easy to get wrong here:
   well it is set. Its job is not being flanked; the shield wall's is standing in front of
   horses.
 
+## The ground
+
+A battle is fought on the hex the armies met on. `BattleState.lay_ground()` puts a
+handful of **circles** on the field -- woods, hills, marsh -- chosen by that hex's terrain
+and seeded from the tile and the turn, so the same meeting always produces the same
+field and a replay of it still lines up. Circles rather than a grid: a few of them say
+everything a prototype needs, cost nothing to send, and are trivial to test against.
+
+Woods slow men and hide them from arrows; hills make the men on them hit harder and shoot
+further; marsh is miserable to fight in. Overlapping patches take the worst of each, so a
+wood on a hillside is slow *and* gives cover instead of cancelling into open field.
+
 ## Shooting
 
 Archers fire a volley every `reload` seconds at whatever is in range, and have a finite
