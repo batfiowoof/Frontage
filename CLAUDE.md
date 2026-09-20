@@ -10,9 +10,10 @@ These are not style preferences. Breaking one costs a rewrite.
 1. **Sim is pure.** Everything in `sim/` extends `RefCounted`, never `Node`. No scene-tree
    access, no input reading, no `_process`, no `get_node`, no signals to views. The sim must
    run headless in a test with no window and no tree.
-2. **One entity per regiment.** A regiment is one sim object with strength/morale/position.
-   Individual soldiers are render-time offsets computed by `sim/formation.gd` and have no
-   logic, ever. Never give a soldier a script, a body, or a state.
+2. **One entity per regiment.** The server simulates regiments and never soldiers.
+   Soldiers exist only on the client (`view/battle/bodies.gd`), carry no game state, and
+   nothing they do can change the outcome of a battle. A soldier's position is decoration;
+   a regiment's position is truth. The wire stays at regiment granularity.
 3. **Server is authoritative.** Clients send orders and render mirrors. A client never mutates
    sim state. All mutation happens behind `if multiplayer.is_server()`.
 4. **The host plays through the same order pipeline as everyone else.** No
@@ -86,6 +87,12 @@ things follow, and they are the whole shape of a fight:
 - A head-on tie **cannot break itself**. It is broken by widening, wrapping a flank,
   relieving a tired regiment, or shooting it.
 
+Contact is measured between the two formations' **front ranks**, not their centres:
+`reach()` is half a regiment's depth toward its front or back and half its frontage toward
+a flank, taken from `max_strength` so the engagement distance does not drift as men die.
+Two blocks now meet with their fronts about 13 units apart; centre-to-centre contact had
+them interpenetrating by 35 and then drifting apart as they lost the overlapping depth.
+
 Two angles matter per strike, not one. How the *defender* is hit sets what it suffers;
 how the *attacker* stands sets how much of itself it can bring. That second one is what
 makes a flank one-sided rather than merely favourable.
@@ -96,6 +103,27 @@ Measured (`tests/test_combat.gd` prints these):
 	pinned + flanked    breaks at 11s, versus 75s frontally
 	8s of fighting      13 lost when flanked, 5 when fronted
 	same frontage       3-deep breaks at 32s, 10-deep at 75s
+	two blocks meet     centres 94 apart, fronts 13 apart
+
+## The men
+
+`view/battle/bodies.gd` draws the soldiers, and the whole mechanism is one line of
+bookkeeping: living soldier `i` stands in slot `i`, slots run **front rank first**, and
+casualties are removed from the FRONT of the array. Everyone behind a hole shifts down an
+index, so his target slot moves one place forward and the block steps up into the gap.
+Depth is lost from the back and the fighting line holds its ground.
+
+Slots come from `max_strength`, computed once. Recomputing them from current strength --
+which is what it used to do -- walked a regiment's drawn front rank backwards by 22 units
+as it bled, so the men retreated from the fight they were in.
+
+Men chase their slots in **world** space, not local, so a regiment that turns or marches
+drags them after it and they catch up. Easing in local space rotates the block rigidly,
+which is the glued look.
+
+Measured: 16 regiments x 120 men costs **2.46 ms/frame**, about 15% of a 60fps budget.
+`tests/test_bodies.gd` prints it. If it ever stops fitting, the integration moves to a
+shader rather than the look being abandoned.
 
 ## Things that were not obvious
 

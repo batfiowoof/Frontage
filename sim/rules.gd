@@ -16,7 +16,11 @@ const TURN_SPEED := 3.0                    # radians / second
 ## anybody anything -- which is precisely what made flanking decorative.
 const ENGAGED_TURN_MULT := 0.15
 const ARRIVE_EPSILON := 4.0
-const CONTACT_RANGE := 46.0                # centre-to-centre to count as engaged
+## The space left between two front ranks when they meet. Contact is measured from
+## the FRONTS of the two formations, not their centres: centre-to-centre meant two
+## fresh blocks interpenetrated by 35 units on contact and then drifted apart as they
+## lost the depth that had been overlapping.
+const CONTACT_GAP := 14.0
 const ROUT_SPEED_MULT := 1.35              # routers run faster than they marched
 
 ## Deployment: how far apart the two lines start, and the gap between regiments.

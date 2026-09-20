@@ -48,6 +48,14 @@ static func ranks_deep(count: int, width: int) -> int:
 	return ceili(float(count) / float(clampi(width, 1, count)))
 
 
+## Half the formation's depth: how far it reaches forward of its centre, which is
+## where its front rank stands and therefore where it meets an enemy.
+static func half_depth(count: int, width: int) -> float:
+	if count <= 0:
+		return 0.0
+	return float(ranks_deep(count, width) - 1) * Rules.RANK_SPACING * 0.5
+
+
 ## Half-width of the formation's frontage, used for contact and flank tests.
 static func frontage(count: int, width: int) -> float:
 	if count <= 0:

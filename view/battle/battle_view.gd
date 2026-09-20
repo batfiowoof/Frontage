@@ -10,6 +10,7 @@ const Regiment := preload("res://sim/regiment.gd")
 const BattleState := preload("res://sim/battle_state.gd")
 const Formation := preload("res://sim/formation.gd")
 const Colors := preload("res://view/colors.gd")
+const Bodies := preload("res://view/battle/bodies.gd")
 
 const BODY_SIZE := 4.0
 const PICK_RADIUS := 46.0
@@ -22,6 +23,7 @@ var selected: PackedInt32Array = []
 
 var _camera: Camera2D
 var _bodies: MultiMeshInstance2D
+var _men := Bodies.new()
 var _status: Label
 var _hint: Label
 var _frames: Array = []                  # [{state, at_ms}] for interpolation
@@ -127,50 +129,18 @@ func _pose_of(a, b, alpha: float) -> Dictionary:
 func _process(delta: float) -> void:
 	_move_camera(delta)
 	var pose := _display_state()
-	_fill_bodies(pose)
+	_fill_bodies(pose, delta)
 	queue_redraw()
 	_update_hud(pose)
 
 
-func _fill_bodies(pose: Dictionary) -> void:
-	var seating: Array = Net.player_ids()
-	var total := 0
-	for id in pose:
-		total += int(pose[id]["strength"])
+func _fill_bodies(pose: Dictionary, delta: float) -> void:
+	var buffer := _men.build(pose, Net.player_ids(), delta)
 	var mm: MultiMesh = _bodies.multimesh
-	if total == 0:
-		mm.instance_count = 0
-		return
-
-	var buffer := PackedFloat32Array()
-	buffer.resize(total * FLOATS_PER_INSTANCE)
-	var at := 0
-	for id in pose:
-		var p: Dictionary = pose[id]
-		var c := Colors.of_owner(p["owner"], seating)
-		if p["state"] == Regiment.State.ROUTING:
-			c = c.darkened(0.45)
-		var facing: float = p["facing"]
-		var ax := Vector2(cos(facing), sin(facing))
-		var ay := Vector2(-ax.y, ax.x)
-		var origin: Vector2 = p["pos"]
-		for offset in Formation.offsets(p["strength"], p["width"]):
-			var here := origin + ax * offset.x + ay * offset.y
-			buffer[at + 0] = ax.x
-			buffer[at + 1] = ay.x
-			buffer[at + 2] = 0.0
-			buffer[at + 3] = here.x
-			buffer[at + 4] = ax.y
-			buffer[at + 5] = ay.y
-			buffer[at + 6] = 0.0
-			buffer[at + 7] = here.y
-			buffer[at + 8] = c.r
-			buffer[at + 9] = c.g
-			buffer[at + 10] = c.b
-			buffer[at + 11] = 1.0
-			at += FLOATS_PER_INSTANCE
-	mm.instance_count = total
-	mm.set_buffer(buffer)
+	var count := buffer.size() / Bodies.FLOATS_PER_INSTANCE
+	mm.instance_count = count
+	if count > 0:
+		mm.set_buffer(buffer)
 
 
 func _draw() -> void:
@@ -178,8 +148,8 @@ func _draw() -> void:
 	var seating: Array = Net.player_ids()
 	for id in pose:
 		var p: Dictionary = pose[id]
-		var half: float = Formation.frontage(p["strength"], p["width"]) + 10.0
-		var centre: Vector2 = p["pos"]
+		var half: float = Formation.frontage(p["max_strength"], p["width"]) + 10.0
+		var centre: Vector2 = _men.centre_of(id, p["pos"])
 
 		if id in selected:
 			draw_arc(centre, half + 6.0, 0, TAU, 32, Color.WHITE, 2.0)

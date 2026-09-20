@@ -102,6 +102,24 @@ func step() -> void:
 		_step_regiment(regiments[id], dt)
 
 
+## How far a regiment's formation extends toward an enemy at this angle: half its
+## depth toward its own front or back, half its frontage toward a flank. This is what
+## makes two blocks meet front rank to front rank instead of centre to centre.
+##
+## ponytail: measured from max_strength, so the engagement distance does not drift as
+## a regiment is worn down -- which is the entire point. A ten-man remnant therefore
+## keeps a full block's footprint. Give it a real occupied depth if that ever shows.
+static func reach(r: Regiment, exposure: Exposure) -> float:
+	if exposure == Exposure.FLANK:
+		return Formation.frontage(r.max_strength, r.width)
+	return Formation.half_depth(r.max_strength, r.width)
+
+
+## The space between two regiments' facing edges. Negative means they overlap.
+static func gap_between(a: Regiment, b: Regiment) -> float:
+	return a.pos.distance_to(b.pos) - reach(a, exposure_of(a, b)) - reach(b, exposure_of(b, a))
+
+
 ## Who is touching whom. ponytail: O(n^2) over every pair. A battle is ~40 regiments,
 ## so this is 800 distance checks per tick; put them in a grid if that ever changes.
 func _find_contacts() -> Dictionary:
@@ -115,7 +133,7 @@ func _find_contacts() -> Dictionary:
 			var b: Regiment = regiments[ids[j]]
 			if not b.is_alive() or a.owner_id == b.owner_id:
 				continue
-			if a.pos.distance_squared_to(b.pos) > Rules.CONTACT_RANGE * Rules.CONTACT_RANGE:
+			if gap_between(a, b) > Rules.CONTACT_GAP:
 				continue
 			if not out.has(a.id):
 				out[a.id] = []

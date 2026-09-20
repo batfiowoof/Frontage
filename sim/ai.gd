@@ -17,9 +17,10 @@ const Regiment := preload("res://sim/regiment.gd")
 const Formation := preload("res://sim/formation.gd")
 const Orders := preload("res://net/orders.gd")
 
-## Where an advancing line stops relative to the enemy: just inside contact, so it
-## arrives formed rather than trickling in one regiment at a time.
-const STANDOFF := 40.0
+## Where an advancing line aims relative to the enemy centre. It has to clear the
+## enemy's own half-depth or the order points inside the enemy block, which now means
+## marching past the front rank it was supposed to stop against.
+const STANDOFF := 120.0
 const LINE_SPACING := 110.0
 ## How far round the enemy a cavalry sweep goes before turning in.
 const SWEEP_WIDE := 420.0

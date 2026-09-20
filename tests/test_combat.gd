@@ -8,7 +8,9 @@ const Rules := preload("res://sim/rules.gd")
 const Formation := preload("res://sim/formation.gd")
 
 
-func _facing_each_other(gap := 30.0) -> Array:
+## Centres 91 apart is fronts about ten units apart -- two blocks that have just
+## met, rather than two blocks standing inside each other.
+func _facing_each_other(gap := 91.0) -> Array:
 	var bs = BattleState.new()
 	var a = bs.add(1, &"spear", Vector2(-gap * 0.5, 0), 0.0)       # faces +X, at the enemy
 	var b = bs.add(2, &"spear", Vector2(gap * 0.5, 0), PI)         # faces -X, at the enemy
@@ -23,7 +25,7 @@ func _run(bs, ticks: int) -> void:
 # --- contact --------------------------------------------------------------
 
 func test_regiments_out_of_reach_do_not_fight(t) -> void:
-	var s := _facing_each_other(Rules.CONTACT_RANGE * 4.0)
+	var s := _facing_each_other(400.0)
 	_run(s[0], Rules.TICK_HZ)
 	t.eq(s[1].strength, s[1].max_strength, "nobody within reach, nobody hurt")
 	t.eq(s[1].state, Regiment.State.IDLE)
@@ -139,8 +141,8 @@ func test_being_hit_in_the_rear_hurts_more_than_being_hit_in_the_front(t) -> voi
 func _pinned_and_flanked() -> Array:
 	var bs = BattleState.new()
 	var victim = bs.add(1, &"spear", Vector2.ZERO, 0.0)              # facing +X
-	bs.add(2, &"spear", Vector2(30, 0), PI)                          # pins its front
-	var flanker = bs.add(2, &"spear", Vector2(0, -30), PI / 2)       # hits its side
+	bs.add(2, &"spear", Vector2(85, 0), PI)                          # pins its front
+	var flanker = bs.add(2, &"spear", Vector2(0, -75), PI / 2)       # hits its side
 	return [bs, victim, flanker]
 
 
@@ -400,3 +402,58 @@ func test_contact_files_cannot_exceed_what_the_enemy_offers(t) -> void:
 	t.ok(files <= ceili(4 * Rules.WRAP_ALLOWANCE),
 		"capped by the enemy's edge plus a lap round the ends, got %d" % files)
 	t.ok(files > 0, "but never nothing")
+
+
+# --- where the fighting line actually is -----------------------------------
+
+func test_reach_is_depth_to_the_front_and_frontage_to_the_side(t) -> void:
+	var bs = BattleState.new()
+	var r = bs.add(1, &"spear", Vector2.ZERO, 0.0)
+	t.near(BattleState.reach(r, BattleState.Exposure.FRONT),
+		Formation.half_depth(r.max_strength, r.width))
+	t.near(BattleState.reach(r, BattleState.Exposure.REAR),
+		Formation.half_depth(r.max_strength, r.width), 0.0001, "a block is as deep behind as in front")
+	t.near(BattleState.reach(r, BattleState.Exposure.FLANK),
+		Formation.frontage(r.max_strength, r.width), 0.0001, "sideways it is only as wide as its line")
+
+
+func test_reach_does_not_shrink_as_a_regiment_is_worn_down(t) -> void:
+	# The whole complaint: the engagement distance used to walk backwards as men died.
+	var bs = BattleState.new()
+	var r = bs.add(1, &"spear", Vector2.ZERO, 0.0)
+	var fresh := BattleState.reach(r, BattleState.Exposure.FRONT)
+	r.strength = 10
+	t.near(BattleState.reach(r, BattleState.Exposure.FRONT), fresh, 0.0001,
+		"a battered regiment holds the same ground it started on")
+
+
+func test_a_deeper_block_engages_further_out(t) -> void:
+	var bs = BattleState.new()
+	var deep = bs.add(1, &"pike", Vector2.ZERO, 0.0)        # 140 men, 14 wide -> 10 ranks
+	var shallow = bs.add(1, &"archer", Vector2.ZERO, 0.0)   # 80 men, 16 wide -> 5 ranks
+	t.ok(BattleState.reach(deep, BattleState.Exposure.FRONT)
+		> BattleState.reach(shallow, BattleState.Exposure.FRONT),
+		"depth has to reach further, or the deep block's front rank stands inside the enemy")
+
+
+func test_two_blocks_charging_stop_with_their_fronts_touching(t) -> void:
+	var bs = BattleState.new()
+	var a = bs.add(1, &"spear", Vector2(-600, 0), 0.0)
+	var b = bs.add(2, &"spear", Vector2(600, 0), PI)
+	a.order_move(b.pos, 0.0)
+	b.order_move(a.pos, PI)
+	for i in Rules.TICK_HZ * 40:
+		bs.step()
+		if a.state == Regiment.State.FIGHTING and b.state == Regiment.State.FIGHTING:
+			break
+	t.eq(a.state, Regiment.State.FIGHTING, "they should have met")
+
+	var gap := BattleState.gap_between(a, b)
+	t.ok(gap <= Rules.CONTACT_GAP, "in contact: gap %.1f" % gap)
+	t.ok(gap > -Rules.RANK_SPACING * 2.0,
+		"but not standing inside each other: gap %.1f" % gap)
+	var depth: float = Formation.half_depth(a.max_strength, a.width)
+	t.ok(a.pos.distance_to(b.pos) > depth * 2.0 - Rules.RANK_SPACING * 2.0,
+		"centres at least two half-depths apart (%.0f vs %.0f)" % [a.pos.distance_to(b.pos), depth * 2.0])
+	print("  [feel] two blocks meet: centres %.0f apart, front gap %.1f" % [
+		a.pos.distance_to(b.pos), gap])
