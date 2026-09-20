@@ -10,6 +10,8 @@ var _status: Label
 var _roster: Label
 var _address: LineEdit
 var _start: Button
+var _autostart := false
+var _demo_battle := false
 
 
 func _ready() -> void:
@@ -20,7 +22,8 @@ func _ready() -> void:
 	Net.server_left.connect(_on_server_left)
 	_build_lobby()
 
-	# --host / --join <ip> so two instances can be launched without clicking.
+	# --host / --join <ip> / --autostart so two instances can be launched without
+	# clicking through the lobby every time.
 	var args := OS.get_cmdline_user_args()
 	for i in args.size():
 		if args[i] == "--host":
@@ -28,6 +31,22 @@ func _ready() -> void:
 		elif args[i] == "--join" and i + 1 < args.size():
 			_address.text = args[i + 1]
 			_on_join()
+		elif args[i] == "--autostart":
+			_autostart = true
+		elif args[i] == "--demo-battle":
+			_autostart = true
+			_demo_battle = true
+
+
+## Deal the campaign as soon as somebody else turns up.
+func _check_autostart() -> void:
+	if not (_autostart and Net.is_server() and Net.players.size() >= 2):
+		return
+	if _demo_battle and Net.battle == null and Net.campaign == null:
+		Net.start_campaign()
+		Net.start_demo_battle()
+	elif Net.campaign == null:
+		Net.start_campaign()
 
 
 func _build_lobby() -> void:
@@ -95,6 +114,7 @@ func _say(text: String) -> void:
 
 
 func _refresh_lobby() -> void:
+	_check_autostart()
 	# Solo start is allowed on purpose: it is the fastest way to check a change to
 	# the map or the economy without launching a second process.
 	_start.visible = Net.is_server() and Net.campaign == null

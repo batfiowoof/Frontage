@@ -119,6 +119,27 @@ func broadcast_campaign() -> void:
 		_campaign_snapshot.rpc(Snapshot.encode_campaign(campaign))
 
 
+## Drop straight into a battle with no campaign behind it, for tuning how the
+## thing feels to drive. Two mirrored lines, so anything that decides the fight is
+## something a player did.
+func start_demo_battle() -> void:
+	assert(is_server(), "only the server owns a battle")
+	var seats := player_ids()
+	var left: int = seats[0] if seats.size() > 0 else 1
+	var right: int = seats[1] if seats.size() > 1 else left
+	var line := [&"spear", &"sword", &"spear", &"archer", &"spear"]
+	var bs = BattleState.new()
+	for i in line.size():
+		var y := (float(i) - float(line.size() - 1) * 0.5) * Rules.DEPLOY_SPACING
+		bs.add(left, line[i], Vector2(-Rules.DEPLOY_SEPARATION * 0.5, y), 0.0)
+		bs.add(right, line[i], Vector2(Rules.DEPLOY_SEPARATION * 0.5, y), PI)
+	_battle_armies.clear()
+	_battle_tile = -1
+	_battle_seconds = 0.0
+	_announce("demo battle: %d regiments a side" % line.size())
+	start_battle(bs)
+
+
 ## Server only: put a battle on the table and start ticking it.
 func start_battle(bs: BattleState) -> void:
 	assert(is_server(), "only the server owns a battle")
@@ -330,6 +351,12 @@ func _finish_battle() -> void:
 	var winner_id: int = battle.winner()
 	stop_battle()
 	battle = null
+
+	if _battle_armies.is_empty():
+		_announce("demo battle over: player %d held the field" % winner_id)
+		_battle_over.rpc(battle_epoch)
+		battle_updated.emit(null)
+		return
 
 	var attacker = null
 	var defender = null
