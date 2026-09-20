@@ -4,6 +4,7 @@ extends Node
 const CampaignView := preload("res://view/campaign/campaign_view.gd")
 const BattleView := preload("res://view/battle/battle_view.gd")
 const Replay := preload("res://net/replay.gd")
+const Save := preload("res://net/save.gd")
 
 var _screen: Node = null
 var _lobby: CanvasLayer
@@ -12,9 +13,11 @@ var _roster: Label
 var _address: LineEdit
 var _start: Button
 var _add_ai: Button
+var _load: Button
 var _autostart := false
 var _demo_battle := false
 var _replay_path := ""
+var _load_path := ""
 
 
 func _ready() -> void:
@@ -43,6 +46,9 @@ func _ready() -> void:
 			_replay_path = args[i + 1]
 			_autostart = true
 			_on_host()
+		elif args[i] == "--load" and i + 1 < args.size():
+			_load_path = args[i + 1]
+			_autostart = true
 		elif args[i] == "--ai" and i + 1 < args.size():
 			for n in int(args[i + 1]):
 				Net.add_ai()
@@ -60,6 +66,12 @@ func _check_autostart() -> void:
 			Net.play_replay(r)
 		return
 	if not (_autostart and Net.is_server() and Net.players.size() >= 2):
+		return
+	if not _load_path.is_empty() and Net.campaign == null:
+		var wanted := _load_path
+		_load_path = ""
+		if not Net.load_campaign(wanted):
+			_say("that save will not load")
 		return
 	if _demo_battle and Net.battle == null and Net.campaign == null:
 		Net.start_campaign()
@@ -110,6 +122,18 @@ func _build_lobby() -> void:
 		_refresh_lobby())
 	box.add_child(_add_ai)
 
+	_load = Button.new()
+	_load.text = "Load last campaign"
+	_load.visible = false
+	_load.pressed.connect(func() -> void:
+		var newest := Save.newest()
+		if newest.is_empty():
+			_say("no saved campaigns")
+		elif not Net.load_campaign(newest):
+			_say("that save does not fit this table")
+		)
+	box.add_child(_load)
+
 	_start = Button.new()
 	_start.text = "Start Campaign"
 	_start.visible = false
@@ -146,6 +170,7 @@ func _refresh_lobby() -> void:
 	# the map or the economy without launching a second process.
 	_start.visible = Net.is_server() and Net.campaign == null
 	_add_ai.visible = _start.visible
+	_load.visible = _start.visible and not Save.newest().is_empty()
 	var names := PackedStringArray()
 	for id: int in Net.player_ids():
 		names.append("player %d%s" % [id, "  (you)" if id == Net.my_id() else ""])

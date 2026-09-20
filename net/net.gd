@@ -11,6 +11,7 @@ const CampaignState := preload("res://sim/campaign_state.gd")
 const Autoresolve := preload("res://sim/autoresolve.gd")
 const Ai := preload("res://sim/ai.gd")
 const Replay := preload("res://net/replay.gd")
+const Save := preload("res://net/save.gd")
 const Regiment := preload("res://sim/regiment.gd")
 const Snapshot := preload("res://net/snapshot.gd")
 const Orders := preload("res://net/orders.gd")
@@ -28,6 +29,7 @@ signal players_changed
 signal order_rejected(peer_id, reason)
 signal news(text)          # something happened that a player should be told about
 signal replay_saved(path)
+signal campaign_saved(path)
 signal connection_failed
 signal server_left
 
@@ -150,6 +152,39 @@ func start_campaign(map_seed := 0) -> void:
 	campaign = CampaignState.generate(player_ids(), map_seed)
 	broadcast_campaign()
 	campaign_updated.emit(campaign)
+
+
+## Server only. A campaign is only coherent between battles, so saving mid-fight is
+## refused rather than half-done.
+func save_campaign(path := "") -> String:
+	if not is_server() or campaign == null or battle != null:
+		return ""
+	var written: String = Save.of(campaign, player_ids()).save(path)
+	if not written.is_empty():
+		_announce("campaign saved: %s" % written)
+		campaign_saved.emit(written)
+	return written
+
+
+## Server only. Everyone has to be here first: the seats are filled in order, so a
+## different number of players is a different game.
+func load_campaign(path: String) -> bool:
+	if not is_server():
+		return false
+	var file = Save.load_from(path)
+	if file == null:
+		push_warning("[save] %s will not load" % path)
+		return false
+	var restored = file.restore(player_ids())
+	if restored == null:
+		push_warning("[save] that save wants %d players and %d are here" % [
+			file.seats.size(), player_ids().size()])
+		return false
+	campaign = restored
+	broadcast_campaign()
+	campaign_updated.emit(campaign)
+	_announce("campaign loaded from turn %d" % campaign.turn)
+	return true
 
 
 func broadcast_campaign() -> void:

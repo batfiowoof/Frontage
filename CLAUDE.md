@@ -274,6 +274,22 @@ in `rules.gd`, watch it again. `verify()` failing after a rules change is not a 
 the point of keeping the file. It failing *without* one means something in the sim has
 stopped being deterministic, and `_keep_the_recording()` warns when that happens.
 
+## Saving
+
+A campaign saves to `user://saves/` from the button on the campaign screen, and loads
+from the lobby. `Snapshot.encode_campaign` does nearly all of it.
+
+The part that is not obvious: **peer ids are random and change every session**, so a save
+stores the *seats* -- the owner ids in a stable order -- and loading maps them onto
+whoever has turned up this time, in order. `CampaignState.remap_owners()` re-points the
+settlements, armies, treasuries and ready flags together. A mapping that misses one of
+those silently hands somebody another player's empire, and nothing else in the game would
+notice, which is why the tests check each of them separately.
+
+A save that wants a different number of players than are at the table is refused rather
+than approximated. Saving mid-battle is refused too: a campaign is only coherent between
+fights.
+
 ## Things that were not obvious
 
 - A campaign regiment is `[kind, strength]`, not a bare kind. Carrying only the kind

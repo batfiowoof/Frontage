@@ -107,6 +107,15 @@ func _build_hud() -> void:
 		_build_bar.add_child(b)
 		_build_buttons[building] = b
 
+	if Net.is_server():
+		var save := Button.new()
+		save.text = "Save"
+		save.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+		save.position = Vector2(-92, 10)
+		save.custom_minimum_size = Vector2(80, 28)
+		save.pressed.connect(func() -> void: Net.save_campaign())
+		layer.add_child(save)
+
 	_end_turn = Button.new()
 	_end_turn.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
 	_end_turn.position = Vector2(-150, -40)

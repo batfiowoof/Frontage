@@ -311,6 +311,28 @@ func is_alive(owner: int) -> bool:
 	return false
 
 
+## Hand every seat to a new owner id. Peer ids are random per session, so loading a
+## save means the empires have to be re-pointed at whoever has actually turned up; a
+## mapping that misses anything silently gives somebody else's empire away.
+func remap_owners(mapping: Dictionary) -> void:
+	for s: Dictionary in settlements:
+		if mapping.has(s["owner"]):
+			s["owner"] = mapping[s["owner"]]
+	for a in armies.values():
+		if mapping.has(a["owner"]):
+			a["owner"] = mapping[a["owner"]]
+	gold = _remapped(gold, mapping)
+	food = _remapped(food, mapping)
+	ready = _remapped(ready, mapping)
+
+
+static func _remapped(book: Dictionary, mapping: Dictionary) -> Dictionary:
+	var out := {}
+	for owner in book:
+		out[mapping.get(owner, owner)] = book[owner]
+	return out
+
+
 func sorted_army_ids() -> Array:
 	var ids := armies.keys()
 	ids.sort()
