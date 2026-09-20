@@ -367,6 +367,10 @@ func order_raze(army_id: int) -> void:
 	submit(Orders.raze(army_id))
 
 
+func order_research(tech: StringName) -> void:
+	submit(Orders.research(tech))
+
+
 func _receive_order(sender: int, bytes: PackedByteArray) -> void:
 	var order := Orders.decode(bytes)
 	if order.is_empty():
@@ -392,6 +396,8 @@ func _receive_order(sender: int, bytes: PackedByteArray) -> void:
 			_focus(sender, order)
 		Orders.Type.RAZE:
 			_raze(sender, order)
+		Orders.Type.RESEARCH:
+			_research(sender, order)
 
 
 # --- campaign orders ------------------------------------------------------
@@ -460,6 +466,18 @@ func _set_formation(sender: int, order: Dictionary) -> void:
 		var changed: bool = r.set_formation(order["formation"])
 		if int(order["width"]) > 0 and not changed:
 			r.set_width(int(order["width"]))
+
+
+func _research(sender: int, order: Dictionary) -> void:
+	if campaign == null:
+		_reject(sender, "no campaign in progress")
+		return
+	if not campaign.learn(sender, order["tech"]):
+		_reject(sender, "cannot learn %s yet" % order["tech"])
+		return
+	_announce("player %d has learned %s" % [sender, order["tech"]])
+	broadcast_campaign()
+	campaign_updated.emit(campaign)
 
 
 func _raze(sender: int, order: Dictionary) -> void:
@@ -548,7 +566,12 @@ func _begin_battle(attacker: Dictionary, defender: Dictionary) -> void:
 
 	var bs = BattleState.new()
 	bs.lay_ground(int(campaign.terrain[_battle_tile]), _battle_tile * 7919 + campaign.turn)
-	var fortified := campaign.defense_at(_battle_tile, defender["owner"])
+	for side in [attacker["owner"], defender["owner"]]:
+		bs.techs[side] = campaign.techs_of(side).duplicate()
+	# Siegecraft is the attacker's answer to a wall, so it is folded in here rather than
+	# left for the battle to discover -- the defence is a property of the ground.
+	var fortified := campaign.defense_at(_battle_tile, defender["owner"]) \
+		* bs.tech(attacker["owner"], &"siege")
 	_deploy(bs, attacker, -Rules.DEPLOY_SEPARATION * 0.5, 0.0, 0.0)
 	_deploy(bs, defender, Rules.DEPLOY_SEPARATION * 0.5, PI, fortified)
 	if fortified > 0.0:

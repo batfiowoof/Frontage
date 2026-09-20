@@ -186,6 +186,50 @@ const BRACE_PROTECTION := 0.45
 ## A kind at or above this speed counts as cavalry for bracing and for the AI.
 const CAVALRY_SPEED := 1.4
 
+# --- the tech trees -----------------------------------------------------
+## Two trees, one pool. Both draw on the same research, so every tech taken in one is a
+## tech not taken in the other -- that tension is the reason there are two trees rather
+## than one long list.
+##
+## Effects are DATA, not code: a small set of keys the sim reads uniformly, so adding a
+## tech later is a table row and a test rather than a new branch anywhere.
+##
+##   tree    "economy" or "battle", for which column it appears in
+##   cost    research points
+##   needs   techs that must be known first
+##   effect  one entry from the key list below
+##
+## economy keys, read by campaign_state.gd:
+##   yield        multiplies what named structures produce, e.g. {"farm": 1.5}
+##   build_cost   multiplies what every structure costs
+##   work_radius  adds hexes to how far a town reaches
+##   town_gold    adds to every settlement's own income
+## battle keys, read by battle_state.gd through BattleState.tech():
+##   attack       damage dealt
+##   armour       damage taken
+##   horse_speed  movement, cavalry only
+##   horse_attack damage dealt, cavalry only
+##   stamina      how fast stamina drains (lower is better)
+##   resolve      how fast morale drains (lower is better)
+##   siege        multiplies the defender's fortification, so 0.5 halves walls
+const TECHS := {
+	# --- economy
+	&"husbandry":    {"tree": "economy", "cost": 40,  "needs": [],              "effect": {"yield": {"farm": 1.5, "pasture": 1.4}}},
+	&"masonry":      {"tree": "economy", "cost": 55,  "needs": [],              "effect": {"build_cost": 0.75}},
+	&"coinage":      {"tree": "economy", "cost": 50,  "needs": [],              "effect": {"yield": {"market": 1.5, "mine": 1.4}}},
+	&"irrigation":   {"tree": "economy", "cost": 95,  "needs": [&"husbandry"],  "effect": {"yield": {"farm": 2.0}}},
+	&"banking":      {"tree": "economy", "cost": 110, "needs": [&"coinage"],    "effect": {"town_gold": 30}},
+	&"guilds":       {"tree": "economy", "cost": 130, "needs": [&"masonry"],    "effect": {"work_radius": 1}},
+
+	# --- battle
+	&"drill":        {"tree": "battle",  "cost": 45,  "needs": [],              "effect": {"stamina": 0.6}},
+	&"armoury":      {"tree": "battle",  "cost": 60,  "needs": [],              "effect": {"armour": 0.15}},
+	&"horsemanship": {"tree": "battle",  "cost": 50,  "needs": [],              "effect": {"horse_speed": 1.2}},
+	&"discipline":   {"tree": "battle",  "cost": 100, "needs": [&"drill"],      "effect": {"resolve": 0.65}},
+	&"siegecraft":   {"tree": "battle",  "cost": 105, "needs": [&"armoury"],    "effect": {"siege": 0.5}},
+	&"stirrups":     {"tree": "battle",  "cost": 120, "needs": [&"horsemanship"], "effect": {"horse_attack": 1.4}},
+}
+
 # --- campaign -----------------------------------------------------------
 ## Hexes, in odd-r offset coordinates: stored row by row exactly as a square grid is,
 ## so `idx`, `tile_x`, `tile_y` and the breadth-first search over them never noticed
@@ -239,4 +283,7 @@ const START_FOOD := 200
 const START_RESEARCH := 0
 const SETTLEMENT_GOLD := 60                # per turn, per owned settlement
 const SETTLEMENT_FOOD := 25
-const SETTLEMENT_RESEARCH := 3
+## A town's own contribution to the pool. At 3 the cheapest tech was thirteen turns
+## away, which is not a tree so much as a rumour of one; at 8 the first lands around
+## turn five and a library roughly doubles the pace after that.
+const SETTLEMENT_RESEARCH := 8

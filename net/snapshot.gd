@@ -49,7 +49,7 @@ static func encode_battle(bs) -> PackedByteArray:
 		for field in REGIMENT_FIELDS:
 			row.append(r.get(field[0]))
 		rows.append(row)
-	return var_to_bytes([VERSION, bs.tick, bs._next_id, rows, bs.features])
+	return var_to_bytes([VERSION, bs.tick, bs._next_id, rows, bs.features, bs.techs])
 
 
 ## Returns a BattleState, or null if the bytes are not a snapshot we understand.
@@ -57,7 +57,7 @@ static func decode_battle(bytes: PackedByteArray):
 	if bytes.size() < 4:
 		return null                         # too short for bytes_to_var to even look at
 	var data = bytes_to_var(bytes)          # never _with_objects: that is remote code execution
-	if typeof(data) != TYPE_ARRAY or data.size() != 5:
+	if typeof(data) != TYPE_ARRAY or data.size() != 6:
 		return null
 	if typeof(data[0]) != TYPE_INT or data[0] != VERSION:
 		return null
@@ -99,6 +99,18 @@ static func decode_battle(bytes: PackedByteArray):
 		if f[3] <= 0.0 or f[3] > Rules.BATTLE_HALF_EXTENT:
 			return null
 	bs.features = data[4]
+
+	if typeof(data[5]) != TYPE_DICTIONARY:
+		return null
+	for owner in data[5]:
+		if typeof(owner) != TYPE_INT or typeof(data[5][owner]) != TYPE_ARRAY:
+			return null
+		if data[5][owner].size() > Rules.TECHS.size():
+			return null
+		for name in data[5][owner]:
+			if typeof(name) != TYPE_STRING_NAME or not Rules.TECHS.has(name):
+				return null
+	bs.techs = data[5]
 	return bs
 
 
@@ -118,7 +130,7 @@ static func encode_campaign(cs) -> PackedByteArray:
 	return var_to_bytes([
 		VERSION, cs.turn, cs._next_army, cs.terrain,
 		settlements, armies, cs.gold, cs.food, cs.ready, cs.structures,
-		cs.research,
+		cs.research, cs.known,
 	])
 
 
@@ -126,7 +138,7 @@ static func decode_campaign(bytes: PackedByteArray):
 	if bytes.size() < 4:
 		return null
 	var d = bytes_to_var(bytes)
-	if typeof(d) != TYPE_ARRAY or d.size() != 11:
+	if typeof(d) != TYPE_ARRAY or d.size() != 12:
 		return null
 	if typeof(d[0]) != TYPE_INT or d[0] != VERSION:
 		return null
@@ -195,8 +207,21 @@ static func decode_campaign(bytes: PackedByteArray):
 	var pool = _int_map(d[10])
 	if pool == null:
 		return null
+	if typeof(d[11]) != TYPE_DICTIONARY:
+		return null
+	for owner in d[11]:
+		if typeof(owner) != TYPE_INT or typeof(d[11][owner]) != TYPE_ARRAY:
+			return null
+		if d[11][owner].size() > Rules.TECHS.size():
+			return null
+		var seen := {}
+		for name in d[11][owner]:
+			if typeof(name) != TYPE_STRING_NAME or not Rules.TECHS.has(name) or seen.has(name):
+				return null    # learning the same thing twice would compound its effect
+			seen[name] = true
 	cs.structures = d[9]
 	cs.research = pool
+	cs.known = d[11]
 	cs.gold = purse
 	cs.food = larder
 	cs.ready = flags

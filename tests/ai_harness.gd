@@ -133,11 +133,17 @@ func _check(cs) -> void:
 			built += 1
 	if built <= 2:
 		_fail("only %d structures on the whole map: the AI is not developing" % built)
+
+	var learned := 0
+	for seat in [-1, -2]:
+		learned += cs.techs_of(seat).size()
+	if learned == 0:
+		_fail("neither AI researched anything, so the trees are not reachable in a real game")
 	if men == 0:
 		_fail("both AIs have no men left at all")
 
-	print("[ai] turn %d: %d battles, %d settlements changed hands, %d buildings, %d men alive" % [
-		cs.turn, battles, captures, built, men])
+	print("[ai] turn %d: %d battles, %d settlements changed hands, %d structures, %d techs, %d men" % [
+		cs.turn, battles, captures, built, learned, men])
 
 
 func _fail(msg: String) -> void:

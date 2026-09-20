@@ -21,6 +21,7 @@ var armies := {}                   # id -> {id, owner, tile, move_left, regiment
 var gold := {}                     # owner -> int
 var food := {}                     # owner -> int
 var research := {}                 # owner -> int, the pool both tech trees spend
+var known := {}                    # owner -> Array of tech names
 var ready := {}                    # owner -> bool
 var _next_army := 1
 
@@ -181,6 +182,79 @@ static func settlement_income(_s: Dictionary) -> Dictionary:
 		"research": Rules.SETTLEMENT_RESEARCH}
 
 
+## Everything this player has learned.
+func techs_of(owner: int) -> Array:
+	return known.get(owner, [])
+
+
+## The value of an effect key across every tech this player knows. Multiplicative keys
+## compound, additive ones sum -- which is which is decided here and nowhere else, so a
+## new tech is a table row rather than a branch.
+const ADDITIVE := [&"work_radius", &"town_gold", &"armour"]
+
+
+func tech(owner: int, key: StringName) -> float:
+	var additive := ADDITIVE.has(key)
+	var out := 0.0 if additive else 1.0
+	for name: StringName in techs_of(owner):
+		var effect: Dictionary = Rules.TECHS[name]["effect"]
+		if not effect.has(key):
+			continue
+		if additive:
+			out += float(effect[key])
+		else:
+			out *= float(effect[key])
+	return out
+
+
+## What a named structure yields this player, after whatever they have learned.
+func tech_yield(owner: int, structure: StringName) -> float:
+	var out := 1.0
+	for name: StringName in techs_of(owner):
+		var effect: Dictionary = Rules.TECHS[name]["effect"]
+		if effect.has("yield") and effect["yield"].has(structure):
+			out *= float(effect["yield"][structure])
+	return out
+
+
+func reach_of(owner: int) -> int:
+	return Rules.WORK_RADIUS + int(tech(owner, &"work_radius"))
+
+
+func cost_of(owner: int, structure: StringName) -> int:
+	return int(round(float(Rules.STRUCTURES[structure]["cost"]) * tech(owner, &"build_cost")))
+
+
+## Can this player learn it: a tech they do not have, whose prerequisites they do, and
+## which they can pay for out of the one pool both trees share.
+func can_learn(owner: int, name: StringName) -> bool:
+	if not Rules.TECHS.has(name) or techs_of(owner).has(name):
+		return false
+	for needed: StringName in Rules.TECHS[name]["needs"]:
+		if not techs_of(owner).has(needed):
+			return false
+	return int(research.get(owner, 0)) >= int(Rules.TECHS[name]["cost"])
+
+
+func learn(owner: int, name: StringName) -> bool:
+	if not can_learn(owner, name):
+		return false
+	research[owner] = int(research[owner]) - int(Rules.TECHS[name]["cost"])
+	if not known.has(owner):
+		known[owner] = []
+	known[owner].append(name)
+	return true
+
+
+## Everything this player could learn right now, for the buttons.
+func learnable(owner: int) -> Array:
+	var out := []
+	for name: StringName in Rules.TECHS:
+		if can_learn(owner, name):
+			out.append(name)
+	return out
+
+
 ## What stands on a tile, or &"" for bare ground.
 func structure_at(tile: int) -> StringName:
 	if tile < 0 or tile >= structures.size() or structures[tile] == 0:
@@ -199,12 +273,12 @@ static func structure_code(name: StringName) -> int:
 ## lower tile index so two towns can never both bank the same field.
 func working_settlement(tile: int) -> Variant:
 	var best = null
-	var best_distance := Rules.WORK_RADIUS + 1
+	var best_distance := 1 << 20
 	for s: Dictionary in settlements:
 		if s["owner"] == 0:
 			continue
 		var d := hex_distance(tile, s["tile"])
-		if d <= Rules.WORK_RADIUS and (d < best_distance or (d == best_distance and best != null and s["tile"] < best["tile"])):
+		if d <= reach_of(s["owner"]) and (d < best_distance or (d == best_distance and best != null and s["tile"] < best["tile"])):
 			best_distance = d
 			best = s
 	return best
@@ -221,9 +295,10 @@ func worked_yield(owner: int) -> Dictionary:
 		if s == null or s["owner"] != owner:
 			continue
 		var spec: Dictionary = Rules.STRUCTURES[name]
-		out["gold"] += int(spec["gold"])
-		out["food"] += int(spec["food"])
-		out["research"] += int(spec["research"])
+		var better := tech_yield(owner, name)
+		out["gold"] += int(round(float(spec["gold"]) * better))
+		out["food"] += int(round(float(spec["food"]) * better))
+		out["research"] += int(round(float(spec["research"]) * better))
 	return out
 
 
@@ -250,7 +325,7 @@ func can_place(owner: int, tile: int, name: StringName) -> bool:
 func place(owner: int, tile: int, name: StringName) -> bool:
 	if not can_place(owner, tile, name):
 		return false
-	var cost := int(Rules.STRUCTURES[name]["cost"])
+	var cost := cost_of(owner, name)
 	if int(gold.get(owner, 0)) < cost:
 		return false
 	gold[owner] = int(gold[owner]) - cost
@@ -360,6 +435,7 @@ func remap_owners(mapping: Dictionary) -> void:
 	gold = _remapped(gold, mapping)
 	food = _remapped(food, mapping)
 	research = _remapped(research, mapping)
+	known = _remapped(known, mapping)
 	ready = _remapped(ready, mapping)
 
 
@@ -480,7 +556,7 @@ func end_turn() -> void:
 		for s: Dictionary in settlements:
 			if s["owner"] == owner:
 				var income := settlement_income(s)
-				earned["gold"] += income["gold"]
+				earned["gold"] += income["gold"] + int(tech(owner, &"town_gold"))
 				earned["food"] += income["food"]
 				earned["research"] += income["research"]
 		gold[owner] = int(gold[owner]) + earned["gold"]
@@ -602,6 +678,7 @@ static func generate(owner_ids: Array, map_seed: int):
 	cs.food = larder
 	for n in owner_ids.size():
 		cs.research[owner_ids[n]] = Rules.START_RESEARCH
+		cs.known[owner_ids[n]] = []
 		cs.add_army(owner_ids[n], towns[n]["tile"], [&"spear", &"spear", &"archer"])
 
 	# Every capital starts with a barracks standing on a hex beside it: a real place,

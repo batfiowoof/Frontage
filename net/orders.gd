@@ -15,7 +15,7 @@ const VERSION := 1
 const MAX_IDS_PER_ORDER := 64          # a box selection, not a whole army list
 const TILE_COUNT := Rules.MAP_W * Rules.MAP_H
 
-enum Type { BATTLE_MOVE, ARMY_MOVE, RECRUIT, READY, BUILD, SET_FORMATION, FOCUS, RAZE }
+enum Type { BATTLE_MOVE, ARMY_MOVE, RECRUIT, READY, BUILD, SET_FORMATION, FOCUS, RAZE, RESEARCH }
 
 
 # --- encoding -------------------------------------------------------------
@@ -43,6 +43,10 @@ static func build(tile: int, structure: StringName) -> PackedByteArray:
 
 static func raze(army_id: int) -> PackedByteArray:
 	return var_to_bytes([VERSION, Type.RAZE, army_id])
+
+
+static func research(tech: StringName) -> PackedByteArray:
+	return var_to_bytes([VERSION, Type.RESEARCH, tech])
 
 
 ## One order for both, because changing either is the same manoeuvre. A width of 0
@@ -89,6 +93,8 @@ static func decode(bytes: PackedByteArray) -> Dictionary:
 			return _decode_focus(d)
 		Type.RAZE:
 			return _decode_raze(d)
+		Type.RESEARCH:
+			return _decode_research(d)
 	return {}
 
 
@@ -182,6 +188,14 @@ static func _decode_raze(d: Array) -> Dictionary:
 	if d.size() != 3 or typeof(d[2]) != TYPE_INT:
 		return {}
 	return {"type": Type.RAZE, "army_id": d[2]}
+
+
+static func _decode_research(d: Array) -> Dictionary:
+	if d.size() != 3 or typeof(d[2]) != TYPE_STRING_NAME:
+		return {}
+	if not Rules.TECHS.has(d[2]):
+		return {}
+	return {"type": Type.RESEARCH, "tech": d[2]}
 
 
 static func _is_tile(i: int) -> bool:

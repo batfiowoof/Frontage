@@ -26,6 +26,8 @@ var _recruit_bar: HBoxContainer
 var _build_bar: HBoxContainer
 var _build_buttons := {}
 var _raze: Button
+var _trees: PanelContainer
+var _tech_buttons := {}
 var _recruit_buttons := {}
 var _dragging := false
 
@@ -114,12 +116,77 @@ func _build_hud() -> void:
 		save.pressed.connect(func() -> void: Net.save_campaign())
 		layer.add_child(save)
 
+	_build_trees(layer)
+
 	_end_turn = Button.new()
 	_end_turn.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
 	_end_turn.position = Vector2(-150, -40)
 	_end_turn.custom_minimum_size = Vector2(138, 32)
 	_end_turn.pressed.connect(_on_end_turn)
 	layer.add_child(_end_turn)
+
+
+## Both trees side by side, one pool underneath. Hidden until asked for with T: the
+## map is the thing you are looking at, and this is a decision you make between turns.
+func _build_trees(layer: CanvasLayer) -> void:
+	_trees = PanelContainer.new()
+	_trees.set_anchors_preset(Control.PRESET_CENTER)
+	_trees.position = Vector2(-260, -190)
+	_trees.custom_minimum_size = Vector2(520, 380)
+	_trees.visible = false
+	layer.add_child(_trees)
+
+	var rows := VBoxContainer.new()
+	rows.add_theme_constant_override("separation", 6)
+	_trees.add_child(rows)
+
+	var title := Label.new()
+	title.text = "Research   (T to close)"
+	title.add_theme_font_size_override("font_size", 18)
+	rows.add_child(title)
+
+	var columns := HBoxContainer.new()
+	columns.add_theme_constant_override("separation", 18)
+	rows.add_child(columns)
+	for tree: String in ["economy", "battle"]:
+		var column := VBoxContainer.new()
+		column.custom_minimum_size = Vector2(240, 0)
+		columns.add_child(column)
+		var heading := Label.new()
+		heading.text = tree
+		column.add_child(heading)
+		for name: StringName in Rules.TECHS:
+			if Rules.TECHS[name]["tree"] != tree:
+				continue
+			var b := Button.new()
+			b.text = "%s  %d" % [name, Rules.TECHS[name]["cost"]]
+			b.pressed.connect(func() -> void: Net.order_research(name))
+			column.add_child(b)
+			_tech_buttons[name] = b
+
+
+func _refresh_trees() -> void:
+	if not _trees.visible:
+		return
+	var cs = Net.campaign
+	if cs == null:
+		return
+	var me: int = Net.my_id()
+	var known: Array = cs.techs_of(me)
+	for name: StringName in _tech_buttons:
+		var b: Button = _tech_buttons[name]
+		if known.has(name):
+			b.disabled = true
+			b.modulate = Color("9fd8a0")
+			b.tooltip_text = "known"
+			continue
+		b.disabled = not cs.can_learn(me, name)
+		b.modulate = Color.WHITE
+		var missing := []
+		for needed: StringName in Rules.TECHS[name]["needs"]:
+			if not known.has(needed):
+				missing.append(String(needed))
+		b.tooltip_text = "needs %s" % ", ".join(missing) if not missing.is_empty() else ""
 
 
 # --- input ----------------------------------------------------------------
@@ -136,10 +203,17 @@ func _unhandled_input(event: InputEvent) -> void:
 			_on_click(_tile_under_mouse())
 	elif event is InputEventMouseMotion and _dragging:
 		_camera.position -= event.relative / _camera.zoom
-	elif event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
-		selected_army = -1
-		selected_tile = -1
-		_refresh()
+	elif event is InputEventKey and event.pressed and not event.echo:
+		if event.keycode == KEY_T:
+			_trees.visible = not _trees.visible
+			_refresh()
+		elif event.keycode == KEY_ESCAPE:
+			if _trees.visible:
+				_trees.visible = false
+			else:
+				selected_army = -1
+				selected_tile = -1
+			_refresh()
 
 
 func _zoom(factor: float) -> void:
@@ -212,6 +286,7 @@ func _refresh() -> void:
 	_status.text = "Turn %d      gold %d      food %d      research %d      upkeep %d" % [
 		cs.turn, int(cs.gold.get(me, 0)), int(cs.food.get(me, 0)),
 		int(cs.research.get(me, 0)), cs.upkeep_of(me)]
+	_status.text += "      T: research (%d known)" % cs.techs_of(me).size()
 
 	var lines := PackedStringArray()
 	for id: int in seating:
@@ -220,6 +295,8 @@ func _refresh() -> void:
 			"ready" if bool(cs.ready.get(id, false)) else "thinking",
 			cs.settlements_of(id)])
 	_players.text = "\n".join(lines)
+
+	_refresh_trees()
 
 	var mine_ready := bool(cs.ready.get(me, false))
 	_end_turn.text = "Waiting..." if mine_ready else "End Turn"

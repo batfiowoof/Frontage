@@ -23,6 +23,11 @@ var regiments := {}                # id -> Regiment
 var _next_id := 1
 ## [[kind, x, y, radius], ...]. Rows rather than objects because they go on the wire.
 var features := []
+## What each side has learned, carried in from the campaign. Per owner rather than per
+## regiment: four more floats on every regiment would cost ~32 B each on a wire already
+## at 171, and this is a few dozen bytes for the whole battle. It has to be on the wire
+## at all because a replay rebuilds the fight from the opening snapshot.
+var techs := {}
 
 
 func add(owner_id: int, kind: StringName, pos: Vector2, facing := 0.0) -> Regiment:
@@ -113,6 +118,22 @@ func step() -> void:
 
 	for id in sorted_ids():
 		_step_regiment(regiments[id], dt)
+
+
+## An effect key for one side, across everything it has learned. The same shape the
+## campaign uses, so a tech means the same thing in both halves of the game.
+func tech(owner: int, key: StringName) -> float:
+	var additive: bool = key == &"armour"
+	var out := 0.0 if additive else 1.0
+	for name: StringName in techs.get(owner, []):
+		var spec = Rules.TECHS.get(name)
+		if spec == null or not spec["effect"].has(key):
+			continue
+		if additive:
+			out += float(spec["effect"][key])
+		else:
+			out *= float(spec["effect"][key])
+	return out
 
 
 ## What the ground does where a regiment is standing. Overlapping patches take the
@@ -385,10 +406,15 @@ func _accumulate_strike(attacker: Regiment, defender: Regiment, dt: float, kills
 	output *= attacker.readiness() * damage_mult * dt
 	output *= float(attacker.form()["damage"]) * attacker.order_factor() * braced
 	output *= float(ground_at(attacker.pos)["damage"])
+	output *= tech(attacker.owner_id, &"attack")
+	if attacker.is_cavalry():
+		output *= tech(attacker.owner_id, &"horse_attack")
+	output *= 1.0 - clampf(tech(defender.owner_id, &"armour"), 0.0, 0.6)
 	output *= 1.0 - clampf(defender.defense + float(defender.form()["defense"]) * defender.order_factor(), 0.0, 0.9)
 
 	kills[defender.id] = float(kills.get(defender.id, 0.0)) + output
-	shocks[defender.id] = float(shocks.get(defender.id, 0.0)) + morale_drain * dt
+	var shaken := morale_drain * tech(defender.owner_id, &"resolve") * dt
+	shocks[defender.id] = float(shocks.get(defender.id, 0.0)) + shaken
 
 
 ## How many files a regiment can turn toward an enemy at this angle. Frontally it
@@ -457,7 +483,7 @@ func _step_regiment(r: Regiment, dt: float) -> void:
 				r.rest(Rules.STAMINA_RECOVERY * dt)
 			_turn_toward(r, r.target_facing, dt)
 		Regiment.State.FIGHTING:
-			r.tire(Rules.STAMINA_DRAIN_FIGHTING * dt)
+			r.tire(Rules.STAMINA_DRAIN_FIGHTING * tech(r.owner_id, &"stamina") * dt)
 			# Wheeling in contact is slow, so a flank is a race the victim can lose.
 			var foe = regiments.get(r.engaged_with)
 			if foe != null:
@@ -468,6 +494,8 @@ func _advance(r: Regiment, dt: float) -> void:
 	var routing: bool = r.state == Regiment.State.ROUTING
 	var speed: float = Rules.MOVE_SPEED * float(Rules.KINDS[r.kind]["speed"]) * float(r.form()["speed"])
 	speed *= float(ground_at(r.pos)["speed"])
+	if r.is_cavalry():
+		speed *= tech(r.owner_id, &"horse_speed")
 	if routing:
 		speed *= Rules.ROUT_SPEED_MULT
 	var to_target: Vector2 = r.target - r.pos

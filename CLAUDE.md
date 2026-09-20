@@ -275,7 +275,51 @@ Deliberate because marching through enemy farmland without torching it has to st
 option, or there is no decision in it. Burned ground can be built on again -- this is
 pillage, not salting the earth.
 
-## Replays## Replays
+## The tech trees
+
+Two trees, **one pool**. Research is a third resource produced by settlements and by
+libraries; both trees spend it, so every tech taken in one is a tech not taken in the
+other. That tension is the reason there are two trees rather than one long list.
+
+`Rules.TECHS` is one table: tree, cost, prerequisites, and one effect. Effects are **data,
+not code** -- a small set of keys the sim reads uniformly (`yield`, `build_cost`,
+`work_radius`, `town_gold`; `attack`, `armour`, `horse_speed`, `horse_attack`, `stamina`,
+`resolve`, `siege`) -- so adding a tech is a table row and a test, never a new branch.
+
+`ADDITIVE` in `campaign_state.gd` decides which keys sum and which compound, in one place.
+
+**Battle techs are per owner, not per regiment.** The battle snapshot carries a small
+`techs` header and `BattleState.tech()` derives the multipliers. Four more floats on every
+regiment would cost ~32 B each on a wire already at 171; the header is a few dozen bytes
+for the whole battle. It has to be on the wire at all because a replay rebuilds the fight
+from the opening snapshot -- the same reason `defense` is on there.
+
+Measured: over a 70s duel, untrained keeps 91 men and leaves the enemy 91; drilled and
+armoured keeps 96 and leaves them 87.
+
+## Replays## The tech trees
+
+Two trees, **one pool**. Research is a third resource produced by settlements and by
+libraries; both trees spend it, so every tech taken in one is a tech not taken in the
+other. That tension is the reason there are two trees rather than one long list.
+
+`Rules.TECHS` is one table: tree, cost, prerequisites, and one effect. Effects are **data,
+not code** -- a small set of keys the sim reads uniformly (`yield`, `build_cost`,
+`work_radius`, `town_gold`; `attack`, `armour`, `horse_speed`, `horse_attack`, `stamina`,
+`resolve`, `siege`) -- so adding a tech is a table row and a test, never a new branch.
+
+`ADDITIVE` in `campaign_state.gd` decides which keys sum and which compound, in one place.
+
+**Battle techs are per owner, not per regiment.** The battle snapshot carries a small
+`techs` header and `BattleState.tech()` derives the multipliers. Four more floats on every
+regiment would cost ~32 B each on a wire already at 171; the header is a few dozen bytes
+for the whole battle. It has to be on the wire at all because a replay rebuilds the fight
+from the opening snapshot -- the same reason `defense` is on there.
+
+Measured: over a 70s duel, untrained keeps 91 men and leaves the enemy 91; drilled and
+armoured keeps 96 and leaves them 87.
+
+## Replays
 
 Every battle is recorded to `user://replays/`, verified against the state it actually
 ended in, and saved. A recording is the opening snapshot plus the orders, each stamped

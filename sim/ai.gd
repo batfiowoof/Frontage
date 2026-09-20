@@ -34,6 +34,13 @@ const ENGAGE_RANGE := 320.0
 ## How close a horseman has to be before the foot forms square.
 const HORSE_ALARM := 430.0
 
+## What it reaches for first. Cheap things early, and it alternates trees rather than
+## emptying one, because a pool shared between them is the whole point.
+const TECH_ORDER := [&"husbandry", &"drill", &"coinage", &"armoury", &"masonry",
+	&"horsemanship", &"irrigation", &"discipline", &"banking", &"siegecraft",
+	&"guilds", &"stirrups"]
+
+
 ## What it wants standing on its land, in the order it wants it.
 const BUILD_ORDER := [&"walls", &"farm", &"barracks", &"library", &"market", &"mine", &"lumber", &"pasture"]
 
@@ -61,6 +68,7 @@ func campaign_orders(cs) -> Array:
 	if cs.turn != _acted_on_turn:
 		_acted_on_turn = cs.turn          # spend money once a turn, not once a frame
 		_build_something(cs, out)
+		_learn_something(cs, out)
 		_recruit_something(cs, out)
 		_burn_something(cs, out)
 		_march(cs, out)
@@ -85,6 +93,14 @@ func _build_something(cs, out: Array) -> void:
 				if cs.can_place(seat, tile, name):
 					out.append(Orders.build(tile, name))
 					return                 # one a turn; the rest can wait for income
+
+
+## One tech a turn at most, the first in its order it can actually pay for.
+func _learn_something(cs, out: Array) -> void:
+	for name: StringName in TECH_ORDER:
+		if cs.can_learn(seat, name):
+			out.append(Orders.research(name))
+			return
 
 
 func _recruit_something(cs, out: Array) -> void:
