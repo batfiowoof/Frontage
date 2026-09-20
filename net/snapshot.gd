@@ -140,8 +140,16 @@ static func decode_campaign(bytes: PackedByteArray):
 			return null
 		if typeof(row[4]) != TYPE_ARRAY or row[4].size() > CampaignState.MAX_REGIMENTS_PER_ARMY:
 			return null
-		for kind in row[4]:
-			if typeof(kind) != TYPE_STRING_NAME or not Rules.KINDS.has(kind):
+		for entry in row[4]:
+			# [kind, strength], both checked: a regiment with a negative or absurd
+			# strength would make the next battle nonsense.
+			if typeof(entry) != TYPE_ARRAY or entry.size() != 2:
+				return null
+			if typeof(entry[0]) != TYPE_STRING_NAME or not Rules.KINDS.has(entry[0]):
+				return null
+			if typeof(entry[1]) != TYPE_INT:
+				return null
+			if entry[1] < 0 or entry[1] > int(Rules.KINDS[entry[0]]["strength"]):
 				return null
 		if cs.armies.has(row[0]):
 			return null                     # duplicate ids would silently drop an army

@@ -97,7 +97,7 @@ func test_food_floors_at_zero_rather_than_going_negative(t) -> void:
 	var cs = _two_player()
 	cs.food[1] = 0
 	for i in 20:
-		cs.armies[1]["regiments"].append(&"sword")
+		cs.armies[1]["regiments"].append(Campaign.make_regiment(&"sword"))
 	cs.end_turn()
 	t.eq(cs.food[1], 0, "deliberately floored, see the ponytail note in end_turn")
 
@@ -320,3 +320,83 @@ func test_battle_move_targets_are_clamped_to_the_field(t) -> void:
 	var order: Dictionary = Orders.decode(Orders.battle_move(PackedInt32Array([1]), Vector2(1e9, -1e9), 0.0))
 	t.near(order["target"].x, Rules.BATTLE_HALF_EXTENT)
 	t.near(order["target"].y, -Rules.BATTLE_HALF_EXTENT)
+
+
+# --- strength carries through ---------------------------------------------
+
+func test_a_recruited_regiment_starts_at_full_strength(t) -> void:
+	var cs = _two_player()
+	var capital: int = cs.armies[1]["tile"]
+	cs.recruit(1, capital, &"sword")
+	var last: Array = cs.armies[1]["regiments"][-1]
+	t.eq(last[0], &"sword")
+	t.eq(last[1], int(Rules.KINDS[&"sword"]["strength"]), "fresh recruits are not pre-battered")
+
+
+func test_army_men_counts_men_not_regiments(t) -> void:
+	var cs = _two_player()
+	var a = cs.armies[1]
+	t.eq(Campaign.army_men(a), 2 * int(Rules.KINDS[&"spear"]["strength"]) + int(Rules.KINDS[&"archer"]["strength"]))
+	a["regiments"][0][1] = 5
+	t.ok(Campaign.army_men(a) < cs.men_of(2), "a battered army is weaker than a fresh one")
+
+
+func test_an_army_resting_at_home_fills_its_ranks(t) -> void:
+	var cs = _two_player()
+	var a = cs.armies[1]                       # starts on its own capital
+	a["regiments"][0][1] = 10
+	cs.end_turn()
+	t.eq(a["regiments"][0][1], 10 + Rules.REINFORCE_PER_TURN, "a turn at home is a turn recruiting")
+
+
+func test_reinforcement_stops_at_full_strength(t) -> void:
+	var cs = _two_player()
+	var a = cs.armies[1]
+	var full := int(Rules.KINDS[&"spear"]["strength"])
+	a["regiments"][0][1] = full - 2
+	cs.end_turn()
+	t.eq(a["regiments"][0][1], full, "never more men than the regiment can hold")
+
+
+func test_an_army_in_the_field_does_not_reinforce(t) -> void:
+	var cs = _two_player()
+	var a = cs.armies[1]
+	a["tile"] = Campaign.idx(10, 8)            # open ground
+	a["regiments"][0][1] = 10
+	cs.end_turn()
+	t.eq(a["regiments"][0][1], 10, "no fresh men out in the field")
+
+
+func test_an_army_in_an_enemy_settlement_does_not_reinforce(t) -> void:
+	var cs = _two_player()
+	var a = cs.armies[1]
+	a["tile"] = cs.armies[2]["tile"]           # standing on the enemy capital
+	a["regiments"][0][1] = 10
+	cs.end_turn()
+	t.eq(a["regiments"][0][1], 10, "their town does not raise your men")
+
+
+func test_a_battered_regiment_survives_the_wire(t) -> void:
+	var cs = _two_player()
+	cs.armies[1]["regiments"][0][1] = 7
+	var back = Snapshot.decode_campaign(Snapshot.encode_campaign(cs))
+	t.ok(back != null)
+	if back != null:
+		t.eq(back.armies[1]["regiments"][0][1], 7, "strength must survive the round trip")
+
+
+func test_absurd_regiment_strengths_are_refused(t) -> void:
+	var cs = _two_player()
+	var d = bytes_to_var(Snapshot.encode_campaign(cs))
+
+	var negative = d.duplicate(true)
+	negative[5][0][4][0][1] = -50
+	t.eq(Snapshot.decode_campaign(var_to_bytes(negative)), null, "a negative regiment")
+
+	var bloated = d.duplicate(true)
+	bloated[5][0][4][0][1] = 999999
+	t.eq(Snapshot.decode_campaign(var_to_bytes(bloated)), null, "more men than the kind allows")
+
+	var bare = d.duplicate(true)
+	bare[5][0][4][0] = &"spear"
+	t.eq(Snapshot.decode_campaign(var_to_bytes(bare)), null, "a kind with no strength beside it")

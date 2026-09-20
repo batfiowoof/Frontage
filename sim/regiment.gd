@@ -21,6 +21,10 @@ var target := Vector2.ZERO         # move order destination
 var target_facing := 0.0
 var engaged_with := -1             # regiment id, or -1
 
+## Fractional casualties waiting to become whole men. Server-side only: it is not on
+## the wire, because a client never continues the simulation, only draws it.
+var damage_pool := 0.0
+
 
 static func make(p_id: int, p_owner: int, p_kind: StringName, p_pos: Vector2, p_facing := 0.0):
 	var spec: Dictionary = Rules.KINDS.get(p_kind, Rules.KINDS[&"spear"])

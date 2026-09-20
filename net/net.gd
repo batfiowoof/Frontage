@@ -40,6 +40,20 @@ var _accum := 0.0
 var _since_snapshot := 0
 var _rng := RandomNumberGenerator.new()
 
+## While a battle runs the campaign is frozen. These remember what to put back.
+var _battle_armies := {}           # owner_id -> campaign army id
+var _battle_tile := -1
+var _battle_attacker := 0
+var _battle_seconds := 0.0
+
+## Snapshots go out unreliably and the end-of-battle message goes out reliably, and
+## nothing orders one against the other. Without an epoch, a snapshot still in flight
+## when the battle ends arrives afterwards and resurrects it on the client, which then
+## waits forever for a second ending. Numbering the battles makes the stale packet
+## obviously stale.
+var battle_epoch := 0
+var _dead_epoch := -1
+
 
 func is_server() -> bool:
 	return multiplayer.has_multiplayer_peer() and multiplayer.is_server()
@@ -110,6 +124,7 @@ func start_battle(bs: BattleState) -> void:
 	assert(is_server(), "only the server owns a battle")
 	battle = bs
 	running = true
+	battle_epoch += 1
 	_accum = 0.0
 	_since_snapshot = 0
 	broadcast_battle()
@@ -131,15 +146,20 @@ func _process(delta: float) -> void:
 		_accum -= Rules.TICK_DELTA
 		battle.step()
 		battle_updated.emit(battle)
+		_battle_seconds += Rules.TICK_DELTA
 		_since_snapshot += 1
 		if _since_snapshot >= Rules.SNAPSHOT_EVERY_N_TICKS:
 			_since_snapshot = 0
 			broadcast_battle()
+		if battle.is_over() or _battle_seconds >= Rules.BATTLE_TIME_LIMIT:
+			broadcast_battle()
+			_finish_battle()
+			return
 
 
 func broadcast_battle() -> void:
 	if battle != null and multiplayer.has_multiplayer_peer() and is_server():
-		_battle_snapshot.rpc(Snapshot.encode_battle(battle))
+		_battle_snapshot.rpc(battle_epoch, Snapshot.encode_battle(battle))
 
 
 # --- orders ---------------------------------------------------------------
@@ -199,6 +219,9 @@ func _army_move(sender: int, order: Dictionary) -> void:
 	if campaign == null:
 		_reject(sender, "no campaign in progress")
 		return
+	if battle != null:
+		_reject(sender, "a battle is being fought")
+		return
 	var a = campaign.armies.get(order["army_id"])
 	if a == null:
 		_reject(sender, "army %d does not exist" % order["army_id"])
@@ -217,6 +240,9 @@ func _recruit(sender: int, order: Dictionary) -> void:
 	if campaign == null:
 		_reject(sender, "no campaign in progress")
 		return
+	if battle != null:
+		_reject(sender, "a battle is being fought")
+		return
 	if not campaign.recruit(sender, order["tile"], order["kind"]):
 		_reject(sender, "cannot recruit %s at tile %d" % [order["kind"], order["tile"]])
 		return
@@ -227,6 +253,9 @@ func _recruit(sender: int, order: Dictionary) -> void:
 func _set_ready(sender: int, order: Dictionary) -> void:
 	if campaign == null:
 		_reject(sender, "no campaign in progress")
+		return
+	if battle != null:
+		_reject(sender, "a battle is being fought")
 		return
 	campaign.set_ready(sender, order["value"])
 	if campaign.all_ready(player_ids()):
@@ -242,30 +271,110 @@ func _on_armies_met(pair: Array) -> void:
 	var defender = campaign.armies.get(pair[1])
 	if attacker == null or defender == null:
 		return
+	# Two humans fight it out. Anything else is not worth making a player watch.
+	if players.has(attacker["owner"]) and players.has(defender["owner"]):
+		_begin_battle(attacker, defender)
+	else:
+		_autoresolve(attacker, defender)
+
+
+func _autoresolve(attacker: Dictionary, defender: Dictionary) -> void:
 	var contested: int = defender["tile"]
 	var result := Autoresolve.resolve(attacker["regiments"], defender["regiments"], _rng)
-
 	for i in result["attacker_losses"]:
 		attacker["regiments"].pop_back()
 	for i in result["defender_losses"]:
 		defender["regiments"].pop_back()
-
 	var winner_id: int = attacker["owner"] if result["attacker_wins"] else defender["owner"]
 	_announce("battle at tile %d: player %d carried the field (%d and %d regiments lost)" % [
 		contested, winner_id, result["attacker_losses"], result["defender_losses"]])
+	_settle_field(attacker, defender, contested, result["attacker_wins"])
 
+
+## Deploy both armies and hand the tile to the real-time battle.
+func _begin_battle(attacker: Dictionary, defender: Dictionary) -> void:
+	_battle_tile = defender["tile"]
+	_battle_attacker = attacker["owner"]
+	_battle_armies = {attacker["owner"]: attacker["id"], defender["owner"]: defender["id"]}
+	_battle_seconds = 0.0
+
+	var bs = BattleState.new()
+	_deploy(bs, attacker, -Rules.DEPLOY_SEPARATION * 0.5, 0.0)
+	_deploy(bs, defender, Rules.DEPLOY_SEPARATION * 0.5, PI)
+	_announce("battle at tile %d: %d men against %d" % [
+		_battle_tile, CampaignState.army_men(attacker), CampaignState.army_men(defender)])
+	start_battle(bs)
+
+
+func _deploy(bs: BattleState, army: Dictionary, x: float, facing: float) -> void:
+	var line: Array = army["regiments"]
+	for i in line.size():
+		var y := (float(i) - float(line.size() - 1) * 0.5) * Rules.DEPLOY_SPACING
+		var r = bs.add(army["owner"], line[i][0], Vector2(x, y), facing)
+		r.strength = int(line[i][1])          # it arrives as battered as it left
+
+
+## The battle is over: survivors go back into their campaign army and the campaign
+## picks up where it left off. This is the seam the whole design turns on, so it is
+## deliberately one function you can read top to bottom.
+func _finish_battle() -> void:
+	var survivors := {}
+	for id in battle.sorted_ids():
+		var r = battle.regiments[id]
+		if r.is_alive():
+			var owner: int = r.owner_id
+			if not survivors.has(owner):
+				survivors[owner] = []
+			survivors[owner].append([r.kind, r.strength])
+
+	var winner_id: int = battle.winner()
+	stop_battle()
+	battle = null
+
+	var attacker = null
+	var defender = null
+	for owner in _battle_armies:
+		var army = campaign.armies.get(_battle_armies[owner])
+		if army == null:
+			continue
+		army["regiments"] = survivors.get(owner, [])
+		if owner == _battle_attacker:
+			attacker = army
+		else:
+			defender = army
+
+	_announce("the field at tile %d goes to player %d" % [_battle_tile, winner_id])
+	if attacker != null and defender != null:
+		_settle_field(attacker, defender, _battle_tile, winner_id == _battle_attacker)
+	_battle_armies.clear()
+	_battle_over.rpc(battle_epoch)
+	battle_updated.emit(null)
+
+
+@rpc("authority", "call_remote", "reliable")
+func _battle_over(epoch: int) -> void:
+	_dead_epoch = maxi(_dead_epoch, epoch)
+	battle = null
+	battle_updated.emit(null)
+
+
+## Disband what is gone, give the ground to whoever is still standing on it, and
+## report anyone who has been knocked out of the game.
+func _settle_field(attacker: Dictionary, defender: Dictionary, contested: int, attacker_wins: bool) -> void:
+	var owners := [attacker["owner"], defender["owner"]]
+	# A battle ends both armies' turn. Without this a survivor with movement left
+	# simply attacks again, and two armies on adjacent tiles grind through three
+	# battles a turn until somebody's move points run out.
+	attacker["move_left"] = 0
+	defender["move_left"] = 0
 	campaign.disband_if_empty(attacker["id"])
 	campaign.disband_if_empty(defender["id"])
-
-	# The field belongs to whoever is still standing on it.
-	if result["attacker_wins"] and not campaign.armies.has(defender["id"]):
+	if attacker_wins and not campaign.armies.has(defender["id"]):
 		attacker["tile"] = contested
 		campaign._capture_if_undefended(attacker)
-
-	for owner in [attacker["owner"], defender["owner"]]:
+	for owner in owners:
 		if not campaign.is_alive(owner):
 			_announce("player %d has been driven from the map" % owner)
-
 	broadcast_campaign()
 	campaign_updated.emit(campaign)
 
@@ -317,7 +426,9 @@ func _campaign_snapshot(bytes: PackedByteArray) -> void:
 
 
 @rpc("authority", "call_remote", "unreliable_ordered")
-func _battle_snapshot(bytes: PackedByteArray) -> void:
+func _battle_snapshot(epoch: int, bytes: PackedByteArray) -> void:
+	if epoch <= _dead_epoch:
+		return                     # a packet from a battle that is already over
 	var bs = Snapshot.decode_battle(bytes)
 	if bs == null:
 		push_warning("[net] dropped an undecodable snapshot (%d bytes)" % bytes.size())

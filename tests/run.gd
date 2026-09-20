@@ -8,6 +8,7 @@ const TESTS := [
 	"res://tests/test_formation.gd",
 	"res://tests/test_regiment.gd",
 	"res://tests/test_battle_state.gd",
+	"res://tests/test_combat.gd",
 	"res://tests/test_snapshot.gd",
 	"res://tests/test_campaign.gd",
 	"res://tests/test_autoresolve.gd",

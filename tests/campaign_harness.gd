@@ -12,8 +12,8 @@ const Rules := preload("res://sim/rules.gd")
 const Campaign := preload("res://sim/campaign_state.gd")
 const Snapshot := preload("res://net/snapshot.gd")
 
-const TURNS := 5
-const TIMEOUT := 30.0
+const TURNS := 8       # the armies start in opposite corners and need this long to meet
+const TIMEOUT := 180.0
 const MAP_SEED := 20260920
 
 var net: Node
@@ -31,6 +31,11 @@ var gold_at_start := -1
 var probed := false
 var battles := 0
 var peak_regiments := 0
+var fought := 0
+var was_fighting := false
+var charged := false
+var men_before_battle := -1
+var men_after_battle := -1
 
 
 func _initialize() -> void:
@@ -82,6 +87,26 @@ func _process(delta: float) -> bool:
 		campaign_started = true
 		print("[host] campaign dealt, seed %d" % MAP_SEED)
 
+	if net.battle != null:
+		was_fighting = true
+		_fight()
+		return false
+	if was_fighting:
+		# The battle ended and the campaign is back. Act again this turn.
+		was_fighting = false
+		charged = false
+		acted_this_turn = false
+		fought += 1
+		men_after_battle = _my_men()
+		# One closed loop is the whole point of this gate, and battles run in real
+		# time, so the judge stops here rather than playing the campaign out. The
+		# host must NOT stop with it: quitting here leaves the client waiting on a
+		# _battle_over that will never arrive.
+		if role == "join" and net.campaign != null:
+			_check_the_campaign_actually_happened(net.campaign)
+			_finish()
+			return true
+
 	var cs = net.campaign
 	if cs == null:
 		return false
@@ -99,6 +124,16 @@ func _process(delta: float) -> bool:
 		if role == "join":
 			_verify_mirror(cs)
 
+	if role == "host":
+		if net.players.size() < 2:
+			print("[host] client left, done")
+			quit(0)
+			return true
+		if not acted_this_turn:
+			acted_this_turn = true
+			_take_my_turn(cs)
+		return false
+
 	if cs.turn > TURNS:
 		_check_the_campaign_actually_happened(cs)
 		_finish()
@@ -108,6 +143,39 @@ func _process(delta: float) -> bool:
 		acted_this_turn = true
 		_take_my_turn(cs)
 	return false
+
+
+## Charge everything at the enemy line. Crude, but it decides a battle, which is
+## all this harness needs -- whether it is *fun* is M10's question, not a test's.
+func _fight() -> void:
+	if charged:
+		return
+	charged = true
+	if men_before_battle < 0:
+		men_before_battle = _my_men()
+	var me: int = net.my_id()
+	var mine := PackedInt32Array()
+	var enemy_centre := Vector2.ZERO
+	var enemies := 0
+	for id in net.battle.sorted_ids():
+		var r = net.battle.regiments[id]
+		if r.owner_id == me:
+			mine.append(id)
+		else:
+			enemy_centre += r.pos
+			enemies += 1
+	if mine.is_empty() or enemies == 0:
+		return
+	enemy_centre /= float(enemies)
+	print("[%s] battle: charging with %d regiments" % [role, mine.size()])
+	for id in mine:
+		net.order_battle_move(PackedInt32Array([id]), enemy_centre, 0.0)
+
+
+## Men, not regiments. A regiment cut to five men is still one regiment, so counting
+## regiments would call a massacre a draw.
+func _my_men() -> int:
+	return 0 if net.campaign == null else net.campaign.men_of(net.my_id())
 
 
 ## March toward the middle, recruit what we can afford, then declare ready.
@@ -153,8 +221,12 @@ func _verify_mirror(cs) -> void:
 
 func _check_the_campaign_actually_happened(cs) -> void:
 	var me: int = net.my_id()
-	if turns_seen < TURNS:
-		_fail("only saw %d turns of %d" % [turns_seen, TURNS])
+	# The run stops as soon as one full loop has closed, so the bar is "turns are
+	# advancing", not "all TURNS were played".
+	if turns_seen < 2:
+		_fail("turns are not advancing: saw %d" % turns_seen)
+	if fought == 0 and turns_seen < TURNS:
+		_fail("only saw %d turns of %d and never fought" % [turns_seen, TURNS])
 
 	var mine := 0
 	var theirs := 0
@@ -167,6 +239,13 @@ func _check_the_campaign_actually_happened(cs) -> void:
 		_fail("recruitment never happened: peaked at %d regiments" % peak_regiments)
 	if battles == 0:
 		_fail("the two armies never fought: the loop does not close")
+	if fought == 0:
+		_fail("no real-time battle was ever entered or left")
+	elif men_after_battle < 0:
+		_fail("the campaign never came back after the battle")
+	elif men_after_battle >= men_before_battle:
+		_fail("came out of the battle with %d men, went in with %d: casualties are not being written back"
+			% [men_after_battle, men_before_battle])
 
 	if int(cs.gold.get(me, 0)) <= 0:
 		_fail("no gold left at all, income is not being paid")
@@ -191,7 +270,8 @@ func _finish() -> void:
 		quit(0)
 		return
 	if failures.is_empty():
-		print("[join] PASS  %d turns, %d battles, mirror exact each turn, authority held" % [turns_seen, battles])
+		print("[join] PASS  %d turns, %d real-time battle(s), %d men -> %d after, mirror exact, authority held"
+			% [turns_seen, fought, men_before_battle, men_after_battle])
 		quit(0)
 	else:
 		for f in failures:

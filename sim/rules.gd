@@ -12,13 +12,23 @@ const INTERP_DELAY_MS := 100               # client renders this far in the past
 const MOVE_SPEED := 70.0                   # world units / second
 const TURN_SPEED := 3.0                    # radians / second
 const ARRIVE_EPSILON := 4.0
-const CONTACT_RANGE := 22.0                # centre-to-centre to count as engaged
+const CONTACT_RANGE := 46.0                # centre-to-centre to count as engaged
 const ROUT_SPEED_MULT := 1.35              # routers run faster than they marched
+
+## Deployment: how far apart the two lines start, and the gap between regiments.
+const DEPLOY_SEPARATION := 520.0
+const DEPLOY_SPACING := 110.0
+## A battle nobody can win still has to end, or the campaign never resumes.
+const BATTLE_TIME_LIMIT := 300.0
 
 # --- battle: attrition --------------------------------------------------
 const KILLS_PER_SECOND := 5.0              # a full-strength regiment's output
 const FLANK_DAMAGE_MULT := 1.6
 const REAR_DAMAGE_MULT := 2.2
+## A regiment that has broken cannot fight back, so chasing one down is nearly free.
+## ponytail: no automatic pursuit AI -- running routers down is the player's decision,
+## which keeps the flank legible instead of resolving itself off-screen.
+const RUNDOWN_DAMAGE_MULT := 3.0
 
 # --- battle: morale -----------------------------------------------------
 const MORALE_MAX := 100.0
@@ -61,6 +71,10 @@ const MAP_W := 24
 const MAP_H := 16
 const TILE_PX := 48
 const ARMY_MOVE_POINTS := 3
+## Men a regiment recovers per turn while sitting in one of its own settlements.
+## Without this the campaign is a one-way decay and the second battle is always
+## fought by two exhausted armies.
+const REINFORCE_PER_TURN := 25
 const START_GOLD := 500
 const START_FOOD := 200
 const SETTLEMENT_GOLD := 60                # per turn, per owned settlement

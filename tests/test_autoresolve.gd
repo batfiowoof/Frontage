@@ -2,6 +2,7 @@ extends RefCounted
 
 const Autoresolve := preload("res://sim/autoresolve.gd")
 const Rules := preload("res://sim/rules.gd")
+const Campaign := preload("res://sim/campaign_state.gd")
 
 
 func _rng(seed_value: int) -> RandomNumberGenerator:
@@ -13,13 +14,17 @@ func _rng(seed_value: int) -> RandomNumberGenerator:
 func _army(n: int, kind := &"spear") -> Array:
 	var out := []
 	for i in n:
-		out.append(kind)
+		out.append(Campaign.make_regiment(kind))
 	return out
 
 
 func test_power_adds_up_its_regiments(t) -> void:
 	t.eq(Autoresolve.power([]), 0)
-	t.eq(Autoresolve.power([&"spear", &"spear"]), 2 * int(Rules.KINDS[&"spear"]["strength"]))
+	t.eq(Autoresolve.power(_army(2)), 2 * int(Rules.KINDS[&"spear"]["strength"]))
+	var battered := _army(2)
+	battered[0][1] = 10
+	t.eq(Autoresolve.power(battered), 10 + int(Rules.KINDS[&"spear"]["strength"]),
+		"a battered regiment must not fight like a fresh one")
 
 
 func test_an_empty_army_never_wins(t) -> void:

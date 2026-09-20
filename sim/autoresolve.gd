@@ -14,10 +14,12 @@ const LOSER_MIN := 0.6       # the beaten side loses at least this share of its 
 const WINNER_SHARE := 0.5    # the winner's losses, scaled by how close the fight was
 
 
-static func power(kinds: Array) -> int:
+## Men on the field, not regiments on paper: a battered regiment should not fight
+## like a fresh one.
+static func power(regiments: Array) -> int:
 	var total := 0
-	for kind in kinds:
-		total += int(Rules.KINDS[kind]["strength"])
+	for r: Array in regiments:
+		total += int(r[1])
 	return total
 
 

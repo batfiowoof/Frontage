@@ -16,6 +16,7 @@ var turn := 1
 var terrain := PackedByteArray()
 var settlements := []              # [{tile:int, owner:int, name:String}]
 var armies := {}                   # id -> {id, owner, tile, move_left, regiments:Array}
+                                   # a regiment is [kind, strength]
 var gold := {}                     # owner -> int
 var food := {}                     # owner -> int
 var ready := {}                    # owner -> bool
@@ -111,12 +112,35 @@ func settlements_of(owner: int) -> int:
 	return n
 
 
+## A campaign regiment is [kind, strength] -- the men it has right now, not merely
+## what kind of men they are. Carrying only the kind would hand a regiment cut down
+## to five men back to the campaign at full strength, and a battle that costs nothing
+## is a battle that decides nothing.
+static func make_regiment(kind: StringName) -> Array:
+	return [kind, int(Rules.KINDS[kind]["strength"])]
+
+
+static func army_men(a: Dictionary) -> int:
+	var total := 0
+	for r: Array in a["regiments"]:
+		total += int(r[1])
+	return total
+
+
+func men_of(owner: int) -> int:
+	var total := 0
+	for a in armies.values():
+		if a["owner"] == owner:
+			total += army_men(a)
+	return total
+
+
 func upkeep_of(owner: int) -> int:
 	var total := 0
 	for a in armies.values():
 		if a["owner"] == owner:
-			for kind in a["regiments"]:
-				total += int(Rules.KINDS[kind]["upkeep"])
+			for r: Array in a["regiments"]:
+				total += int(Rules.KINDS[r[0]]["upkeep"])
 	return total
 
 
@@ -139,12 +163,15 @@ func sorted_army_ids() -> Array:
 # --- actions (server side; authority is checked before we get here) -------
 
 func add_army(owner: int, tile: int, kinds: Array) -> Dictionary:
+	var raised := []
+	for kind: StringName in kinds:
+		raised.append(make_regiment(kind))
 	var a := {
 		"id": _next_army,
 		"owner": owner,
 		"tile": tile,
 		"move_left": Rules.ARMY_MOVE_POINTS,
-		"regiments": kinds.duplicate(),
+		"regiments": raised,
 	}
 	_next_army += 1
 	armies[a["id"]] = a
@@ -203,7 +230,7 @@ func recruit(owner: int, tile: int, kind: StringName) -> bool:
 	if a == null:
 		a = add_army(owner, tile, [])
 	gold[owner] = int(gold[owner]) - cost
-	a["regiments"].append(kind)
+	a["regiments"].append(make_regiment(kind))
 	return true
 
 
@@ -237,8 +264,18 @@ func end_turn() -> void:
 		food[owner] = maxi(0, int(food.get(owner, 0)) + net_food)
 	for a in armies.values():
 		a["move_left"] = Rules.ARMY_MOVE_POINTS
+		_reinforce(a)
 	ready.clear()
 	turn += 1
+
+
+## An army resting in one of its own settlements fills its ranks back up.
+func _reinforce(a: Dictionary) -> void:
+	var s = settlement_at(a["tile"])
+	if s == null or s["owner"] != a["owner"]:
+		return
+	for r: Array in a["regiments"]:
+		r[1] = mini(int(Rules.KINDS[r[0]]["strength"]), int(r[1]) + Rules.REINFORCE_PER_TURN)
 
 
 # --- generation -----------------------------------------------------------

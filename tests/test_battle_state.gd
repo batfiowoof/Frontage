@@ -69,12 +69,13 @@ func test_idle_regiments_recover_morale(t) -> void:
 
 func test_engaged_regiments_do_not_recover(t) -> void:
 	var bs = BattleState.new()
-	var r = bs.add(1, &"spear", Vector2.ZERO)
+	var r = bs.add(1, &"spear", Vector2.ZERO, 0.0)
+	bs.add(2, &"spear", Vector2(20, 0), PI)          # a real enemy, in reach
 	r.morale = 50.0
-	r.engaged_with = 99
 	for i in Rules.TICK_HZ:
 		bs.step()
-	t.near(r.morale, 50.0, 0.01, "you cannot catch your breath mid-melee")
+	t.eq(r.state, Regiment.State.FIGHTING, "contact is what makes a regiment engaged")
+	t.ok(r.morale < 50.0, "you cannot catch your breath mid-melee")
 
 
 func test_battle_is_over_when_one_side_will_not_stand(t) -> void:

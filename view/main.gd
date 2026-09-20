@@ -2,6 +2,7 @@ extends Node
 ## Root node. Owns which screen you are looking at, and nothing else.
 
 const CampaignView := preload("res://view/campaign/campaign_view.gd")
+const BattleView := preload("res://view/battle/battle_view.gd")
 
 var _screen: Node = null
 var _lobby: CanvasLayer
@@ -14,6 +15,7 @@ var _start: Button
 func _ready() -> void:
 	Net.players_changed.connect(_refresh_lobby)
 	Net.campaign_updated.connect(_on_campaign)
+	Net.battle_updated.connect(_on_battle)
 	Net.connection_failed.connect(func() -> void: _say("could not reach that host"))
 	Net.server_left.connect(_on_server_left)
 	_build_lobby()
@@ -102,12 +104,29 @@ func _refresh_lobby() -> void:
 	_roster.text = "\n".join(names)
 
 
+## A battle takes over the screen while it lasts; the campaign comes back after.
+## Players not involved watch rather than sitting on a frozen map wondering.
 func _on_campaign(_cs) -> void:
-	if _screen == null:
-		_lobby.visible = false
-		_screen = CampaignView.new()
-		_screen.name = "CampaignView"
-		add_child(_screen)
+	if Net.battle == null:
+		_show(CampaignView, "CampaignView")
+
+
+func _on_battle(bs) -> void:
+	if bs == null:
+		_show(CampaignView, "CampaignView")
+	else:
+		_show(BattleView, "BattleView")
+
+
+func _show(script: GDScript, name: String) -> void:
+	if _screen != null and _screen.name == name:
+		return
+	if _screen != null:
+		_screen.queue_free()
+	_lobby.visible = false
+	_screen = script.new()
+	_screen.name = name
+	add_child(_screen)
 
 
 func _on_server_left() -> void:
