@@ -24,10 +24,9 @@ var _news: Label
 var _end_turn: Button
 var _recruit_bar: HBoxContainer
 var _build_bar: HBoxContainer
-var _improve_bar: HBoxContainer
-var _improve_buttons := {}
-var _recruit_buttons := {}
 var _build_buttons := {}
+var _raze: Button
+var _recruit_buttons := {}
 var _dragging := false
 
 
@@ -85,27 +84,26 @@ func _build_hud() -> void:
 		_recruit_bar.add_child(b)
 		_recruit_buttons[kind] = b
 
-	_improve_bar = HBoxContainer.new()
-	_improve_bar.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
-	_improve_bar.position = Vector2(12, -102)
-	layer.add_child(_improve_bar)
-	for name: StringName in Rules.IMPROVEMENTS:
-		var b := Button.new()
-		b.text = "%s  %dg" % [name, Rules.IMPROVEMENTS[name]["cost"]]
-		b.pressed.connect(_on_improve.bind(name))
-		_improve_bar.add_child(b)
-		_improve_buttons[name] = b
-
 	_build_bar = HBoxContainer.new()
 	_build_bar.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
 	_build_bar.position = Vector2(12, -68)
 	layer.add_child(_build_bar)
-	for building: StringName in Rules.BUILDINGS:
+	for name: StringName in Rules.STRUCTURES:
 		var b := Button.new()
-		b.text = "build %s  %dg" % [building, Rules.BUILDINGS[building]["cost"]]
-		b.pressed.connect(_on_build.bind(building))
+		b.text = "%s  %dg" % [name, Rules.STRUCTURES[name]["cost"]]
+		b.pressed.connect(_on_build.bind(name))
 		_build_bar.add_child(b)
-		_build_buttons[building] = b
+		_build_buttons[name] = b
+
+	_raze = Button.new()
+	_raze.text = "Burn it"
+	_raze.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	_raze.position = Vector2(12, -102)
+	_raze.add_theme_color_override("font_color", Color("e0894a"))
+	_raze.pressed.connect(func() -> void:
+		if selected_army >= 0:
+			Net.order_raze(selected_army))
+	layer.add_child(_raze)
 
 	if Net.is_server():
 		var save := Button.new()
@@ -178,14 +176,9 @@ func _on_recruit(kind: StringName) -> void:
 		Net.order_recruit(selected_tile, kind)
 
 
-func _on_improve(name: StringName) -> void:
+func _on_build(structure: StringName) -> void:
 	if selected_tile >= 0:
-		Net.order_improve(selected_tile, name)
-
-
-func _on_build(building: StringName) -> void:
-	if selected_tile >= 0:
-		Net.order_build(selected_tile, building)
+		Net.order_build(selected_tile, structure)
 
 
 func _on_end_turn() -> void:
@@ -216,8 +209,9 @@ func _refresh() -> void:
 	var me: int = Net.my_id()
 	var seating: Array = Net.player_ids()
 
-	_status.text = "Turn %d      gold %d      food %d      upkeep %d" % [
-		cs.turn, int(cs.gold.get(me, 0)), int(cs.food.get(me, 0)), cs.upkeep_of(me)]
+	_status.text = "Turn %d      gold %d      food %d      research %d      upkeep %d" % [
+		cs.turn, int(cs.gold.get(me, 0)), int(cs.food.get(me, 0)),
+		int(cs.research.get(me, 0)), cs.upkeep_of(me)]
 
 	var lines := PackedStringArray()
 	for id: int in seating:
@@ -233,18 +227,30 @@ func _refresh() -> void:
 	var settlement = cs.settlement_at(selected_tile) if selected_tile >= 0 else null
 	var mine_here: bool = settlement != null and settlement["owner"] == me
 	_recruit_bar.visible = mine_here
-	_build_bar.visible = mine_here
 
-	var can_work := false
-	if selected_tile >= 0 and settlement == null:
+	# One bar for everything that can stand on a hex, including the walls that only go
+	# on a town's own.
+	var can_build := false
+	if selected_tile >= 0:
 		var purse := int(cs.gold.get(me, 0))
-		for name: StringName in _improve_buttons:
-			var allowed: bool = cs.can_improve(me, selected_tile, name)
-			can_work = can_work or allowed
-			var button: Button = _improve_buttons[name]
-			button.disabled = not allowed or purse < int(Rules.IMPROVEMENTS[name]["cost"])
-			button.tooltip_text = "" if allowed else "not on this ground, or too far from a town"
-	_improve_bar.visible = can_work
+		for name: StringName in _build_buttons:
+			var allowed: bool = cs.can_place(me, selected_tile, name)
+			can_build = can_build or allowed
+			var button: Button = _build_buttons[name]
+			button.disabled = not allowed or purse < int(Rules.STRUCTURES[name]["cost"])
+			button.tooltip_text = "" if allowed else "not on this ground, or too far from a town of yours"
+	_build_bar.visible = can_build
+
+	# Burn what is under your feet, if it is not yours.
+	_raze.visible = false
+	if selected_army >= 0 and cs.armies.has(selected_army):
+		var standing = cs.armies[selected_army]
+		var underfoot := cs.structure_at(standing["tile"])
+		var worked = cs.working_settlement(standing["tile"])
+		_raze.visible = underfoot != &"" and standing["move_left"] > 0 \
+			and (worked == null or worked["owner"] != me)
+		if _raze.visible:
+			_raze.text = "Burn the %s" % underfoot
 	if mine_here:
 		var purse := int(cs.gold.get(me, 0))
 		var available: Array = cs.recruitable_at(selected_tile)
@@ -252,19 +258,14 @@ func _refresh() -> void:
 			var button: Button = _recruit_buttons[kind]
 			var needs: StringName = Rules.KINDS[kind]["requires"]
 			button.disabled = not available.has(kind) or purse < int(Rules.KINDS[kind]["cost"])
-			button.tooltip_text = "" if available.has(kind) else "needs a %s here" % needs
-		for building: StringName in _build_buttons:
-			var button: Button = _build_buttons[building]
-			var built: bool = settlement["buildings"].has(building)
-			button.disabled = built or purse < int(Rules.BUILDINGS[building]["cost"])
-			button.tooltip_text = "already built" if built else ""
+			button.tooltip_text = "" if available.has(kind) else "needs a %s on the land nearby" % needs
 
 	if selected_army >= 0 and cs.armies.has(selected_army):
 		var a = cs.armies[selected_army]
 		_hint.text = "army %d: %d regiments, %d moves left — click a tile to march" % [
 			a["id"], a["regiments"].size(), a["move_left"]]
 	elif selected_tile >= 0 and settlement == null:
-		var made := cs.improvement_at(selected_tile)
+		var made := cs.structure_at(selected_tile)
 		_hint.text = "tile %d: %s%s" % [selected_tile,
 			Campaign.Terrain.keys()[cs.terrain[selected_tile]].to_lower(),
 			", %s" % made if made != &"" else ""]
@@ -289,11 +290,11 @@ func _draw() -> void:
 		draw_colored_polygon(shape, Colors.of_terrain(cs.terrain[i]))
 		draw_polyline(shape + PackedVector2Array([shape[0]]), Color(0, 0, 0, 0.14), 1.0)
 
-		# What has been done to the land, as a dot in the middle of it.
-		var made := cs.improvement_at(i)
+		# What stands on the land, as a mark in the middle of it.
+		var made := cs.structure_at(i)
 		if made != &"":
-			draw_circle(Hex.centre(i), Rules.HEX_SIZE * 0.22, Colors.of_improvement(made))
-			draw_arc(Hex.centre(i), Rules.HEX_SIZE * 0.22, 0, TAU, 16, Color(0, 0, 0, 0.5), 1.5)
+			draw_circle(Hex.centre(i), Rules.HEX_SIZE * 0.24, Colors.of_structure(made))
+			draw_arc(Hex.centre(i), Rules.HEX_SIZE * 0.24, 0, TAU, 16, Color(0, 0, 0, 0.55), 1.5)
 
 	for s: Dictionary in cs.settlements:
 		var c := Colors.of_owner(s["owner"], seating)
@@ -301,9 +302,7 @@ func _draw() -> void:
 		var box := Rules.HEX_SIZE * 0.62
 		draw_rect(Rect2(at - Vector2(box, box) * 0.5, Vector2(box, box)), c)
 		draw_rect(Rect2(at - Vector2(box, box) * 0.5, Vector2(box, box)), Color.BLACK, false, 2.0)
-		# One pip per building, so a developed town looks different from a bare one.
-		for i in s["buildings"].size():
-			draw_rect(Rect2(at + Vector2(-box * 0.5 + float(i) * 5.0, box * 0.55), Vector2(4, 4)), Color.BLACK)
+
 
 	for id in cs.sorted_army_ids():
 		var a = cs.armies[id]

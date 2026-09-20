@@ -363,8 +363,8 @@ func order_focus(ids: PackedInt32Array, mark: int) -> void:
 	submit(Orders.focus(ids, mark))
 
 
-func order_improve(tile: int, name: StringName) -> void:
-	submit(Orders.improve(tile, name))
+func order_raze(army_id: int) -> void:
+	submit(Orders.raze(army_id))
 
 
 func _receive_order(sender: int, bytes: PackedByteArray) -> void:
@@ -390,8 +390,8 @@ func _receive_order(sender: int, bytes: PackedByteArray) -> void:
 			_set_formation(sender, order)
 		Orders.Type.FOCUS:
 			_focus(sender, order)
-		Orders.Type.IMPROVE:
-			_improve(sender, order)
+		Orders.Type.RAZE:
+			_raze(sender, order)
 
 
 # --- campaign orders ------------------------------------------------------
@@ -462,16 +462,23 @@ func _set_formation(sender: int, order: Dictionary) -> void:
 			r.set_width(int(order["width"]))
 
 
-func _improve(sender: int, order: Dictionary) -> void:
+func _raze(sender: int, order: Dictionary) -> void:
 	if campaign == null:
 		_reject(sender, "no campaign in progress")
 		return
 	if battle != null:
 		_reject(sender, "a battle is being fought")
 		return
-	if not campaign.improve(sender, order["tile"], order["improvement"]):
-		_reject(sender, "cannot put a %s on tile %d" % [order["improvement"], order["tile"]])
+	var tile: int = -1
+	var a = campaign.armies.get(order["army_id"])
+	var burned := &""
+	if a != null:
+		tile = a["tile"]
+		burned = campaign.structure_at(tile)
+	if not campaign.raze(sender, order["army_id"]):
+		_reject(sender, "army %d has nothing to burn" % order["army_id"])
 		return
+	_announce("player %d burned a %s at tile %d" % [sender, burned, tile])
 	broadcast_campaign()
 	campaign_updated.emit(campaign)
 
@@ -483,8 +490,8 @@ func _build(sender: int, order: Dictionary) -> void:
 	if battle != null:
 		_reject(sender, "a battle is being fought")
 		return
-	if not campaign.build(sender, order["tile"], order["building"]):
-		_reject(sender, "cannot build %s at tile %d" % [order["building"], order["tile"]])
+	if not campaign.place(sender, order["tile"], order["structure"]):
+		_reject(sender, "cannot put a %s on tile %d" % [order["structure"], order["tile"]])
 		return
 	broadcast_campaign()
 	campaign_updated.emit(campaign)

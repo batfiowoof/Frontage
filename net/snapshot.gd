@@ -110,14 +110,15 @@ static func decode_battle(bytes: PackedByteArray):
 static func encode_campaign(cs) -> PackedByteArray:
 	var settlements := []
 	for s in cs.settlements:
-		settlements.append([s["tile"], s["owner"], s["name"], s["buildings"]])
+		settlements.append([s["tile"], s["owner"], s["name"]])
 	var armies := []
 	for id in cs.sorted_army_ids():
 		var a = cs.armies[id]
 		armies.append([a["id"], a["owner"], a["tile"], a["move_left"], a["regiments"]])
 	return var_to_bytes([
 		VERSION, cs.turn, cs._next_army, cs.terrain,
-		settlements, armies, cs.gold, cs.food, cs.ready, cs.improvements,
+		settlements, armies, cs.gold, cs.food, cs.ready, cs.structures,
+		cs.research,
 	])
 
 
@@ -125,7 +126,7 @@ static func decode_campaign(bytes: PackedByteArray):
 	if bytes.size() < 4:
 		return null
 	var d = bytes_to_var(bytes)
-	if typeof(d) != TYPE_ARRAY or d.size() != 10:
+	if typeof(d) != TYPE_ARRAY or d.size() != 11:
 		return null
 	if typeof(d[0]) != TYPE_INT or d[0] != VERSION:
 		return null
@@ -145,22 +146,13 @@ static func decode_campaign(bytes: PackedByteArray):
 			return null
 
 	for row in d[4]:
-		if typeof(row) != TYPE_ARRAY or row.size() != 4:
+		if typeof(row) != TYPE_ARRAY or row.size() != 3:
 			return null
 		if typeof(row[0]) != TYPE_INT or typeof(row[1]) != TYPE_INT or typeof(row[2]) != TYPE_STRING:
 			return null
 		if not _is_tile(row[0]):
 			return null
-		if typeof(row[3]) != TYPE_ARRAY or row[3].size() > Rules.BUILDINGS.size():
-			return null
-		var seen := {}
-		for b in row[3]:
-			if typeof(b) != TYPE_STRING_NAME or not Rules.BUILDINGS.has(b):
-				return null
-			if seen.has(b):
-				return null           # one of each, or income doubles for free
-			seen[b] = true
-		cs.settlements.append({"tile": row[0], "owner": row[1], "name": row[2], "buildings": row[3]})
+		cs.settlements.append({"tile": row[0], "owner": row[1], "name": row[2]})
 
 	for row in d[5]:
 		if typeof(row) != TYPE_ARRAY or row.size() != 5:
@@ -198,9 +190,13 @@ static func decode_campaign(bytes: PackedByteArray):
 	if typeof(d[9]) != TYPE_PACKED_BYTE_ARRAY or d[9].size() != cs.terrain.size():
 		return null
 	for code in d[9]:
-		if code > Rules.IMPROVEMENTS.size():
-			return null                    # an improvement nobody has heard of
-	cs.improvements = d[9]
+		if code > Rules.STRUCTURES.size():
+			return null                    # a structure nobody has heard of
+	var pool = _int_map(d[10])
+	if pool == null:
+		return null
+	cs.structures = d[9]
+	cs.research = pool
 	cs.gold = purse
 	cs.food = larder
 	cs.ready = flags

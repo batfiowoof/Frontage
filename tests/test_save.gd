@@ -71,19 +71,19 @@ func test_the_map_and_the_turn_come_back(t) -> void:
 	var before = _played()
 	before.gold[OLD[0]] = 100000
 	var tile := -1
-	for i in before.improvements.size():
-		if before.can_improve(OLD[0], i, &"farm"):
+	for i in before.structures.size():
+		if before.can_place(OLD[0], i, &"farm"):
 			tile = i
 			break
 	if tile >= 0:
-		before.improve(OLD[0], tile, &"farm")
+		before.place(OLD[0], tile, &"farm")
 
 	var after = Save.of(before, OLD).restore(NEW)
 	t.eq(after.turn, before.turn)
 	t.eq(after.terrain, before.terrain)
-	t.eq(after.improvements, before.improvements)
+	t.eq(after.structures, before.structures)
 	if tile >= 0:
-		t.eq(after.improvement_at(tile), &"farm", "the land keeps what was done to it")
+		t.eq(after.structure_at(tile), &"farm", "the land keeps what was done to it")
 
 
 func test_armies_keep_their_regiments_and_their_wounds(t) -> void:

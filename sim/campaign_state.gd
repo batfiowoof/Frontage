@@ -14,12 +14,13 @@ const MAX_REGIMENTS_PER_ARMY := 8
 
 var turn := 1
 var terrain := PackedByteArray()
-var improvements := PackedByteArray()   # parallel to terrain, a name from Rules.IMPROVEMENTS
-var settlements := []              # [{tile:int, owner:int, name:String, buildings:Array}]
+var structures := PackedByteArray()     # parallel to terrain, an index into Rules.STRUCTURES
+var settlements := []              # [{tile:int, owner:int, name:String}]
 var armies := {}                   # id -> {id, owner, tile, move_left, regiments:Array}
                                    # a regiment is [kind, strength]
 var gold := {}                     # owner -> int
 var food := {}                     # owner -> int
+var research := {}                 # owner -> int, the pool both tech trees spend
 var ready := {}                    # owner -> bool
 var _next_army := 1
 
@@ -173,27 +174,24 @@ func men_of(owner: int) -> int:
 	return total
 
 
-## What a settlement is worth per turn on its own, before the land around it.
-static func settlement_income(s: Dictionary) -> Dictionary:
-	var gold_out := Rules.SETTLEMENT_GOLD
-	var food_out := Rules.SETTLEMENT_FOOD
-	for b: StringName in s["buildings"]:
-		gold_out += int(Rules.BUILDINGS[b]["gold"])
-		food_out += int(Rules.BUILDINGS[b]["food"])
-	return {"gold": gold_out, "food": food_out}
+## What a settlement is worth per turn on its own, before the land around it. Since
+## every structure now stands on a hex, this really is just the town.
+static func settlement_income(_s: Dictionary) -> Dictionary:
+	return {"gold": Rules.SETTLEMENT_GOLD, "food": Rules.SETTLEMENT_FOOD,
+		"research": Rules.SETTLEMENT_RESEARCH}
 
 
-## The improvement on a tile, or &"" for bare ground.
-func improvement_at(tile: int) -> StringName:
-	if tile < 0 or tile >= improvements.size() or improvements[tile] == 0:
+## What stands on a tile, or &"" for bare ground.
+func structure_at(tile: int) -> StringName:
+	if tile < 0 or tile >= structures.size() or structures[tile] == 0:
 		return &""
-	var names: Array = Rules.IMPROVEMENTS.keys()
-	var at := int(improvements[tile]) - 1
+	var names: Array = Rules.STRUCTURES.keys()
+	var at := int(structures[tile]) - 1
 	return names[at] if at < names.size() else &""
 
 
-static func improvement_code(name: StringName) -> int:
-	var at: int = Rules.IMPROVEMENTS.keys().find(name)
+static func structure_code(name: StringName) -> int:
+	var at: int = Rules.STRUCTURES.keys().find(name)
 	return 0 if at < 0 else at + 1
 
 
@@ -212,44 +210,80 @@ func working_settlement(tile: int) -> Variant:
 	return best
 
 
-## Everything the land around a player's settlements produces.
+## Everything standing on the land a player's settlements work.
 func worked_yield(owner: int) -> Dictionary:
-	var out := {"gold": 0, "food": 0}
-	for tile in improvements.size():
-		var name := improvement_at(tile)
+	var out := {"gold": 0, "food": 0, "research": 0}
+	for tile in structures.size():
+		var name := structure_at(tile)
 		if name == &"":
 			continue
 		var s = working_settlement(tile)
 		if s == null or s["owner"] != owner:
 			continue
-		out["gold"] += int(Rules.IMPROVEMENTS[name]["gold"])
-		out["food"] += int(Rules.IMPROVEMENTS[name]["food"])
+		var spec: Dictionary = Rules.STRUCTURES[name]
+		out["gold"] += int(spec["gold"])
+		out["food"] += int(spec["food"])
+		out["research"] += int(spec["research"])
 	return out
 
 
-## Can this player put this improvement on this tile? The land has to suit it and it has
-## to be close enough to a town of theirs to be worked from.
-func can_improve(owner: int, tile: int, name: StringName) -> bool:
-	if not Rules.IMPROVEMENTS.has(name):
+## Can this player put this on this hex? The ground has to suit it, the hex has to be
+## empty, and it has to be close enough to a town of theirs to be worked from.
+func can_place(owner: int, tile: int, name: StringName) -> bool:
+	if not Rules.STRUCTURES.has(name):
 		return false
-	if tile < 0 or tile >= improvements.size() or improvements[tile] != 0:
+	if tile < 0 or tile >= structures.size() or structures[tile] != 0:
 		return false
-	if not Rules.IMPROVEMENTS[name]["on"].has(int(terrain[tile])):
+	var spec: Dictionary = Rules.STRUCTURES[name]
+	var town = settlement_at(tile)
+	if bool(spec["in_town"]):
+		# Walls go on the town itself and nowhere else.
+		return town != null and town["owner"] == owner
+	if town != null:
+		return false                       # the town hex is for the town's own walls
+	if not spec["on"].has(int(terrain[tile])):
 		return false
-	if settlement_at(tile) != null:
-		return false                       # a town is already what is on that tile
 	var s = working_settlement(tile)
 	return s != null and s["owner"] == owner
 
 
-func improve(owner: int, tile: int, name: StringName) -> bool:
-	if not can_improve(owner, tile, name):
+func place(owner: int, tile: int, name: StringName) -> bool:
+	if not can_place(owner, tile, name):
 		return false
-	var cost := int(Rules.IMPROVEMENTS[name]["cost"])
+	var cost := int(Rules.STRUCTURES[name]["cost"])
 	if int(gold.get(owner, 0)) < cost:
 		return false
 	gold[owner] = int(gold[owner]) - cost
-	improvements[tile] = improvement_code(name)
+	structures[tile] = structure_code(name)
+	return true
+
+
+## Everything this player could put on this hex right now, for the buttons.
+func placeable_at(owner: int, tile: int) -> Array:
+	var out := []
+	for name: StringName in Rules.STRUCTURES:
+		if can_place(owner, tile, name):
+			out.append(name)
+	return out
+
+
+## Burn what is on the hex an army is standing on. Deliberate rather than automatic:
+## marching through enemy farmland without torching it has to stay an option, or there
+## is no decision in it. It ends the raider's turn and pays them part of what it cost.
+func raze(owner: int, army_id: int) -> bool:
+	var a = armies.get(army_id)
+	if a == null or a["owner"] != owner or a["move_left"] <= 0:
+		return false
+	var tile: int = a["tile"]
+	var name := structure_at(tile)
+	if name == &"":
+		return false
+	var s = working_settlement(tile)
+	if s != null and s["owner"] == owner:
+		return false                       # nobody burns their own barns
+	structures[tile] = 0
+	a["move_left"] = 0
+	gold[owner] = int(gold.get(owner, 0)) + int(round(float(Rules.STRUCTURES[name]["cost"]) * Rules.RAZE_LOOT))
 	return true
 
 
@@ -258,38 +292,40 @@ func defense_at(tile: int, owner: int) -> float:
 	var s = settlement_at(tile)
 	if s == null or s["owner"] != owner:
 		return 0.0
-	var best := 0.0
-	for b: StringName in s["buildings"]:
-		best = maxf(best, float(Rules.BUILDINGS[b]["defense"]))
-	return best
+	var name := structure_at(tile)
+	return 0.0 if name == &"" else float(Rules.STRUCTURES[name]["defense"])
 
 
-## Kinds this settlement can raise: the unconditional ones plus whatever its
-## buildings unlock.
-func recruitable_at(tile: int) -> Array:
-	var s = settlement_at(tile)
+## Kinds this settlement can raise: the unconditional ones, plus whatever is unlocked by
+## structures standing on the land it works. A barracks is a place on the map now, so
+## burning it takes the cavalry away with it.
+func unlocked_at(tile: int) -> Array:
 	var out := []
-	for kind: StringName in Rules.KINDS:
-		var needs: StringName = Rules.KINDS[kind]["requires"]
-		if needs == &"" or (s != null and s["buildings"].has(needs)):
-			out.append(kind)
+	var town = settlement_at(tile)
+	if town == null:
+		return out
+	for near in structures.size():
+		if hex_distance(near, tile) > Rules.WORK_RADIUS:
+			continue
+		var name := structure_at(near)
+		if name == &"":
+			continue
+		var s = working_settlement(near)
+		if s == null or s["tile"] != tile:
+			continue
+		out.append_array(Rules.STRUCTURES[name]["unlocks"])
 	return out
 
 
-func build(owner: int, tile: int, building: StringName) -> bool:
-	if not Rules.BUILDINGS.has(building):
-		return false
-	var s = settlement_at(tile)
-	if s == null or s["owner"] != owner:
-		return false
-	if s["buildings"].has(building):
-		return false
-	var cost := int(Rules.BUILDINGS[building]["cost"])
-	if int(gold.get(owner, 0)) < cost:
-		return false
-	gold[owner] = int(gold[owner]) - cost
-	s["buildings"].append(building)
-	return true
+func recruitable_at(tile: int) -> Array:
+	var unlocked := unlocked_at(tile)
+	var out := []
+	for kind: StringName in Rules.KINDS:
+		var needs: StringName = Rules.KINDS[kind]["requires"]
+		if needs == &"" or unlocked.has(kind):
+			out.append(kind)
+	return out
+
 
 
 func upkeep_of(owner: int) -> int:
@@ -323,6 +359,7 @@ func remap_owners(mapping: Dictionary) -> void:
 			a["owner"] = mapping[a["owner"]]
 	gold = _remapped(gold, mapping)
 	food = _remapped(food, mapping)
+	research = _remapped(research, mapping)
 	ready = _remapped(ready, mapping)
 
 
@@ -445,7 +482,9 @@ func end_turn() -> void:
 				var income := settlement_income(s)
 				earned["gold"] += income["gold"]
 				earned["food"] += income["food"]
+				earned["research"] += income["research"]
 		gold[owner] = int(gold[owner]) + earned["gold"]
+		research[owner] = int(research.get(owner, 0)) + int(earned["research"])
 		var larder: int = int(food.get(owner, 0)) + int(earned["food"]) - upkeep_of(owner)
 		if larder < 0:
 			starving[owner] = true
@@ -538,7 +577,7 @@ static func generate(owner_ids: Array, map_seed: int):
 		for nb: int in [tile - 1, tile + 1, tile - Rules.MAP_W, tile + Rules.MAP_W]:
 			if nb >= 0 and nb < ground.size():
 				ground[nb] = Terrain.PLAINS              # never wall a capital in
-		towns.append({"tile": tile, "owner": owner, "name": "Capital %d" % (n + 1), "buildings": [&"barracks"]})
+		towns.append({"tile": tile, "owner": owner, "name": "Capital %d" % (n + 1)})
 		purse[owner] = Rules.START_GOLD
 		larder[owner] = Rules.START_FOOD
 
@@ -553,14 +592,23 @@ static func generate(owner_ids: Array, map_seed: int):
 			if s["tile"] == tile:
 				taken = true
 		if not taken:
-			towns.append({"tile": tile, "owner": 0, "name": "Town %d" % (k + 1), "buildings": []})
+			towns.append({"tile": tile, "owner": 0, "name": "Town %d" % (k + 1)})
 
 	cs.terrain = ground
-	cs.improvements = PackedByteArray()
-	cs.improvements.resize(ground.size())
+	cs.structures = PackedByteArray()
+	cs.structures.resize(ground.size())
 	cs.settlements = towns
 	cs.gold = purse
 	cs.food = larder
 	for n in owner_ids.size():
+		cs.research[owner_ids[n]] = Rules.START_RESEARCH
 		cs.add_army(owner_ids[n], towns[n]["tile"], [&"spear", &"spear", &"archer"])
+
+	# Every capital starts with a barracks standing on a hex beside it: a real place,
+	# which an enemy can march to and burn.
+	for n in owner_ids.size():
+		for near in cs.adjacent(towns[n]["tile"]):
+			if cs.can_place(owner_ids[n], near, &"barracks"):
+				cs.structures[near] = structure_code(&"barracks")
+				break
 	return cs

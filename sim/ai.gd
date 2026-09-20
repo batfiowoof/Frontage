@@ -34,8 +34,8 @@ const ENGAGE_RANGE := 320.0
 ## How close a horseman has to be before the foot forms square.
 const HORSE_ALARM := 430.0
 
-## Buildings it wants, cheapest first once it can afford them.
-const BUILD_ORDER := [&"barracks", &"farm", &"market", &"walls"]
+## What it wants standing on its land, in the order it wants it.
+const BUILD_ORDER := [&"walls", &"farm", &"barracks", &"library", &"market", &"mine", &"lumber", &"pasture"]
 
 var seat := 0
 var _acted_on_turn := -1
@@ -61,40 +61,30 @@ func campaign_orders(cs) -> Array:
 	if cs.turn != _acted_on_turn:
 		_acted_on_turn = cs.turn          # spend money once a turn, not once a frame
 		_build_something(cs, out)
-		_improve_something(cs, out)
 		_recruit_something(cs, out)
+		_burn_something(cs, out)
 		_march(cs, out)
 	out.append(Orders.ready(true))
 	return out
 
 
+## One structure a turn, on the first hex near one of its towns that will take it.
+## Walls first, then whatever else it can afford -- it is not a clever planner, but it
+## does put things on the map where they can be come for.
 func _build_something(cs, out: Array) -> void:
 	var purse := int(cs.gold.get(seat, 0))
 	for s: Dictionary in cs.settlements:
 		if s["owner"] != seat:
 			continue
-		for building: StringName in BUILD_ORDER:
-			if s["buildings"].has(building):
+		for name: StringName in BUILD_ORDER:
+			if int(Rules.STRUCTURES[name]["cost"]) > purse:
 				continue
-			var cost := int(Rules.BUILDINGS[building]["cost"])
-			if purse >= cost:
-				out.append(Orders.build(s["tile"], building))
-				return                     # one a turn; the rest can wait for income
-
-
-## Put something on the best bit of land it can reach. One a turn, like building.
-func _improve_something(cs, out: Array) -> void:
-	var purse := int(cs.gold.get(seat, 0))
-	for s: Dictionary in cs.settlements:
-		if s["owner"] != seat:
-			continue
-		for tile in cs.improvements.size():
-			if Campaign.hex_distance(tile, s["tile"]) > Rules.WORK_RADIUS:
-				continue
-			for name: StringName in Rules.IMPROVEMENTS:
-				if int(Rules.IMPROVEMENTS[name]["cost"]) <= purse and cs.can_improve(seat, tile, name):
-					out.append(Orders.improve(tile, name))
-					return
+			for tile in cs.structures.size():
+				if Campaign.hex_distance(tile, s["tile"]) > Rules.WORK_RADIUS:
+					continue
+				if cs.can_place(seat, tile, name):
+					out.append(Orders.build(tile, name))
+					return                 # one a turn; the rest can wait for income
 
 
 func _recruit_something(cs, out: Array) -> void:
@@ -114,6 +104,21 @@ func _recruit_something(cs, out: Array) -> void:
 				best_cost = cost
 		if best != &"":
 			out.append(Orders.recruit(s["tile"], best))
+			return
+
+
+## Anything of theirs under our feet goes up. Razing ends the army's turn, so it is
+## worth doing before deciding where to march rather than after.
+func _burn_something(cs, out: Array) -> void:
+	for id in cs.sorted_army_ids():
+		var a = cs.armies[id]
+		if a["owner"] != seat or a["move_left"] <= 0:
+			continue
+		if cs.structure_at(a["tile"]) == &"":
+			continue
+		var s = cs.working_settlement(a["tile"])
+		if s != null and s["owner"] != seat:
+			out.append(Orders.raze(id))
 			return
 
 

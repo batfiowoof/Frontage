@@ -250,17 +250,32 @@ wrong hex along every slanted edge -- and most hex edges are slanted.
 
 ## The land
 
-Two layers that do different jobs:
+**One catalogue.** Everything you can put on a hex lives in `Rules.STRUCTURES` -- farm,
+pasture, lumber, mine, market, library, barracks, walls -- one to a hex, inside
+`WORK_RADIUS` of a town you hold. There used to be two tables, buildings belonging to a
+settlement and improvements belonging to the land, which meant `farm` existed twice doing
+nearly the same job and neither had anywhere an enemy could reach.
 
-	tile improvements   farm, pasture, lumber, mine -- raw yield from the LAND
-	settlement buildings farm/market/barracks/walls -- multiply it and unlock units
+	on        terrain it may go on
+	in_town   walls only, and nothing else may share the town's hex
+	unlocks   kinds the town can raise while this stands on land it works
+	defense   what a defender shrugs off in a battle fought on this hex
 
-An improvement has to suit the ground it is on and be within `WORK_RADIUS` hexes of one
-of your towns. A tile is worked by exactly one settlement -- the nearest, ties to the
-lower tile index -- or two neighbouring towns would both bank the same field. The
-improvement stays when a town changes hands; the income follows the town.
+Three things follow from a building having a location:
 
-## Replays
+- **`recruitable_at()` reads the land, not the town.** A barracks is a place on the map,
+  so burning it takes the cavalry with it.
+- **A hex is worked by exactly one settlement** -- the nearest, ties to the lower index --
+  or two neighbouring towns both bank the same field.
+- The structure stays when a town changes hands; the income follows the town.
+
+**Razing** is a deliberate order, not automatic on entering: an army standing on a hex can
+burn what is on it, which ends its turn and pays it `RAZE_LOOT` of what the thing cost.
+Deliberate because marching through enemy farmland without torching it has to stay an
+option, or there is no decision in it. Burned ground can be built on again -- this is
+pillage, not salting the earth.
+
+## Replays## Replays
 
 Every battle is recorded to `user://replays/`, verified against the state it actually
 ended in, and saved. A recording is the opening snapshot plus the orders, each stamped

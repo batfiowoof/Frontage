@@ -186,19 +186,6 @@ const BRACE_PROTECTION := 0.45
 ## A kind at or above this speed counts as cavalry for bracing and for the AI.
 const CAVALRY_SPEED := 1.4
 
-# --- buildings ----------------------------------------------------------
-## What a settlement can be made into. `gold` and `food` are added to that
-## settlement's income each turn, `unlocks` lets you recruit new kinds there, and
-## `defense` cuts the damage a defender takes in a battle fought on that tile.
-## One of each per settlement, bought outright -- no build queue, because a queue
-## is a lot of machinery for a prototype nobody is pacing yet.
-const BUILDINGS := {
-	&"farm":     {"cost": 150, "gold": 0,  "food": 25, "unlocks": [],                      "defense": 0.0},
-	&"market":   {"cost": 200, "gold": 45, "food": 0,  "unlocks": [],                      "defense": 0.0},
-	&"barracks": {"cost": 250, "gold": 0,  "food": 0,  "unlocks": [&"pike", &"cavalry"],   "defense": 0.0},
-	&"walls":    {"cost": 300, "gold": 0,  "food": 0,  "unlocks": [],                      "defense": 0.3},
-}
-
 # --- campaign -----------------------------------------------------------
 ## Hexes, in odd-r offset coordinates: stored row by row exactly as a square grid is,
 ## so `idx`, `tile_x`, `tile_y` and the breadth-first search over them never noticed
@@ -208,20 +195,35 @@ const MAP_H := 16
 ## Distance from centre to corner of a pointy-top hex.
 const HEX_SIZE := 30.0
 
-# --- tile improvements --------------------------------------------------
-## The Civ layer: what you do to the LAND, as opposed to what you build in the town.
-## Improvements make raw yield; settlement buildings multiply it and unlock units, so
-## the two do different jobs and neither replaces the other.
+# --- structures ---------------------------------------------------------
+## Everything you can put on a hex, in one catalogue. There used to be two -- buildings
+## belonging to a settlement and improvements belonging to the land -- which meant `farm`
+## existed twice doing nearly the same job, and neither had anywhere an enemy could reach.
 ##
-## `on` lists the terrain it may be built on. A settlement works every improved tile
-## within WORK_RADIUS of it.
-const IMPROVEMENTS := {
-	&"farm":    {"cost": 90,  "gold": 0,  "food": 14, "on": [0]},
-	&"pasture": {"cost": 110, "gold": 8,  "food": 9,  "on": [0, 3]},
-	&"lumber":  {"cost": 100, "gold": 10, "food": 0,  "on": [1]},
-	&"mine":    {"cost": 160, "gold": 26, "food": 0,  "on": [3, 2]},
+## Now every structure stands on a hex inside a town's working radius, one to a hex, and
+## every one of them can be burned. Burning a barracks stops the enemy raising cavalry,
+## which is the point of it having a location at all.
+##
+##   on        terrain it may be built on, by Terrain enum value
+##   in_town   must go on the settlement's own hex, and nothing else may
+##   unlocks   regiment kinds the town can raise while this stands nearby
+##   defense   damage a defender shrugs off in a battle fought on this hex
+const STRUCTURES := {
+	&"farm":     {"cost": 90,  "gold": 0,  "food": 14, "research": 0, "on": [0],    "unlocks": [],                    "defense": 0.0,  "in_town": false},
+	&"pasture":  {"cost": 110, "gold": 8,  "food": 9,  "research": 0, "on": [0, 3], "unlocks": [],                    "defense": 0.0,  "in_town": false},
+	&"lumber":   {"cost": 100, "gold": 10, "food": 0,  "research": 0, "on": [1],    "unlocks": [],                    "defense": 0.0,  "in_town": false},
+	&"mine":     {"cost": 160, "gold": 26, "food": 0,  "research": 0, "on": [3, 2], "unlocks": [],                    "defense": 0.0,  "in_town": false},
+	&"market":   {"cost": 200, "gold": 45, "food": 0,  "research": 0, "on": [0, 3], "unlocks": [],                    "defense": 0.0,  "in_town": false},
+	&"library":  {"cost": 180, "gold": 0,  "food": 0,  "research": 6, "on": [0, 3], "unlocks": [],                    "defense": 0.0,  "in_town": false},
+	&"barracks": {"cost": 250, "gold": 0,  "food": 0,  "research": 0, "on": [0, 3], "unlocks": [&"pike", &"cavalry"], "defense": 0.0,  "in_town": false},
+	&"walls":    {"cost": 300, "gold": 0,  "food": 0,  "research": 0, "on": [],     "unlocks": [],                    "defense": 0.3,  "in_town": true},
 }
 const WORK_RADIUS := 2
+
+## What a raider takes away from a burned structure, as a share of what it cost. Razing
+## is pillage rather than salting the earth: the ground is clear again afterwards and the
+## owner may rebuild.
+const RAZE_LOOT := 0.4
 const ARMY_MOVE_POINTS := 3
 ## Men each regiment loses per turn when the larder is empty. Food used to floor at
 ## zero, which made upkeep a number with no teeth: you could field any army you liked
@@ -234,5 +236,7 @@ const DESERTION_PER_TURN := 12
 const REINFORCE_PER_TURN := 25
 const START_GOLD := 500
 const START_FOOD := 200
+const START_RESEARCH := 0
 const SETTLEMENT_GOLD := 60                # per turn, per owned settlement
 const SETTLEMENT_FOOD := 25
+const SETTLEMENT_RESEARCH := 3

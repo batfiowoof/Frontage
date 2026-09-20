@@ -128,10 +128,11 @@ func _check(cs) -> void:
 	var men := 0
 	for seat in [-1, -2]:
 		men += cs.men_of(seat)
-	for s: Dictionary in cs.settlements:
-		built += s["buildings"].size()
+	for tile in cs.structures.size():
+		if cs.structure_at(tile) != &"":
+			built += 1
 	if built <= 2:
-		_fail("only %d buildings on the whole map: the AI is not developing" % built)
+		_fail("only %d structures on the whole map: the AI is not developing" % built)
 	if men == 0:
 		_fail("both AIs have no men left at all")
 

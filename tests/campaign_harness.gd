@@ -190,13 +190,17 @@ func _take_my_turn(cs) -> void:
 			net.order_army_move(id, Campaign.idx(int(Rules.MAP_W / 2), int(Rules.MAP_H / 2)))
 			break
 	for s: Dictionary in cs.settlements:
-		if s["owner"] == me:
-			# A market first, then horse: it exercises the BUILD order and the
-			# barracks gate that cavalry sits behind.
-			if not s["buildings"].has(&"market"):
-				net.order_build(s["tile"], &"market")
-			net.order_recruit(s["tile"], &"cavalry" if s["buildings"].has(&"barracks") else &"spear")
-			break
+		if s["owner"] != me:
+			continue
+		# Put something on the land, which exercises the BUILD order, then raise the
+		# best thing the structures near this town unlock.
+		for tile in cs.structures.size():
+			if Campaign.hex_distance(tile, s["tile"]) <= Rules.WORK_RADIUS 					and cs.can_place(me, tile, &"farm"):
+				net.order_build(tile, &"farm")
+				break
+		var can: Array = cs.recruitable_at(s["tile"])
+		net.order_recruit(s["tile"], &"cavalry" if can.has(&"cavalry") else &"spear")
+		break
 
 	if role == "join" and not probed:
 		probed = true
@@ -256,9 +260,12 @@ func _check_the_campaign_actually_happened(cs) -> void:
 
 	var built := 0
 	var horse := 0
-	for s: Dictionary in cs.settlements:
-		if s["owner"] == me:
-			built += s["buildings"].size()
+	for tile in cs.structures.size():
+		if cs.structure_at(tile) == &"":
+			continue
+		var s = cs.working_settlement(tile)
+		if s != null and s["owner"] == me:
+			built += 1
 	for id in cs.sorted_army_ids():
 		var a = cs.armies[id]
 		if a["owner"] == me:
@@ -266,7 +273,7 @@ func _check_the_campaign_actually_happened(cs) -> void:
 				if r[0] == &"cavalry":
 					horse += 1
 	if built < 2:
-		_fail("nothing was built: a capital starts with a barracks and should have gained a market")
+		_fail("nothing was built: a capital starts with a barracks and should have gained a farm")
 	if horse == 0:
 		_fail("no cavalry was ever raised, so the barracks gate is not working over the wire")
 

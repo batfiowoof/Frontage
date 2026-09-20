@@ -15,7 +15,7 @@ const VERSION := 1
 const MAX_IDS_PER_ORDER := 64          # a box selection, not a whole army list
 const TILE_COUNT := Rules.MAP_W * Rules.MAP_H
 
-enum Type { BATTLE_MOVE, ARMY_MOVE, RECRUIT, READY, BUILD, SET_FORMATION, FOCUS, IMPROVE }
+enum Type { BATTLE_MOVE, ARMY_MOVE, RECRUIT, READY, BUILD, SET_FORMATION, FOCUS, RAZE }
 
 
 # --- encoding -------------------------------------------------------------
@@ -36,8 +36,13 @@ static func ready(value: bool) -> PackedByteArray:
 	return var_to_bytes([VERSION, Type.READY, value])
 
 
-static func build(tile: int, building: StringName) -> PackedByteArray:
-	return var_to_bytes([VERSION, Type.BUILD, tile, building])
+## One order for everything you can put on a hex, since there is one catalogue now.
+static func build(tile: int, structure: StringName) -> PackedByteArray:
+	return var_to_bytes([VERSION, Type.BUILD, tile, structure])
+
+
+static func raze(army_id: int) -> PackedByteArray:
+	return var_to_bytes([VERSION, Type.RAZE, army_id])
 
 
 ## One order for both, because changing either is the same manoeuvre. A width of 0
@@ -51,8 +56,7 @@ static func focus(ids: PackedInt32Array, mark: int) -> PackedByteArray:
 	return var_to_bytes([VERSION, Type.FOCUS, ids, mark])
 
 
-static func improve(tile: int, name: StringName) -> PackedByteArray:
-	return var_to_bytes([VERSION, Type.IMPROVE, tile, name])
+
 
 
 # --- decoding -------------------------------------------------------------
@@ -83,8 +87,8 @@ static func decode(bytes: PackedByteArray) -> Dictionary:
 			return _decode_set_formation(d)
 		Type.FOCUS:
 			return _decode_focus(d)
-		Type.IMPROVE:
-			return _decode_improve(d)
+		Type.RAZE:
+			return _decode_raze(d)
 	return {}
 
 
@@ -141,9 +145,9 @@ static func _decode_build(d: Array) -> Dictionary:
 		return {}
 	if typeof(d[2]) != TYPE_INT or not _is_tile(d[2]):
 		return {}
-	if typeof(d[3]) != TYPE_STRING_NAME or not Rules.BUILDINGS.has(d[3]):
+	if typeof(d[3]) != TYPE_STRING_NAME or not Rules.STRUCTURES.has(d[3]):
 		return {}
-	return {"type": Type.BUILD, "tile": d[2], "building": d[3]}
+	return {"type": Type.BUILD, "tile": d[2], "structure": d[3]}
 
 
 static func _decode_set_formation(d: Array) -> Dictionary:
@@ -174,14 +178,10 @@ static func _decode_focus(d: Array) -> Dictionary:
 	return {"type": Type.FOCUS, "ids": ids, "mark": d[3]}
 
 
-static func _decode_improve(d: Array) -> Dictionary:
-	if d.size() != 4:
+static func _decode_raze(d: Array) -> Dictionary:
+	if d.size() != 3 or typeof(d[2]) != TYPE_INT:
 		return {}
-	if typeof(d[2]) != TYPE_INT or not _is_tile(d[2]):
-		return {}
-	if typeof(d[3]) != TYPE_STRING_NAME or not Rules.IMPROVEMENTS.has(d[3]):
-		return {}
-	return {"type": Type.IMPROVE, "tile": d[2], "improvement": d[3]}
+	return {"type": Type.RAZE, "army_id": d[2]}
 
 
 static func _is_tile(i: int) -> bool:

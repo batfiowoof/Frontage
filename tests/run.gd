@@ -12,12 +12,11 @@ const TESTS := [
 	"res://tests/test_snapshot.gd",
 	"res://tests/test_campaign.gd",
 	"res://tests/test_autoresolve.gd",
-	"res://tests/test_buildings.gd",
+	"res://tests/test_structures.gd",
 	"res://tests/test_bodies.gd",
 	"res://tests/test_replay.gd",
 	"res://tests/test_formations.gd",
 	"res://tests/test_shooting.gd",
-	"res://tests/test_hex.gd",
 	"res://tests/test_save.gd",
 ]
 
