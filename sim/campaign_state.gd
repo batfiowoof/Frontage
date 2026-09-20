@@ -8,12 +8,13 @@ extends RefCounted
 
 const Rules := preload("res://sim/rules.gd")
 
-enum Terrain { PLAINS, FOREST, MOUNTAIN }
+enum Terrain { PLAINS, FOREST, MOUNTAIN, HILLS, WATER }
 
 const MAX_REGIMENTS_PER_ARMY := 8
 
 var turn := 1
 var terrain := PackedByteArray()
+var improvements := PackedByteArray()   # parallel to terrain, a name from Rules.IMPROVEMENTS
 var settlements := []              # [{tile:int, owner:int, name:String, buildings:Array}]
 var armies := {}                   # id -> {id, owner, tile, move_left, regiments:Array}
                                    # a regiment is [kind, strength]
@@ -42,19 +43,56 @@ static func in_bounds(x: int, y: int) -> bool:
 
 
 func passable(i: int) -> bool:
-	return i >= 0 and i < terrain.size() and terrain[i] != Terrain.MOUNTAIN
+	if i < 0 or i >= terrain.size():
+		return false
+	return terrain[i] != Terrain.MOUNTAIN and terrain[i] != Terrain.WATER
+
+
+## Six ways out of a hex. In odd-r offset the answer depends on whether the row is one
+## of the ones shifted half a hex to the right, which is the entire cost of moving off a
+## square grid -- everything else about the map is stored and searched the same way.
+const EVEN_ROW := [Vector2i(1, 0), Vector2i(0, -1), Vector2i(-1, -1),
+	Vector2i(-1, 0), Vector2i(-1, 1), Vector2i(0, 1)]
+const ODD_ROW := [Vector2i(1, 0), Vector2i(1, -1), Vector2i(0, -1),
+	Vector2i(-1, 0), Vector2i(0, 1), Vector2i(1, 1)]
+
+
+static func directions(row: int) -> Array:
+	return ODD_ROW if row % 2 != 0 else EVEN_ROW
+
+
+## Neighbouring tiles, passable or not. Use `neighbours` for somewhere an army can go.
+func adjacent(i: int) -> PackedInt32Array:
+	var out := PackedInt32Array()
+	var x := tile_x(i)
+	var y := tile_y(i)
+	for d: Vector2i in directions(y):
+		var nx := x + d.x
+		var ny := y + d.y
+		if in_bounds(nx, ny):
+			out.append(idx(nx, ny))
+	return out
 
 
 func neighbours(i: int) -> PackedInt32Array:
 	var out := PackedInt32Array()
-	var x := tile_x(i)
-	var y := tile_y(i)
-	for d: Vector2i in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
-		var nx := x + d.x
-		var ny := y + d.y
-		if in_bounds(nx, ny) and passable(idx(nx, ny)):
-			out.append(idx(nx, ny))
+	for n in adjacent(i):
+		if passable(n):
+			out.append(n)
 	return out
+
+
+## How many hexes apart, by way of cube coordinates -- on a hex grid the Manhattan
+## distance over offset coordinates is simply wrong, and it is what decides which
+## settlement works a tile.
+static func hex_distance(a: int, b: int) -> int:
+	var ax := tile_x(a) - int((tile_y(a) - (tile_y(a) & 1)) / 2.0)
+	var az := tile_y(a)
+	var ay := -ax - az
+	var bx := tile_x(b) - int((tile_y(b) - (tile_y(b) & 1)) / 2.0)
+	var bz := tile_y(b)
+	var by := -bx - bz
+	return int((absi(ax - bx) + absi(ay - by) + absi(az - bz)) / 2.0)
 
 
 ## Shortest passable route, excluding `from`, or empty if there is none.
@@ -135,7 +173,7 @@ func men_of(owner: int) -> int:
 	return total
 
 
-## What a settlement is worth per turn, base plus whatever has been built on it.
+## What a settlement is worth per turn on its own, before the land around it.
 static func settlement_income(s: Dictionary) -> Dictionary:
 	var gold_out := Rules.SETTLEMENT_GOLD
 	var food_out := Rules.SETTLEMENT_FOOD
@@ -143,6 +181,76 @@ static func settlement_income(s: Dictionary) -> Dictionary:
 		gold_out += int(Rules.BUILDINGS[b]["gold"])
 		food_out += int(Rules.BUILDINGS[b]["food"])
 	return {"gold": gold_out, "food": food_out}
+
+
+## The improvement on a tile, or &"" for bare ground.
+func improvement_at(tile: int) -> StringName:
+	if tile < 0 or tile >= improvements.size() or improvements[tile] == 0:
+		return &""
+	var names: Array = Rules.IMPROVEMENTS.keys()
+	var at := int(improvements[tile]) - 1
+	return names[at] if at < names.size() else &""
+
+
+static func improvement_code(name: StringName) -> int:
+	var at: int = Rules.IMPROVEMENTS.keys().find(name)
+	return 0 if at < 0 else at + 1
+
+
+## Which settlement works this tile: the nearest one within WORK_RADIUS. Ties go to the
+## lower tile index so two towns can never both bank the same field.
+func working_settlement(tile: int) -> Variant:
+	var best = null
+	var best_distance := Rules.WORK_RADIUS + 1
+	for s: Dictionary in settlements:
+		if s["owner"] == 0:
+			continue
+		var d := hex_distance(tile, s["tile"])
+		if d <= Rules.WORK_RADIUS and (d < best_distance or (d == best_distance and best != null and s["tile"] < best["tile"])):
+			best_distance = d
+			best = s
+	return best
+
+
+## Everything the land around a player's settlements produces.
+func worked_yield(owner: int) -> Dictionary:
+	var out := {"gold": 0, "food": 0}
+	for tile in improvements.size():
+		var name := improvement_at(tile)
+		if name == &"":
+			continue
+		var s = working_settlement(tile)
+		if s == null or s["owner"] != owner:
+			continue
+		out["gold"] += int(Rules.IMPROVEMENTS[name]["gold"])
+		out["food"] += int(Rules.IMPROVEMENTS[name]["food"])
+	return out
+
+
+## Can this player put this improvement on this tile? The land has to suit it and it has
+## to be close enough to a town of theirs to be worked from.
+func can_improve(owner: int, tile: int, name: StringName) -> bool:
+	if not Rules.IMPROVEMENTS.has(name):
+		return false
+	if tile < 0 or tile >= improvements.size() or improvements[tile] != 0:
+		return false
+	if not Rules.IMPROVEMENTS[name]["on"].has(int(terrain[tile])):
+		return false
+	if settlement_at(tile) != null:
+		return false                       # a town is already what is on that tile
+	var s = working_settlement(tile)
+	return s != null and s["owner"] == owner
+
+
+func improve(owner: int, tile: int, name: StringName) -> bool:
+	if not can_improve(owner, tile, name):
+		return false
+	var cost := int(Rules.IMPROVEMENTS[name]["cost"])
+	if int(gold.get(owner, 0)) < cost:
+		return false
+	gold[owner] = int(gold[owner]) - cost
+	improvements[tile] = improvement_code(name)
+	return true
 
 
 ## How much damage a defender shrugs off on this tile, 0..1.
@@ -309,7 +417,7 @@ func all_ready(owners: Array) -> bool:
 func end_turn() -> void:
 	var starving := {}
 	for owner in gold.keys():
-		var earned := {"gold": 0, "food": 0}
+		var earned := worked_yield(owner)
 		for s: Dictionary in settlements:
 			if s["owner"] == owner:
 				var income := settlement_income(s)
@@ -379,7 +487,16 @@ static func generate(owner_ids: Array, map_seed: int):
 	ground.resize(Rules.MAP_W * Rules.MAP_H)
 	for i in ground.size():
 		var roll := rng.randf()
-		ground[i] = Terrain.MOUNTAIN if roll < 0.10 else (Terrain.FOREST if roll < 0.32 else Terrain.PLAINS)
+		if roll < 0.07:
+			ground[i] = Terrain.MOUNTAIN
+		elif roll < 0.13:
+			ground[i] = Terrain.WATER
+		elif roll < 0.27:
+			ground[i] = Terrain.HILLS
+		elif roll < 0.47:
+			ground[i] = Terrain.FOREST
+		else:
+			ground[i] = Terrain.PLAINS
 
 	# Capitals sit inset from the corners so nobody starts wedged against an edge.
 	var spots := [
@@ -417,6 +534,8 @@ static func generate(owner_ids: Array, map_seed: int):
 			towns.append({"tile": tile, "owner": 0, "name": "Town %d" % (k + 1), "buildings": []})
 
 	cs.terrain = ground
+	cs.improvements = PackedByteArray()
+	cs.improvements.resize(ground.size())
 	cs.settlements = towns
 	cs.gold = purse
 	cs.food = larder

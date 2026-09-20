@@ -184,9 +184,28 @@ const BUILDINGS := {
 }
 
 # --- campaign -----------------------------------------------------------
+## Hexes, in odd-r offset coordinates: stored row by row exactly as a square grid is,
+## so `idx`, `tile_x`, `tile_y` and the breadth-first search over them never noticed
+## the change. Only `neighbours()` did, going from four directions to six.
 const MAP_W := 24
 const MAP_H := 16
-const TILE_PX := 48
+## Distance from centre to corner of a pointy-top hex.
+const HEX_SIZE := 30.0
+
+# --- tile improvements --------------------------------------------------
+## The Civ layer: what you do to the LAND, as opposed to what you build in the town.
+## Improvements make raw yield; settlement buildings multiply it and unlock units, so
+## the two do different jobs and neither replaces the other.
+##
+## `on` lists the terrain it may be built on. A settlement works every improved tile
+## within WORK_RADIUS of it.
+const IMPROVEMENTS := {
+	&"farm":    {"cost": 90,  "gold": 0,  "food": 14, "on": [0]},
+	&"pasture": {"cost": 110, "gold": 8,  "food": 9,  "on": [0, 3]},
+	&"lumber":  {"cost": 100, "gold": 10, "food": 0,  "on": [1]},
+	&"mine":    {"cost": 160, "gold": 26, "food": 0,  "on": [3, 2]},
+}
+const WORK_RADIUS := 2
 const ARMY_MOVE_POINTS := 3
 ## Men each regiment loses per turn when the larder is empty. Food used to floor at
 ## zero, which made upkeep a number with no teeth: you could field any army you liked

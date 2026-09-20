@@ -39,14 +39,17 @@ func test_capitals_are_never_walled_in(t) -> void:
 
 func test_path_avoids_mountains_and_reports_failure(t) -> void:
 	var cs = _two_player()
-	# A pocket: wall one tile in on all four sides.
+	# A pocket: wall one hex in on all SIX sides. Four was the square-grid answer, and a
+	# hex walled on four still has two ways out.
 	var target := Campaign.idx(10, 8)
 	cs.terrain[target] = Campaign.Terrain.PLAINS
-	for n in [target - 1, target + 1, target - Rules.MAP_W, target + Rules.MAP_W]:
+	var way_out := -1
+	for n in cs.adjacent(target):
 		cs.terrain[n] = Campaign.Terrain.MOUNTAIN
+		way_out = n
 	t.eq(cs.path(Campaign.idx(3, 3), target).size(), 0, "unreachable means no route")
 
-	cs.terrain[target + 1] = Campaign.Terrain.PLAINS
+	cs.terrain[way_out] = Campaign.Terrain.PLAINS
 	var route: PackedInt32Array = cs.path(Campaign.idx(3, 3), target)
 	t.ok(route.size() > 0, "one gap is enough")
 	for step in route:

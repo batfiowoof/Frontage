@@ -15,7 +15,7 @@ const VERSION := 1
 const MAX_IDS_PER_ORDER := 64          # a box selection, not a whole army list
 const TILE_COUNT := Rules.MAP_W * Rules.MAP_H
 
-enum Type { BATTLE_MOVE, ARMY_MOVE, RECRUIT, READY, BUILD, SET_FORMATION, FOCUS }
+enum Type { BATTLE_MOVE, ARMY_MOVE, RECRUIT, READY, BUILD, SET_FORMATION, FOCUS, IMPROVE }
 
 
 # --- encoding -------------------------------------------------------------
@@ -51,6 +51,10 @@ static func focus(ids: PackedInt32Array, mark: int) -> PackedByteArray:
 	return var_to_bytes([VERSION, Type.FOCUS, ids, mark])
 
 
+static func improve(tile: int, name: StringName) -> PackedByteArray:
+	return var_to_bytes([VERSION, Type.IMPROVE, tile, name])
+
+
 # --- decoding -------------------------------------------------------------
 
 ## Returns a validated order dictionary, or {} if these bytes are not an order.
@@ -79,6 +83,8 @@ static func decode(bytes: PackedByteArray) -> Dictionary:
 			return _decode_set_formation(d)
 		Type.FOCUS:
 			return _decode_focus(d)
+		Type.IMPROVE:
+			return _decode_improve(d)
 	return {}
 
 
@@ -166,6 +172,16 @@ static func _decode_focus(d: Array) -> Dictionary:
 	if typeof(d[3]) != TYPE_INT:
 		return {}
 	return {"type": Type.FOCUS, "ids": ids, "mark": d[3]}
+
+
+static func _decode_improve(d: Array) -> Dictionary:
+	if d.size() != 4:
+		return {}
+	if typeof(d[2]) != TYPE_INT or not _is_tile(d[2]):
+		return {}
+	if typeof(d[3]) != TYPE_STRING_NAME or not Rules.IMPROVEMENTS.has(d[3]):
+		return {}
+	return {"type": Type.IMPROVE, "tile": d[2], "improvement": d[3]}
 
 
 static func _is_tile(i: int) -> bool:

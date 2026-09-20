@@ -102,7 +102,7 @@ static func encode_campaign(cs) -> PackedByteArray:
 		armies.append([a["id"], a["owner"], a["tile"], a["move_left"], a["regiments"]])
 	return var_to_bytes([
 		VERSION, cs.turn, cs._next_army, cs.terrain,
-		settlements, armies, cs.gold, cs.food, cs.ready,
+		settlements, armies, cs.gold, cs.food, cs.ready, cs.improvements,
 	])
 
 
@@ -110,7 +110,7 @@ static func decode_campaign(bytes: PackedByteArray):
 	if bytes.size() < 4:
 		return null
 	var d = bytes_to_var(bytes)
-	if typeof(d) != TYPE_ARRAY or d.size() != 9:
+	if typeof(d) != TYPE_ARRAY or d.size() != 10:
 		return null
 	if typeof(d[0]) != TYPE_INT or d[0] != VERSION:
 		return null
@@ -180,6 +180,12 @@ static func decode_campaign(bytes: PackedByteArray):
 	var flags = _bool_map(d[8])
 	if purse == null or larder == null or flags == null:
 		return null
+	if typeof(d[9]) != TYPE_PACKED_BYTE_ARRAY or d[9].size() != cs.terrain.size():
+		return null
+	for code in d[9]:
+		if code > Rules.IMPROVEMENTS.size():
+			return null                    # an improvement nobody has heard of
+	cs.improvements = d[9]
 	cs.gold = purse
 	cs.food = larder
 	cs.ready = flags

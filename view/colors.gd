@@ -15,7 +15,20 @@ const TERRAIN := {
 	Campaign.Terrain.PLAINS: Color("8a9455"),
 	Campaign.Terrain.FOREST: Color("46683f"),
 	Campaign.Terrain.MOUNTAIN: Color("6b6661"),
+	Campaign.Terrain.HILLS: Color("9a8b5c"),
+	Campaign.Terrain.WATER: Color("3d6b86"),
 }
+
+const IMPROVEMENT := {
+	&"farm": Color("d8c66a"),
+	&"pasture": Color("b6cf7a"),
+	&"lumber": Color("7a5a3a"),
+	&"mine": Color("b9b2a6"),
+}
+
+
+static func of_improvement(name: StringName) -> Color:
+	return IMPROVEMENT.get(name, Color.MAGENTA)
 
 
 ## Colour by seat, not by peer id: peer ids are random 32-bit numbers, so hashing one

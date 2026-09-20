@@ -61,6 +61,7 @@ func campaign_orders(cs) -> Array:
 	if cs.turn != _acted_on_turn:
 		_acted_on_turn = cs.turn          # spend money once a turn, not once a frame
 		_build_something(cs, out)
+		_improve_something(cs, out)
 		_recruit_something(cs, out)
 		_march(cs, out)
 	out.append(Orders.ready(true))
@@ -79,6 +80,21 @@ func _build_something(cs, out: Array) -> void:
 			if purse >= cost:
 				out.append(Orders.build(s["tile"], building))
 				return                     # one a turn; the rest can wait for income
+
+
+## Put something on the best bit of land it can reach. One a turn, like building.
+func _improve_something(cs, out: Array) -> void:
+	var purse := int(cs.gold.get(seat, 0))
+	for s: Dictionary in cs.settlements:
+		if s["owner"] != seat:
+			continue
+		for tile in cs.improvements.size():
+			if Campaign.hex_distance(tile, s["tile"]) > Rules.WORK_RADIUS:
+				continue
+			for name: StringName in Rules.IMPROVEMENTS:
+				if int(Rules.IMPROVEMENTS[name]["cost"]) <= purse and cs.can_improve(seat, tile, name):
+					out.append(Orders.improve(tile, name))
+					return
 
 
 func _recruit_something(cs, out: Array) -> void:
@@ -133,7 +149,7 @@ func _nearest_prize(cs) -> int:
 
 
 static func _tile_distance(a: int, b: int) -> int:
-	return absi(Campaign.tile_x(a) - Campaign.tile_x(b)) + absi(Campaign.tile_y(a) - Campaign.tile_y(b))
+	return Campaign.hex_distance(a, b)
 
 
 # --- battle ---------------------------------------------------------------

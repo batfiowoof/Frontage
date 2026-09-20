@@ -327,6 +327,10 @@ func order_focus(ids: PackedInt32Array, mark: int) -> void:
 	submit(Orders.focus(ids, mark))
 
 
+func order_improve(tile: int, name: StringName) -> void:
+	submit(Orders.improve(tile, name))
+
+
 func _receive_order(sender: int, bytes: PackedByteArray) -> void:
 	var order := Orders.decode(bytes)
 	if order.is_empty():
@@ -350,6 +354,8 @@ func _receive_order(sender: int, bytes: PackedByteArray) -> void:
 			_set_formation(sender, order)
 		Orders.Type.FOCUS:
 			_focus(sender, order)
+		Orders.Type.IMPROVE:
+			_improve(sender, order)
 
 
 # --- campaign orders ------------------------------------------------------
@@ -418,6 +424,20 @@ func _set_formation(sender: int, order: Dictionary) -> void:
 		var changed: bool = r.set_formation(order["formation"])
 		if int(order["width"]) > 0 and not changed:
 			r.set_width(int(order["width"]))
+
+
+func _improve(sender: int, order: Dictionary) -> void:
+	if campaign == null:
+		_reject(sender, "no campaign in progress")
+		return
+	if battle != null:
+		_reject(sender, "a battle is being fought")
+		return
+	if not campaign.improve(sender, order["tile"], order["improvement"]):
+		_reject(sender, "cannot put a %s on tile %d" % [order["improvement"], order["tile"]])
+		return
+	broadcast_campaign()
+	campaign_updated.emit(campaign)
 
 
 func _build(sender: int, order: Dictionary) -> void:

@@ -218,6 +218,36 @@ Measured: 16 regiments x 120 men costs **5.45 ms/frame**, about a third of a 60f
 `tests/test_bodies.gd` prints it. If it ever stops fitting, the integration moves to a
 shader rather than the look being abandoned.
 
+## The map
+
+Hexes, in **odd-r offset coordinates**: stored row by row exactly as squares were, so
+`idx`, `tile_x`, `tile_y` and the breadth-first search over them never noticed the change.
+`neighbours()` went from four directions to six, parity-dependent on the row, and that is
+the whole of it. `view/campaign/hex.gd` holds the pixel geometry and the click picking.
+
+Two things worth pinning, both of which have tests sweeping the entire map:
+
+- **Neighbours must be mutual.** Get the row parity wrong and A is next to B while B is
+  not next to A, so armies path one way and not back.
+- **Distance is measured in cube coordinates, not Manhattan.** Offset arithmetic is simply
+  wrong on a hex grid, and that number decides which town works a tile and where the AI
+  marches.
+
+Clicking uses cube rounding rather than dividing and flooring, which puts clicks in the
+wrong hex along every slanted edge -- and most hex edges are slanted.
+
+## The land
+
+Two layers that do different jobs:
+
+	tile improvements   farm, pasture, lumber, mine -- raw yield from the LAND
+	settlement buildings farm/market/barracks/walls -- multiply it and unlock units
+
+An improvement has to suit the ground it is on and be within `WORK_RADIUS` hexes of one
+of your towns. A tile is worked by exactly one settlement -- the nearest, ties to the
+lower tile index -- or two neighbouring towns would both bank the same field. The
+improvement stays when a town changes hands; the income follows the town.
+
 ## Replays
 
 Every battle is recorded to `user://replays/`, verified against the state it actually
