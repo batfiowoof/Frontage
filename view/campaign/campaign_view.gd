@@ -19,6 +19,7 @@ var _camera: Camera2D
 var _status: Label
 var _players: Label
 var _hint: Label
+var _news: Label
 var _end_turn: Button
 var _recruit_bar: HBoxContainer
 var _dragging := false
@@ -29,6 +30,7 @@ func _ready() -> void:
 	_build_hud()
 	Net.campaign_updated.connect(_on_campaign_updated)
 	Net.order_rejected.connect(_on_order_rejected)
+	Net.news.connect(_on_news)
 	_refresh()
 
 
@@ -57,6 +59,14 @@ func _build_hud() -> void:
 	_hint.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
 	_hint.position = Vector2(12, -56)
 	layer.add_child(_hint)
+
+	_news = Label.new()
+	_news.set_anchors_preset(Control.PRESET_CENTER_TOP)
+	_news.position = Vector2(-260, 10)
+	_news.custom_minimum_size = Vector2(520, 0)
+	_news.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_news.add_theme_color_override("font_color", Color("ffd98a"))
+	layer.add_child(_news)
 
 	_recruit_bar = HBoxContainer.new()
 	_recruit_bar.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
@@ -143,6 +153,10 @@ func _on_end_turn() -> void:
 
 func _on_order_rejected(_peer: int, reason: String) -> void:
 	_hint.text = "refused: " + reason
+
+
+func _on_news(text: String) -> void:
+	_news.text = text
 
 
 # --- drawing --------------------------------------------------------------

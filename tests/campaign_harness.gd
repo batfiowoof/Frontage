@@ -29,6 +29,8 @@ var turns_seen := 0
 var acted_this_turn := false
 var gold_at_start := -1
 var probed := false
+var battles := 0
+var peak_regiments := 0
 
 
 func _initialize() -> void:
@@ -44,6 +46,7 @@ func _initialize() -> void:
 		printerr("usage: --host | --join <address>")
 		quit(2)
 		return
+	battles = 0
 	net = root.get_node_or_null("Net")
 	if net == null:
 		net = load("res://net/net.gd").new()
@@ -58,6 +61,9 @@ func _start() -> void:
 		printerr("[%s] could not start: %d" % [role, err])
 		quit(2)
 		return
+	net.news.connect(func(text: String) -> void:
+		battles += 1
+		print("[%s] news: %s" % [role, text]))
 	print("[%s] up" % role)
 
 
@@ -79,6 +85,12 @@ func _process(delta: float) -> bool:
 	var cs = net.campaign
 	if cs == null:
 		return false
+
+	var owned := 0
+	for id in cs.sorted_army_ids():
+		if cs.armies[id]["owner"] == net.my_id():
+			owned += cs.armies[id]["regiments"].size()
+	peak_regiments = maxi(peak_regiments, owned)
 
 	if cs.turn != last_turn:
 		last_turn = cs.turn
@@ -151,10 +163,10 @@ func _check_the_campaign_actually_happened(cs) -> void:
 			mine += cs.armies[id]["regiments"].size()
 		else:
 			theirs += cs.armies[id]["regiments"].size()
-	if mine <= 3:
-		_fail("recruitment never happened: still %d regiments" % mine)
-	if theirs <= 3:
-		_fail("the other player never recruited either (%d): are orders crossing?" % theirs)
+	if peak_regiments <= 3:
+		_fail("recruitment never happened: peaked at %d regiments" % peak_regiments)
+	if battles == 0:
+		_fail("the two armies never fought: the loop does not close")
 
 	if int(cs.gold.get(me, 0)) <= 0:
 		_fail("no gold left at all, income is not being paid")
@@ -165,7 +177,8 @@ func _check_the_campaign_actually_happened(cs) -> void:
 		if owner != me and int(cs.gold[owner]) < 0:
 			_fail("another player's treasury went negative: authority is leaking")
 
-	print("[%s] turn %d: %d regiments mine, %d theirs, %d gold" % [role, cs.turn, mine, theirs, int(cs.gold.get(me, 0))])
+	print("[%s] turn %d: %d regiments mine (peak %d), %d theirs, %d gold, %d battles" % [
+		role, cs.turn, mine, peak_regiments, theirs, int(cs.gold.get(me, 0)), battles])
 
 
 func _fail(msg: String) -> void:
@@ -178,7 +191,7 @@ func _finish() -> void:
 		quit(0)
 		return
 	if failures.is_empty():
-		print("[join] PASS  %d turns played, mirror exact each turn, authority held" % turns_seen)
+		print("[join] PASS  %d turns, %d battles, mirror exact each turn, authority held" % [turns_seen, battles])
 		quit(0)
 	else:
 		for f in failures:

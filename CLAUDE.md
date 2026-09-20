@@ -25,14 +25,14 @@ These are not style preferences. Breaking one costs a rewrite.
 
 ## Layout
 
-    sim/    pure logic, RefCounted only
-    net/    transport, serialization, order validation
-    view/   nodes, rendering, input, cameras
-    tests/  headless asserts
+	sim/    pure logic, RefCounted only
+	net/    transport, serialization, order validation
+	view/   nodes, rendering, input, cameras
+	tests/  headless asserts
 
 ## Tests
 
-    & "C:\Users\bojid\Downloads\Godot_v4.7.2-stable_win64.exe\Godot_v4.7.2-stable_win64.exe" --path "E:\rts test\new-game-project" --headless --script res://tests/run.gd
+	& "C:\Users\bojid\Downloads\Godot_v4.7.2-stable_win64.exe\Godot_v4.7.2-stable_win64.exe" --path "E:\rts test\new-game-project" --headless --script res://tests/run.gd
 
 `tests/run.gd` extends `SceneTree` (Godot rejects a plain script for `--script`). Exit code 0
 means green. Add a test file to the `TESTS` list in `run.gd` to register it.

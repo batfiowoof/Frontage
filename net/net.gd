@@ -8,6 +8,7 @@ extends Node
 const Rules := preload("res://sim/rules.gd")
 const BattleState := preload("res://sim/battle_state.gd")
 const CampaignState := preload("res://sim/campaign_state.gd")
+const Autoresolve := preload("res://sim/autoresolve.gd")
 const Regiment := preload("res://sim/regiment.gd")
 const Snapshot := preload("res://net/snapshot.gd")
 const Orders := preload("res://net/orders.gd")
@@ -20,6 +21,7 @@ signal battle_updated(battle)      # server: stepped. client: snapshot decoded.
 signal campaign_updated(campaign)  # turn-based, so this fires on every change
 signal players_changed
 signal order_rejected(peer_id, reason)
+signal news(text)          # something happened that a player should be told about
 signal connection_failed
 signal server_left
 
@@ -36,6 +38,7 @@ var last_campaign_bytes := PackedByteArray()
 
 var _accum := 0.0
 var _since_snapshot := 0
+var _rng := RandomNumberGenerator.new()
 
 
 func is_server() -> bool:
@@ -232,9 +235,50 @@ func _set_ready(sender: int, order: Dictionary) -> void:
 	campaign_updated.emit(campaign)
 
 
-## Two armies have met. M6 turns this into a battle; until then it is only news.
+## Two armies have met. For now the dice decide; M7 hands this to the real battle.
+## The loop that matters -- march, fight, take losses, march on -- closes here.
 func _on_armies_met(pair: Array) -> void:
-	print("[net] armies %d and %d have met" % [pair[0], pair[1]])
+	var attacker = campaign.armies.get(pair[0])
+	var defender = campaign.armies.get(pair[1])
+	if attacker == null or defender == null:
+		return
+	var contested: int = defender["tile"]
+	var result := Autoresolve.resolve(attacker["regiments"], defender["regiments"], _rng)
+
+	for i in result["attacker_losses"]:
+		attacker["regiments"].pop_back()
+	for i in result["defender_losses"]:
+		defender["regiments"].pop_back()
+
+	var winner_id: int = attacker["owner"] if result["attacker_wins"] else defender["owner"]
+	_announce("battle at tile %d: player %d carried the field (%d and %d regiments lost)" % [
+		contested, winner_id, result["attacker_losses"], result["defender_losses"]])
+
+	campaign.disband_if_empty(attacker["id"])
+	campaign.disband_if_empty(defender["id"])
+
+	# The field belongs to whoever is still standing on it.
+	if result["attacker_wins"] and not campaign.armies.has(defender["id"]):
+		attacker["tile"] = contested
+		campaign._capture_if_undefended(attacker)
+
+	for owner in [attacker["owner"], defender["owner"]]:
+		if not campaign.is_alive(owner):
+			_announce("player %d has been driven from the map" % owner)
+
+	broadcast_campaign()
+	campaign_updated.emit(campaign)
+
+
+func _announce(text: String) -> void:
+	print("[net] " + text)
+	_news.rpc(text)
+	news.emit(text)
+
+
+@rpc("authority", "call_remote", "reliable")
+func _news(text: String) -> void:
+	news.emit(text)
 
 
 # --- battle orders --------------------------------------------------------
