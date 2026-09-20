@@ -87,7 +87,7 @@ static func decode_battle(bytes: PackedByteArray):
 static func encode_campaign(cs) -> PackedByteArray:
 	var settlements := []
 	for s in cs.settlements:
-		settlements.append([s["tile"], s["owner"], s["name"]])
+		settlements.append([s["tile"], s["owner"], s["name"], s["buildings"]])
 	var armies := []
 	for id in cs.sorted_army_ids():
 		var a = cs.armies[id]
@@ -122,13 +122,22 @@ static func decode_campaign(bytes: PackedByteArray):
 			return null
 
 	for row in d[4]:
-		if typeof(row) != TYPE_ARRAY or row.size() != 3:
+		if typeof(row) != TYPE_ARRAY or row.size() != 4:
 			return null
 		if typeof(row[0]) != TYPE_INT or typeof(row[1]) != TYPE_INT or typeof(row[2]) != TYPE_STRING:
 			return null
 		if not _is_tile(row[0]):
 			return null
-		cs.settlements.append({"tile": row[0], "owner": row[1], "name": row[2]})
+		if typeof(row[3]) != TYPE_ARRAY or row[3].size() > Rules.BUILDINGS.size():
+			return null
+		var seen := {}
+		for b in row[3]:
+			if typeof(b) != TYPE_STRING_NAME or not Rules.BUILDINGS.has(b):
+				return null
+			if seen.has(b):
+				return null           # one of each, or income doubles for free
+			seen[b] = true
+		cs.settlements.append({"tile": row[0], "owner": row[1], "name": row[2], "buildings": row[3]})
 
 	for row in d[5]:
 		if typeof(row) != TYPE_ARRAY or row.size() != 5:

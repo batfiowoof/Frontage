@@ -191,7 +191,11 @@ func _take_my_turn(cs) -> void:
 			break
 	for s: Dictionary in cs.settlements:
 		if s["owner"] == me:
-			net.order_recruit(s["tile"], &"spear")
+			# A market first, then horse: it exercises the BUILD order and the
+			# barracks gate that cavalry sits behind.
+			if not s["buildings"].has(&"market"):
+				net.order_build(s["tile"], &"market")
+			net.order_recruit(s["tile"], &"cavalry" if s["buildings"].has(&"barracks") else &"spear")
 			break
 
 	if role == "join" and not probed:
@@ -250,6 +254,22 @@ func _check_the_campaign_actually_happened(cs) -> void:
 	if int(cs.gold.get(me, 0)) <= 0:
 		_fail("no gold left at all, income is not being paid")
 
+	var built := 0
+	var horse := 0
+	for s: Dictionary in cs.settlements:
+		if s["owner"] == me:
+			built += s["buildings"].size()
+	for id in cs.sorted_army_ids():
+		var a = cs.armies[id]
+		if a["owner"] == me:
+			for r: Array in a["regiments"]:
+				if r[0] == &"cavalry":
+					horse += 1
+	if built < 2:
+		_fail("nothing was built: a capital starts with a barracks and should have gained a market")
+	if horse == 0:
+		_fail("no cavalry was ever raised, so the barracks gate is not working over the wire")
+
 	# Authority: the probe tried to buy a regiment in the host's capital with the
 	# host's gold. If the host's purse moved by exactly what we tried to spend, it worked.
 	for owner: int in cs.gold:
@@ -270,7 +290,7 @@ func _finish() -> void:
 		quit(0)
 		return
 	if failures.is_empty():
-		print("[join] PASS  %d turns, %d real-time battle(s), %d men -> %d after, mirror exact, authority held"
+		print("[join] PASS  %d turns, %d battle(s), %d men -> %d, buildings and cavalry over the wire, authority held"
 			% [turns_seen, fought, men_before_battle, men_after_battle])
 		quit(0)
 	else:

@@ -14,7 +14,7 @@ const MAX_REGIMENTS_PER_ARMY := 8
 
 var turn := 1
 var terrain := PackedByteArray()
-var settlements := []              # [{tile:int, owner:int, name:String}]
+var settlements := []              # [{tile:int, owner:int, name:String, buildings:Array}]
 var armies := {}                   # id -> {id, owner, tile, move_left, regiments:Array}
                                    # a regiment is [kind, strength]
 var gold := {}                     # owner -> int
@@ -135,6 +135,55 @@ func men_of(owner: int) -> int:
 	return total
 
 
+## What a settlement is worth per turn, base plus whatever has been built on it.
+static func settlement_income(s: Dictionary) -> Dictionary:
+	var gold_out := Rules.SETTLEMENT_GOLD
+	var food_out := Rules.SETTLEMENT_FOOD
+	for b: StringName in s["buildings"]:
+		gold_out += int(Rules.BUILDINGS[b]["gold"])
+		food_out += int(Rules.BUILDINGS[b]["food"])
+	return {"gold": gold_out, "food": food_out}
+
+
+## How much damage a defender shrugs off on this tile, 0..1.
+func defense_at(tile: int, owner: int) -> float:
+	var s = settlement_at(tile)
+	if s == null or s["owner"] != owner:
+		return 0.0
+	var best := 0.0
+	for b: StringName in s["buildings"]:
+		best = maxf(best, float(Rules.BUILDINGS[b]["defense"]))
+	return best
+
+
+## Kinds this settlement can raise: the unconditional ones plus whatever its
+## buildings unlock.
+func recruitable_at(tile: int) -> Array:
+	var s = settlement_at(tile)
+	var out := []
+	for kind: StringName in Rules.KINDS:
+		var needs: StringName = Rules.KINDS[kind]["requires"]
+		if needs == &"" or (s != null and s["buildings"].has(needs)):
+			out.append(kind)
+	return out
+
+
+func build(owner: int, tile: int, building: StringName) -> bool:
+	if not Rules.BUILDINGS.has(building):
+		return false
+	var s = settlement_at(tile)
+	if s == null or s["owner"] != owner:
+		return false
+	if s["buildings"].has(building):
+		return false
+	var cost := int(Rules.BUILDINGS[building]["cost"])
+	if int(gold.get(owner, 0)) < cost:
+		return false
+	gold[owner] = int(gold[owner]) - cost
+	s["buildings"].append(building)
+	return true
+
+
 func upkeep_of(owner: int) -> int:
 	var total := 0
 	for a in armies.values():
@@ -219,6 +268,8 @@ func recruit(owner: int, tile: int, kind: StringName) -> bool:
 	var s = settlement_at(tile)
 	if s == null or s["owner"] != owner:
 		return false
+	if not recruitable_at(tile).has(kind):
+		return false                      # needs a building this settlement has not got
 	var cost := int(Rules.KINDS[kind]["cost"])
 	if int(gold.get(owner, 0)) < cost:
 		return false
@@ -256,17 +307,54 @@ func all_ready(owners: Array) -> bool:
 
 
 func end_turn() -> void:
+	var starving := {}
 	for owner in gold.keys():
-		gold[owner] = int(gold[owner]) + settlements_of(owner) * Rules.SETTLEMENT_GOLD
-		var net_food := settlements_of(owner) * Rules.SETTLEMENT_FOOD - upkeep_of(owner)
-		# ponytail: food floors at zero instead of starving the army. Add attrition
-		# when the player has a reason to care about running out.
-		food[owner] = maxi(0, int(food.get(owner, 0)) + net_food)
+		var earned := {"gold": 0, "food": 0}
+		for s: Dictionary in settlements:
+			if s["owner"] == owner:
+				var income := settlement_income(s)
+				earned["gold"] += income["gold"]
+				earned["food"] += income["food"]
+		gold[owner] = int(gold[owner]) + earned["gold"]
+		var larder: int = int(food.get(owner, 0)) + int(earned["food"]) - upkeep_of(owner)
+		if larder < 0:
+			starving[owner] = true
+			_starve(owner)
+			larder = 0
+		food[owner] = larder
+
 	for a in armies.values():
 		a["move_left"] = Rules.ARMY_MOVE_POINTS
-		_reinforce(a)
+		# An army that cannot be fed does not also top up its ranks. Replenishing a
+		# starving army cancels the desertion out and upkeep goes back to being a
+		# number with no consequences.
+		if not starving.has(a["owner"]):
+			_reinforce(a)
+	for id in sorted_army_ids():
+		_cull(id)
 	ready.clear()
 	turn += 1
+
+
+## An army it cannot feed melts away. Regiments that melt entirely are gone.
+func _starve(owner: int) -> void:
+	for a in armies.values():
+		if a["owner"] != owner:
+			continue
+		for r: Array in a["regiments"]:
+			r[1] = maxi(0, int(r[1]) - Rules.DESERTION_PER_TURN)
+
+
+func _cull(army_id: int) -> void:
+	var a = armies.get(army_id)
+	if a == null:
+		return
+	var left := []
+	for r: Array in a["regiments"]:
+		if int(r[1]) > 0:
+			left.append(r)
+	a["regiments"] = left
+	disband_if_empty(army_id)
 
 
 ## An army resting in one of its own settlements fills its ranks back up.
@@ -311,7 +399,7 @@ static func generate(owner_ids: Array, map_seed: int):
 		for nb: int in [tile - 1, tile + 1, tile - Rules.MAP_W, tile + Rules.MAP_W]:
 			if nb >= 0 and nb < ground.size():
 				ground[nb] = Terrain.PLAINS              # never wall a capital in
-		towns.append({"tile": tile, "owner": owner, "name": "Capital %d" % (n + 1)})
+		towns.append({"tile": tile, "owner": owner, "name": "Capital %d" % (n + 1), "buildings": [&"barracks"]})
 		purse[owner] = Rules.START_GOLD
 		larder[owner] = Rules.START_FOOD
 
@@ -326,7 +414,7 @@ static func generate(owner_ids: Array, map_seed: int):
 			if s["tile"] == tile:
 				taken = true
 		if not taken:
-			towns.append({"tile": tile, "owner": 0, "name": "Town %d" % (k + 1)})
+			towns.append({"tile": tile, "owner": 0, "name": "Town %d" % (k + 1), "buildings": []})
 
 	cs.terrain = ground
 	cs.settlements = towns

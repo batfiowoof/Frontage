@@ -25,7 +25,7 @@ static func power(regiments: Array) -> int:
 
 ## Returns {"attacker_wins": bool, "attacker_losses": int, "defender_losses": int},
 ## counted in regiments. The caller removes them and disbands whatever is left empty.
-static func resolve(attacker: Array, defender: Array, rng: RandomNumberGenerator) -> Dictionary:
+static func resolve(attacker: Array, defender: Array, rng: RandomNumberGenerator, defense := 0.0) -> Dictionary:
 	if attacker.is_empty() and defender.is_empty():
 		return {"attacker_wins": false, "attacker_losses": 0, "defender_losses": 0}
 	if attacker.is_empty():
@@ -37,6 +37,9 @@ static func resolve(attacker: Array, defender: Array, rng: RandomNumberGenerator
 	# the real battle's job -- putting it here would only be a worse version of it.
 	var att := float(power(attacker)) * rng.randf_range(1.0 - LUCK, 1.0 + LUCK)
 	var def := float(power(defender)) * rng.randf_range(1.0 - LUCK, 1.0 + LUCK)
+	def *= 1.0 + clampf(defense, 0.0, 0.9)          # walls count here too, or taking a
+	                                                # town by dice would be easier than
+	                                                # taking it by hand
 	var attacker_wins := att >= def
 	var closeness: float = minf(att, def) / maxf(att, def)
 

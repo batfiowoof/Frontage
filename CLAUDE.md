@@ -37,7 +37,10 @@ These are not style preferences. Breaking one costs a rewrite.
 						for tuning how the battle feels to drive
 
 Campaign: left-click your army, click a tile to march, click your own settlement to
-recruit, End Turn bottom-right. The turn advances when every player has pressed it.
+recruit or build, End Turn bottom-right. The turn advances when every player has
+pressed it. Pike and cavalry need a barracks in the settlement raising them; walls
+cut the damage a defender takes in a battle fought on that tile. Feed the army or
+it deserts, and a starving army does not replenish either.
 Battle: left-click or box-drag to select, right-click to move, right-drag to set the
 facing you arrive on. WASD or screen edges pan, wheel zooms.
 

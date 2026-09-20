@@ -218,6 +218,10 @@ func order_ready(value: bool) -> void:
 	submit(Orders.ready(value))
 
 
+func order_build(tile: int, building: StringName) -> void:
+	submit(Orders.build(tile, building))
+
+
 func _receive_order(sender: int, bytes: PackedByteArray) -> void:
 	var order := Orders.decode(bytes)
 	if order.is_empty():
@@ -232,6 +236,8 @@ func _receive_order(sender: int, bytes: PackedByteArray) -> void:
 			_recruit(sender, order)
 		Orders.Type.READY:
 			_set_ready(sender, order)
+		Orders.Type.BUILD:
+			_build(sender, order)
 
 
 # --- campaign orders ------------------------------------------------------
@@ -271,6 +277,20 @@ func _recruit(sender: int, order: Dictionary) -> void:
 	campaign_updated.emit(campaign)
 
 
+func _build(sender: int, order: Dictionary) -> void:
+	if campaign == null:
+		_reject(sender, "no campaign in progress")
+		return
+	if battle != null:
+		_reject(sender, "a battle is being fought")
+		return
+	if not campaign.build(sender, order["tile"], order["building"]):
+		_reject(sender, "cannot build %s at tile %d" % [order["building"], order["tile"]])
+		return
+	broadcast_campaign()
+	campaign_updated.emit(campaign)
+
+
 func _set_ready(sender: int, order: Dictionary) -> void:
 	if campaign == null:
 		_reject(sender, "no campaign in progress")
@@ -301,7 +321,8 @@ func _on_armies_met(pair: Array) -> void:
 
 func _autoresolve(attacker: Dictionary, defender: Dictionary) -> void:
 	var contested: int = defender["tile"]
-	var result := Autoresolve.resolve(attacker["regiments"], defender["regiments"], _rng)
+	var result := Autoresolve.resolve(attacker["regiments"], defender["regiments"], _rng,
+		campaign.defense_at(defender["tile"], defender["owner"]))
 	for i in result["attacker_losses"]:
 		attacker["regiments"].pop_back()
 	for i in result["defender_losses"]:
@@ -320,19 +341,23 @@ func _begin_battle(attacker: Dictionary, defender: Dictionary) -> void:
 	_battle_seconds = 0.0
 
 	var bs = BattleState.new()
-	_deploy(bs, attacker, -Rules.DEPLOY_SEPARATION * 0.5, 0.0)
-	_deploy(bs, defender, Rules.DEPLOY_SEPARATION * 0.5, PI)
+	var fortified := campaign.defense_at(_battle_tile, defender["owner"])
+	_deploy(bs, attacker, -Rules.DEPLOY_SEPARATION * 0.5, 0.0, 0.0)
+	_deploy(bs, defender, Rules.DEPLOY_SEPARATION * 0.5, PI, fortified)
+	if fortified > 0.0:
+		_announce("the defenders are behind walls at tile %d" % _battle_tile)
 	_announce("battle at tile %d: %d men against %d" % [
 		_battle_tile, CampaignState.army_men(attacker), CampaignState.army_men(defender)])
 	start_battle(bs)
 
 
-func _deploy(bs: BattleState, army: Dictionary, x: float, facing: float) -> void:
+func _deploy(bs: BattleState, army: Dictionary, x: float, facing: float, defense := 0.0) -> void:
 	var line: Array = army["regiments"]
 	for i in line.size():
 		var y := (float(i) - float(line.size() - 1) * 0.5) * Rules.DEPLOY_SPACING
 		var r = bs.add(army["owner"], line[i][0], Vector2(x, y), facing)
 		r.strength = int(line[i][1])          # it arrives as battered as it left
+		r.defense = defense
 
 
 ## The battle is over: survivors go back into their campaign army and the campaign

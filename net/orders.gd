@@ -15,7 +15,7 @@ const VERSION := 1
 const MAX_IDS_PER_ORDER := 64          # a box selection, not a whole army list
 const TILE_COUNT := Rules.MAP_W * Rules.MAP_H
 
-enum Type { BATTLE_MOVE, ARMY_MOVE, RECRUIT, READY }
+enum Type { BATTLE_MOVE, ARMY_MOVE, RECRUIT, READY, BUILD }
 
 
 # --- encoding -------------------------------------------------------------
@@ -34,6 +34,10 @@ static func recruit(tile: int, kind: StringName) -> PackedByteArray:
 
 static func ready(value: bool) -> PackedByteArray:
 	return var_to_bytes([VERSION, Type.READY, value])
+
+
+static func build(tile: int, building: StringName) -> PackedByteArray:
+	return var_to_bytes([VERSION, Type.BUILD, tile, building])
 
 
 # --- decoding -------------------------------------------------------------
@@ -58,6 +62,8 @@ static func decode(bytes: PackedByteArray) -> Dictionary:
 			return _decode_recruit(d)
 		Type.READY:
 			return _decode_ready(d)
+		Type.BUILD:
+			return _decode_build(d)
 	return {}
 
 
@@ -107,6 +113,16 @@ static func _decode_ready(d: Array) -> Dictionary:
 	if d.size() != 3 or typeof(d[2]) != TYPE_BOOL:
 		return {}
 	return {"type": Type.READY, "value": d[2]}
+
+
+static func _decode_build(d: Array) -> Dictionary:
+	if d.size() != 4:
+		return {}
+	if typeof(d[2]) != TYPE_INT or not _is_tile(d[2]):
+		return {}
+	if typeof(d[3]) != TYPE_STRING_NAME or not Rules.BUILDINGS.has(d[3]):
+		return {}
+	return {"type": Type.BUILD, "tile": d[2], "building": d[3]}
 
 
 static func _is_tile(i: int) -> bool:

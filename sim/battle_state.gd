@@ -158,6 +158,7 @@ func _accumulate_strike(attacker: Regiment, defender: Regiment, dt: float, kills
 		damage_mult *= Rules.RUNDOWN_DAMAGE_MULT
 
 	var output := Rules.KILLS_PER_SECOND * attacker.fraction() * damage_mult * dt
+	output *= 1.0 - clampf(defender.defense, 0.0, 0.9)
 	kills[defender.id] = float(kills.get(defender.id, 0.0)) + output
 	shocks[defender.id] = float(shocks.get(defender.id, 0.0)) + morale_drain * dt
 
@@ -194,7 +195,9 @@ func _step_regiment(r: Regiment, dt: float) -> void:
 
 func _advance(r: Regiment, dt: float) -> void:
 	var routing: bool = r.state == Regiment.State.ROUTING
-	var speed: float = Rules.MOVE_SPEED * (Rules.ROUT_SPEED_MULT if routing else 1.0)
+	var speed: float = Rules.MOVE_SPEED * float(Rules.KINDS[r.kind]["speed"])
+	if routing:
+		speed *= Rules.ROUT_SPEED_MULT
 	var to_target: Vector2 = r.target - r.pos
 	var dist := to_target.length()
 	var step_len := speed * dt
