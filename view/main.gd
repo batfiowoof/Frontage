@@ -3,6 +3,7 @@ extends Node
 
 const CampaignView := preload("res://view/campaign/campaign_view.gd")
 const BattleView := preload("res://view/battle/battle_view.gd")
+const Replay := preload("res://net/replay.gd")
 
 var _screen: Node = null
 var _lobby: CanvasLayer
@@ -13,6 +14,7 @@ var _start: Button
 var _add_ai: Button
 var _autostart := false
 var _demo_battle := false
+var _replay_path := ""
 
 
 func _ready() -> void:
@@ -37,6 +39,10 @@ func _ready() -> void:
 		elif args[i] == "--demo-battle":
 			_autostart = true
 			_demo_battle = true
+		elif args[i] == "--replay" and i + 1 < args.size():
+			_replay_path = args[i + 1]
+			_autostart = true
+			_on_host()
 		elif args[i] == "--ai" and i + 1 < args.size():
 			for n in int(args[i + 1]):
 				Net.add_ai()
@@ -45,6 +51,14 @@ func _ready() -> void:
 
 ## Deal the campaign as soon as somebody else turns up.
 func _check_autostart() -> void:
+	if not _replay_path.is_empty() and Net.is_server() and Net.battle == null:
+		var r = Replay.load_from(_replay_path)
+		_replay_path = ""
+		if r == null:
+			_say("that replay will not load")
+		else:
+			Net.play_replay(r)
+		return
 	if not (_autostart and Net.is_server() and Net.players.size() >= 2):
 		return
 	if _demo_battle and Net.battle == null and Net.campaign == null:

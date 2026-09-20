@@ -10,6 +10,7 @@ const BattleState := preload("res://sim/battle_state.gd")
 const CampaignState := preload("res://sim/campaign_state.gd")
 const Autoresolve := preload("res://sim/autoresolve.gd")
 const Ai := preload("res://sim/ai.gd")
+const Replay := preload("res://net/replay.gd")
 const Regiment := preload("res://sim/regiment.gd")
 const Snapshot := preload("res://net/snapshot.gd")
 const Orders := preload("res://net/orders.gd")
@@ -26,6 +27,7 @@ signal campaign_updated(campaign)  # turn-based, so this fires on every change
 signal players_changed
 signal order_rejected(peer_id, reason)
 signal news(text)          # something happened that a player should be told about
+signal replay_saved(path)
 signal connection_failed
 signal server_left
 
@@ -49,6 +51,12 @@ var _rng := RandomNumberGenerator.new()
 ## without any special case in the order pipeline.
 var _ais := {}                     # seat id -> Ai
 var _ai_ticks := 0
+
+## Every battle is recorded. It costs a few hundred bytes and it is the only way to
+## watch the same fight twice with one constant changed.
+var _recorder = null
+var _playback = null               # set while watching one back
+var _playback_schedule := {}
 
 ## While a battle runs the campaign is frozen. These remember what to put back.
 var _battle_armies := {}           # owner_id -> campaign army id
@@ -149,6 +157,28 @@ func broadcast_campaign() -> void:
 		_campaign_snapshot.rpc(Snapshot.encode_campaign(campaign))
 
 
+## Watch a recorded battle. The orders are fed back in on the ticks they were given, so
+## what you see is the fight that happened, not an approximation of it.
+func play_replay(r) -> bool:
+	assert(is_server(), "only the server owns a battle")
+	var bs = Snapshot.decode_battle(r.opening)
+	if bs == null:
+		return false
+	_playback = r
+	_playback_schedule = r.by_tick()
+	_battle_armies.clear()
+	_battle_tile = -1
+	_battle_seconds = 0.0
+	battle = bs
+	running = true
+	battle_epoch += 1
+	_recorder = null                   # watching one is not making another
+	_announce("replaying a battle: %d regiments, %d ticks" % [bs.regiments.size(), r.ticks])
+	broadcast_battle()
+	battle_updated.emit(battle)
+	return true
+
+
 ## Drop straight into a battle with no campaign behind it, for tuning how the
 ## thing feels to drive. Two mirrored lines, so anything that decides the fight is
 ## something a player did.
@@ -178,6 +208,8 @@ func start_battle(bs: BattleState) -> void:
 	battle = bs
 	running = true
 	battle_epoch += 1
+	_recorder = Replay.new()
+	_recorder.begin(Snapshot.encode_battle(bs))
 	_accum = 0.0
 	_since_snapshot = 0
 	broadcast_battle()
@@ -200,6 +232,9 @@ func _process(delta: float) -> void:
 	_accum = minf(_accum + delta, MAX_CATCHUP)
 	while _accum >= Rules.TICK_DELTA:
 		_accum -= Rules.TICK_DELTA
+		if _playback != null:
+			for row: Array in _playback_schedule.get(battle.tick, []):
+				Replay.apply_order(battle, row[1], row[2])
 		battle.step()
 		battle_updated.emit(battle)
 		_battle_seconds += Rules.TICK_DELTA
@@ -207,6 +242,13 @@ func _process(delta: float) -> void:
 		if _since_snapshot >= Rules.SNAPSHOT_EVERY_N_TICKS:
 			_since_snapshot = 0
 			broadcast_battle()
+		if _playback != null:
+			if battle.tick >= _playback.ticks:
+				_announce("replay over")
+				_playback = null
+				_playback_schedule.clear()
+				stop_battle()
+			continue
 		if battle.is_over() or _battle_seconds >= Rules.BATTLE_TIME_LIMIT:
 			broadcast_battle()
 			_finish_battle()
@@ -282,6 +324,8 @@ func _receive_order(sender: int, bytes: PackedByteArray) -> void:
 	if order.is_empty():
 		_reject(sender, "malformed order")
 		return
+	if order["type"] == Orders.Type.BATTLE_MOVE and battle != null and _recorder != null:
+		_recorder.note(battle.tick, sender, bytes)
 	match order["type"]:
 		Orders.Type.BATTLE_MOVE:
 			_battle_move(sender, order)
@@ -419,6 +463,7 @@ func _deploy(bs: BattleState, army: Dictionary, x: float, facing: float, defense
 ## picks up where it left off. This is the seam the whole design turns on, so it is
 ## deliberately one function you can read top to bottom.
 func _finish_battle() -> void:
+	_keep_the_recording()
 	var survivors := {}
 	for id in battle.sorted_ids():
 		var r = battle.regiments[id]
@@ -484,6 +529,22 @@ func _settle_field(attacker: Dictionary, defender: Dictionary, contested: int, a
 			_announce("player %d has been driven from the map" % owner)
 	broadcast_campaign()
 	campaign_updated.emit(campaign)
+
+
+## A battle that has finished is worth keeping. Verifying it here is cheap and catches
+## the one thing that would make the whole format worthless: a recording that does not
+## reproduce the battle it came from.
+func _keep_the_recording() -> void:
+	if _recorder == null or battle == null:
+		return
+	_recorder.finish(Snapshot.encode_battle(battle), battle.tick)
+	if not _recorder.verify():
+		push_warning("[replay] a battle did not reproduce itself -- something in the sim is not deterministic")
+	var path: String = _recorder.save()
+	_recorder = null
+	if not path.is_empty():
+		print("[replay] saved %s" % path)
+		replay_saved.emit(path)
 
 
 func _announce(text: String) -> void:

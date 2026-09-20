@@ -163,6 +163,20 @@ Measured: 16 regiments x 120 men costs **5.45 ms/frame**, about a third of a 60f
 `tests/test_bodies.gd` prints it. If it ever stops fitting, the integration moves to a
 shader rather than the look being abandoned.
 
+## Replays
+
+Every battle is recorded to `user://replays/`, verified against the state it actually
+ended in, and saved. A recording is the opening snapshot plus the orders, each stamped
+with the tick it was applied on -- a real 72-second AI battle is 1447 ticks, 567 orders,
+52 KB. It works because the sim is pure, fixed-tick and has no randomness in it.
+
+	play.cmd replay <path>     watch one back
+
+This is how to tune how a fight feels: replay the exact same battle, change one constant
+in `rules.gd`, watch it again. `verify()` failing after a rules change is not a bug, it is
+the point of keeping the file. It failing *without* one means something in the sim has
+stopped being deterministic, and `_keep_the_recording()` warns when that happens.
+
 ## Things that were not obvious
 
 - A campaign regiment is `[kind, strength]`, not a bare kind. Carrying only the kind
