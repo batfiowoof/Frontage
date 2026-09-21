@@ -38,6 +38,12 @@ const REGIMENT_FIELDS := [
 	["target", TYPE_VECTOR2],
 	["target_facing", TYPE_FLOAT],
 	["engaged_with", TYPE_INT],
+	# Who this regiment was told to deal with, or -1. It was server-side only while it
+	# steered nothing but arrows; now that it also decides melee and sends a regiment
+	# across the field, the client has to be able to draw the line from the unit to the
+	# enemy it is going for, or an order you gave is invisible until it lands.
+	["focus", TYPE_INT],
+	["stance", TYPE_INT],
 ]
 
 
@@ -111,6 +117,10 @@ static func decode_battle(bytes: PackedByteArray):
 			if typeof(name) != TYPE_STRING_NAME or not Rules.TECHS.has(name):
 				return null
 	bs.techs = data[5]
+	# Derived, not decoded. Who carries the general falls out of max_strength and the
+	# ids, which are already in the rows above, so the mirror reaches the same answer
+	# the server did without a byte on the wire for it.
+	bs.commission_generals()
 	return bs
 
 

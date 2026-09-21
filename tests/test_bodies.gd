@@ -13,13 +13,30 @@ const ID := 7
 
 func _pose(strength: int, pos := Vector2.ZERO, facing := 0.0, hits := [],
 		state := Regiment.State.FIGHTING, width := 12,
-		threats := PackedVector2Array()) -> Dictionary:
+		threats := PackedVector2Array(), shapes := PackedVector3Array()) -> Dictionary:
 	return {ID: {
 		"pos": pos, "facing": facing, "owner": 1, "kind": &"spear",
 		"strength": strength, "max_strength": 120, "morale": 100.0,
 		"stamina": 1.0, "width": width, "state": state, "hits": hits,
-		"threats": threats,
+		"threats": threats, "shapes": shapes,
 	}}
+
+
+## The footprint of a standard 120-man, 20-file block facing `facing`: half its depth
+## along that, half its frontage across it. What the men bend their line around.
+func _block(width := 20, facing := PI) -> Vector3:
+	return Vector3(Formation.half_depth(120, width, 1.0),
+		Formation.frontage(120, width, 1.0), facing)
+
+
+## Settle a `width`-file regiment fighting a `foe` block at `enemy`, and hand back the men.
+func _settle_against(width: int, enemy: Vector2, foe: Vector3) -> Bodies:
+	var men = Bodies.new()
+	men.build(_pose(120, Vector2.ZERO, 0.0, [], Regiment.State.FIGHTING, width), [1], 0.016)
+	for i in 400:
+		men.build(_pose(120, Vector2.ZERO, 0.0, [], Regiment.State.FIGHTING, width,
+			PackedVector2Array([enemy]), PackedVector3Array([foe])), [1], 1.0 / 60.0)
+	return men
 
 
 ## Men whose file index is at or above `from_file`, by man id.
@@ -59,11 +76,8 @@ func _mean_y(men, who: Array) -> float:
 	return 0.0 if who.is_empty() else sum / float(who.size())
 
 
-## Settle with a threat standing off the regiment.
-##
-## IDLE rather than FIGHTING on purpose: relief rotation moves men between depths, and a
-## man who has just been sent to the back is still standing near the front while he walks
-## there, which makes "what are the back ranks looking at" unanswerable.
+## Settle with a threat standing off the regiment. IDLE keeps it to the one question --
+## which way a man is looking -- with nothing marching anywhere while we ask it.
 func _settle_with(men, threat: Vector2, seconds := 4.0, state := Regiment.State.IDLE) -> void:
 	for i in int(seconds * 60.0):
 		men.build(_pose(120, Vector2.ZERO, 0.0, [], state, 12,
@@ -388,26 +402,52 @@ func test_a_frontal_attack_changes_who_is_standing_in_the_line(t) -> void:
 		"the men who were at the front should be the ones who fell")
 
 
-# --- relief ---------------------------------------------------------------
+# --- a man keeps his place --------------------------------------------------
 
-func test_fighting_men_are_relieved_through_the_line(t) -> void:
+## Files used to rotate while fighting -- the front man to the back, everyone else up
+## one -- and he walked STRAIGHT BACK THROUGH HIS OWN FILE to get there, overlapping his
+## file-mates on the way. A block of men constantly swapping places reads as a scatter
+## rather than as a formation, so it is gone.
+##
+## This is the guard on that deletion: a man's place changes when somebody in front of
+## him dies, and at no other time.
+func test_nobody_swaps_places_while_fighting(t) -> void:
 	var men = Bodies.new()
 	men.build(_pose(120), [1], 0.016)
-	var front_before := _front_men(men)
-	for i in int((Bodies.RELIEF_INTERVAL * 3.0) * 60.0):
+	var before := men.places(ID)
+	for i in 600:                          # ten seconds of standing in a melee
 		men.build(_pose(120), [1], 1.0 / 60.0)
-	t.eq(men.living(ID), 120, "relief kills nobody")
-	t.ok(_front_men(men) != front_before,
-		"after a few minutes of fighting the same men should not still be at the front")
+	t.eq(men.places(ID), before, "a man holds his file and his depth while he is fighting")
+	t.eq(men.living(ID), 120, "and nobody is lost doing it")
 
 
 func test_a_regiment_standing_idle_does_not_rotate(t) -> void:
 	var men = Bodies.new()
 	men.build(_pose(120, Vector2.ZERO, 0.0, [], Regiment.State.IDLE), [1], 0.016)
-	var front_before := _front_men(men)
-	for i in int((Bodies.RELIEF_INTERVAL * 3.0) * 60.0):
+	var before := men.places(ID)
+	for i in 600:
 		men.build(_pose(120, Vector2.ZERO, 0.0, [], Regiment.State.IDLE), [1], 1.0 / 60.0)
-	t.eq(_front_men(men), front_before, "nobody swaps places when there is nothing to do")
+	t.eq(men.places(ID), before, "nobody swaps places when there is nothing to do")
+
+
+# --- the re-dress clock -----------------------------------------------------
+
+## Changing frontage costs nothing in the sim and gates nothing, but it is not instant to
+## LOOK at. The clock is the client's, derived from the width it sees in the mirror.
+func test_a_frontage_change_starts_a_re_dress_clock(t) -> void:
+	var men = Bodies.new()
+	men.build(_pose(120, Vector2.ZERO, 0.0, [], Regiment.State.IDLE, 12), [1], 0.016)
+	t.near(men.dressing(ID), 0.0, 0.001, "standing still, nothing to re-dress")
+
+	men.build(_pose(120, Vector2.ZERO, 0.0, [], Regiment.State.IDLE, 20), [1], 1.0 / 60.0)
+	t.near(men.dressing(ID), Bodies.DRESS_SECONDS, 0.05, "a new frontage starts the clock")
+	t.eq(men.living(ID), 120, "and it is only a clock -- it loses nobody")
+
+	var places := men.places(ID)
+	for i in int((Bodies.DRESS_SECONDS + 1.0) * 60.0):
+		men.build(_pose(120, Vector2.ZERO, 0.0, [], Regiment.State.IDLE, 20), [1], 1.0 / 60.0)
+	t.near(men.dressing(ID), 0.0, 0.001, "it runs down and stops at zero")
+	t.eq(men.places(ID), places, "and changes nobody's place on its way")
 
 
 # --- re-forming, which M17 hands to the player ----------------------------
@@ -505,3 +545,177 @@ func test_a_man_in_the_middle_of_the_block_is_left_alone(t) -> void:
 	# nothing that far from the fighting should be looking at it.
 	t.ok(_mean_angle_error(men, _men_in_files(men, 0, 3), 0.0) < deg_to_rad(5.0),
 		"the far half of the line should not be rubbernecking at something 400 units away")
+
+
+# --- the line bends round what it is fighting -------------------------------
+
+## Distance from `enemy` to every front-rank man, as [closest, furthest].
+func _front_rank_range(men, enemy: Vector2) -> Array:
+	var where: Dictionary = men.positions(ID)
+	var lo := INF
+	var hi := -INF
+	for man in _men_at_depths(men, 0, 0):
+		var d: float = where[man].distance_to(enemy)
+		lo = minf(lo, d)
+		hi = maxf(hi, d)
+	return [lo, hi]
+
+
+## A flat line is NOT all the same distance from a point in front of it -- the middle is
+## nearer than the ends. Bending it onto an arc of that radius is what brings the ends
+## FORWARD, and the spread between nearest and furthest man collapsing is that crescent,
+## as one number.
+func test_a_wider_line_bows_round_a_narrower_enemy(t) -> void:
+	# A flat line is NOT all one distance from a point in front of it -- the middle is
+	# nearer than the ends. Bending it round him is what brings the ENDS forward, and the
+	# spread between nearest and furthest man collapsing is that crescent, as one number.
+	var enemy := Vector2(150, 0)
+	var narrow := _block(10)                               # somebody half our width
+
+	var flat = Bodies.new()
+	flat.build(_pose(120, Vector2.ZERO, 0.0, [], Regiment.State.FIGHTING, 24), [1], 0.016)
+	for i in 240:
+		flat.build(_pose(120, Vector2.ZERO, 0.0, [], Regiment.State.FIGHTING, 24), [1], 1.0 / 60.0)
+	var straight := _front_rank_range(flat, enemy)
+
+	var bowed := _settle_against(24, enemy, narrow)
+	var curved := _front_rank_range(bowed, enemy)
+
+	t.ok(curved[1] - curved[0] < (straight[1] - straight[0]) * 0.75,
+		"the front rank closes toward an even distance: spread %.0f, was %.0f" % [
+			curved[1] - curved[0], straight[1] - straight[0]])
+	t.ok(curved[1] < straight[1] - 4.0,
+		"and the ENDS are the ones that came forward (%.0f, was %.0f)" % [
+			curved[1], straight[1]])
+	print("  [feel] a wider line: front rank %.0f..%.0f from the enemy, was %.0f..%.0f" % [
+		curved[0], curved[1], straight[0], straight[1]])
+
+
+func test_two_lines_of_the_same_width_do_not_both_wrap(t) -> void:
+	# Both sides bending is self-defeating -- each is outside the other's block and they
+	# meet in the open ground beside it, standing in one another. You envelop somebody by
+	# OVERLAPPING him, and two lines of a width overlap nowhere.
+	var enemy := Vector2(150, 0)
+	var same := _block(20)
+	var flat = Bodies.new()
+	flat.build(_pose(120, Vector2.ZERO, 0.0, [], Regiment.State.FIGHTING, 20), [1], 0.016)
+	for i in 240:
+		flat.build(_pose(120, Vector2.ZERO, 0.0, [], Regiment.State.FIGHTING, 20), [1], 1.0 / 60.0)
+	var straight := _front_rank_range(flat, enemy)
+	var level := _front_rank_range(_settle_against(20, enemy, same), enemy)
+	t.near(level[1] - level[0], straight[1] - straight[0], 3.0,
+		"an even matchup meets flat, and neither of them wraps")
+
+
+func test_the_middle_of_the_line_does_not_move(t) -> void:
+	# It has no offset along the line, so there is no "round" for it to go. If the centre
+	# shifts, the bend is shoving the regiment about rather than curving it.
+	var enemy := Vector2(100, 0)
+	var flat = Bodies.new()
+	_settle(flat, 120)
+	var before := _mean_y(flat, _men_in_files(flat, 5, 6))
+
+	var bowed = Bodies.new()
+	_settle(bowed, 120)
+	_settle_with(bowed, enemy)
+	t.near(_mean_y(bowed, _men_in_files(bowed, 5, 6)), before, 6.0,
+		"the middle files stay where they were standing")
+
+
+func test_the_men_hug_the_enemy_without_walking_into_him(t) -> void:
+	# The ends of the line are meant to come round onto his flanks -- that is the whole
+	# manoeuvre. What they must never do is end up INSIDE him, which is what bending
+	# round a regiment's CENTRE at a constant radius does: a block is 133 across and 45
+	# deep, so an arc that clears its front by a comfortable margin is well inside its
+	# flanks by the time it gets there. Two armies drawn on top of one another is the
+	# opposite of looking like contact.
+	var enemy := Vector2(120, 0)
+	var shape := _block(10)                                # a narrow block to go round
+	var half_d: float = shape.x
+	var half_w: float = shape.y
+
+	var men := _settle_against(40, enemy, shape)
+
+	var wrapped := 0
+	for man in men.positions(ID).values():
+		var o: Vector2 = man - enemy
+		t.ok(absf(o.x) > half_d - 1.0 or absf(o.y) > half_w - 1.0,
+			"a man at (%.0f, %.0f) is standing inside a block that is %.0f by %.0f" % [
+				o.x, o.y, half_d, half_w])
+		if absf(o.y) > half_w * 0.6:
+			wrapped += 1
+	t.ok(wrapped > 0, "and some of them did come round onto his flank (%d of them)" % wrapped)
+
+
+func test_the_bend_never_re_files_anybody(t) -> void:
+	# The whole licence for this is that it is decoration. The moment it changed who
+	# stood where, every invariant above it would be up for grabs.
+	var flat = Bodies.new()
+	_settle(flat, 120)
+	var bowed = Bodies.new()
+	_settle(bowed, 120)
+	_settle_with(bowed, Vector2(100, 0))
+	t.eq(bowed.places(ID), flat.places(ID), "same men, same files, same depths")
+	t.eq(bowed.living(ID), flat.living(ID))
+
+
+func test_with_nobody_there_the_block_is_a_block(t) -> void:
+	# The curl must cost nothing when nothing is happening, or a regiment standing alone
+	# would sit in a permanent bend around an enemy that is not there.
+	var men = Bodies.new()
+	_settle(men, 120)
+	_settle_still(men, 4.0)
+	var where: Dictionary = men.positions(ID)
+	var slots: Dictionary = men.slots(ID)
+	for man in where:
+		t.ok(where[man].distance_to(slots[man]) < 1.0,
+			"a man with nobody near him stands on his slot")
+
+
+# --- turning right round is a relabel, not a rotation -----------------------
+
+## The whole point. A rectangle rotated 180 degrees about its centre stands on exactly the
+## same ground, so an about-face costs no rotation whatever -- the men hold their places
+## and the rear rank becomes the front rank. Rotating them instead swings the end files
+## 140 units across the field, which is what a spinning block looks like.
+func test_turning_right_round_moves_nobody(t) -> void:
+	var men = Bodies.new()
+	_settle(men, 120)
+	var before: Dictionary = men.positions(ID)
+	var places_before: Dictionary = men.places(ID)
+
+	# The sim flips facing in a single tick; this is what the mirror then shows.
+	for i in 120:
+		men.build(_pose(120, Vector2.ZERO, PI, [], Regiment.State.IDLE), [1], 1.0 / 60.0)
+
+	var after: Dictionary = men.positions(ID)
+	var worst := 0.0
+	for man in before:
+		worst = maxf(worst, before[man].distance_to(after[man]))
+	t.ok(worst < 1.0, "every man holds his ground through an about-face (worst %.3f)" % worst)
+	t.eq(men.living(ID), 120, "and nobody is lost doing it")
+
+	# ...and the ranks really did reverse: the man who led is now at the back.
+	var places_after: Dictionary = men.places(ID)
+	var ranks := int(ceil(120.0 / 12.0))
+	var flipped := 0
+	for man in places_before:
+		if places_after[man].y == ranks - 1 - places_before[man].y \
+				and places_after[man].x == 12 - 1 - places_before[man].x:
+			flipped += 1
+	t.eq(flipped, 120, "every man's file and depth turned end for end")
+
+
+func test_a_quarter_turn_really_does_wheel(t) -> void:
+	# The other half of the rule: 90 degrees is a genuine change of ground, so the block
+	# must move. If this passed as well, the relabel would be firing on everything.
+	var men = Bodies.new()
+	_settle(men, 120)
+	var before: Dictionary = men.positions(ID)
+	for i in 240:
+		men.build(_pose(120, Vector2.ZERO, PI / 2.0, [], Regiment.State.IDLE), [1], 1.0 / 60.0)
+	var after: Dictionary = men.positions(ID)
+	var worst := 0.0
+	for man in before:
+		worst = maxf(worst, before[man].distance_to(after[man]))
+	t.ok(worst > 40.0, "a quarter turn is a wheel and the men go with it (%.0f)" % worst)

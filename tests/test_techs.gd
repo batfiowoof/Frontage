@@ -245,13 +245,15 @@ func test_siegecraft_makes_walls_count_for_less(t) -> void:
 
 
 func test_a_battle_between_unequal_armies_is_measurably_different(t) -> void:
-	# A full battle, not a skirmish: under frontage-limited combat attrition is slow, so
-	# a few per cent of damage only reads over the length of a real fight.
-	var plain := _duel([], 70.0)
-	var trained := _duel([&"drill", &"armoury"], 70.0)
+	# A full battle, not a skirmish: a few per cent of damage only reads over the length of
+	# a real fight. Fifty seconds, not seventy -- at seventy both sides have already broken
+	# and run, so both comparisons read the strength of a regiment that stopped taking
+	# casualties rather than the damage it was doing while it still was.
+	var plain := _duel([], 50.0)
+	var trained := _duel([&"drill", &"armoury"], 50.0)
 	t.ok(trained[1].strength > plain[1].strength)
 	t.ok(trained[2].strength < plain[2].strength, "and it should be doing more damage too")
-	print("  [feel] 70s duel: untrained keeps %d men and leaves the enemy %d;" % [
+	print("  [feel] 50s duel: untrained keeps %d men and leaves the enemy %d;" % [
 		plain[1].strength, plain[2].strength])
 	print("         drilled and armoured keeps %d and leaves them %d" % [
 		trained[1].strength, trained[2].strength])

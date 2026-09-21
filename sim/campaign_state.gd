@@ -603,6 +603,39 @@ func split(owner: int, army_id: int, indices: PackedInt32Array, to_tile: int) ->
 	return b["id"]
 
 
+## Fall back off a field you have given up. Returns the tile retreated to, or -1 for an
+## army with nowhere to go.
+##
+## It has to MOVE rather than stand where it was, because two armies cannot share a hex
+## -- `army_at()` returns the first one there and movement, collision and razing all lean
+## on that -- and the side that held the field is about to be standing on it.
+##
+## Breaking contact costs men: FORFEIT_STRAGGLERS of every regiment is left behind, so
+## quitting saves an army without being a free undo. Cornered against water, mountains or
+## somebody else's army it stays put and simply loses the ground; being wiped out for
+## being surrounded would make one bad hex an instant loss.
+func retreat(army_id: int) -> int:
+	var a = armies.get(army_id)
+	if a == null:
+		return -1
+	for r: Array in a["regiments"]:
+		r[1] = maxi(0, int(r[1]) - int(ceil(float(r[1]) * Rules.FORFEIT_STRAGGLERS)))
+	_cull(army_id)
+	a = armies.get(army_id)
+	if a == null:
+		return -1                          # the stragglers were the whole army
+	a["move_left"] = 0
+	for step in adjacent(a["tile"]):
+		if not passable(step) or army_at(step) != null:
+			continue
+		var town = settlement_at(step)
+		if town != null and town["owner"] != a["owner"]:
+			continue                       # falling back into their town is not a retreat
+		a["tile"] = step
+		return step
+	return -1
+
+
 func disband_if_empty(army_id: int) -> void:
 	var a = armies.get(army_id)
 	if a != null and a["regiments"].is_empty():

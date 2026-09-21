@@ -10,6 +10,7 @@ const BattleState := preload("res://sim/battle_state.gd")
 const CampaignState := preload("res://sim/campaign_state.gd")
 const Autoresolve := preload("res://sim/autoresolve.gd")
 const Ai := preload("res://sim/ai.gd")
+const Jev := preload("res://net/jev.gd")
 const Replay := preload("res://net/replay.gd")
 const Save := preload("res://net/save.gd")
 const Regiment := preload("res://sim/regiment.gd")
@@ -19,9 +20,16 @@ const Orders := preload("res://net/orders.gd")
 const PORT := 7777
 const MAX_CLIENTS := 7
 const MAX_CATCHUP := 0.25          # seconds of simulation we will chew in one frame
-## How often an AI reconsiders a battle. Every tick would be pointless -- orders take
-## seconds to carry out -- and it would also thrash the order log.
-const AI_THINK_TICKS := 20
+## How often an AI reconsiders a battle, in SIM TICKS -- 7 of them at TICK_HZ 20, so a
+## third of a second on every machine. It used to count frames, which meant the
+## opposition thought 2.4x more often on a 144 Hz monitor than on a 60 Hz one and a
+## loaded host played a different battle from an idle one.
+##
+## It must not go much lower. `order_move` is not idempotent: it sets a regiment back to
+## MOVING, and IDLE is what gates shooting, morale recovery and stamina recovery. An
+## archer re-ordered every tick is never IDLE, so it never looses, never empties its
+## quiver, never joins the line, and the battle never ends.
+const AI_THINK_TICKS := 7
 
 signal battle_updated(battle)      # server: stepped. client: snapshot decoded.
 signal campaign_updated(campaign)  # turn-based, so this fires on every change
@@ -52,7 +60,18 @@ var _rng := RandomNumberGenerator.new()
 ## player everywhere that matters -- seating, colours, the end-turn ready check --
 ## without any special case in the order pipeline.
 var _ais := {}                     # seat id -> Ai
-var _ai_ticks := 0
+var _last_think_tick := -1         # battle.tick the AIs last thought on
+
+## Jev scores the AI's decisions when there is a key for it, and is simply absent when
+## there is not. It never issues an order; it writes into an Ai's `advice` and the Ai
+## goes on producing the same validated orders it always did.
+var _jev = null
+
+## Turned off by the headless harnesses. A gate that reaches across the internet fails
+## when somebody else's API is slow or down, which says nothing about this game, and
+## aitest.cmd budgets its whole run in real seconds so a few round trips a turn are
+## enough to tip it over. Jev is for playing against, not for proving the sim works.
+var use_jev := true
 
 ## Every battle is recorded. It costs a few hundred bytes and it is the only way to
 ## watch the same fight twice with one constant changed.
@@ -65,6 +84,9 @@ var _battle_armies := {}           # owner_id -> campaign army id
 var _battle_tile := -1
 var _battle_attacker := 0
 var _battle_seconds := 0.0
+## The seat that threw in the towel, or 0. Read instead of battle.winner() when set,
+## because a side that quits has lost the field whatever its regiments were still doing.
+var _battle_forfeit := 0
 
 ## Snapshots go out unreliably and the end-of-battle message goes out reliably, and
 ## nothing orders one against the other. Without an epoch, a snapshot still in flight
@@ -95,7 +117,7 @@ func host(port := PORT, as_player := true) -> Error:
 	multiplayer.peer_connected.connect(_on_peer_connected)
 	multiplayer.peer_disconnected.connect(_on_peer_disconnected)
 	players = {1: "host"} if as_player else {}
-	players_changed.emit()
+	_roster_changed()
 	return OK
 
 
@@ -117,6 +139,38 @@ func player_ids() -> Array:
 	return ids
 
 
+## The roster changed, so tell everybody before saying so locally.
+##
+## `players` was server state that four view call sites treated as global truth --
+## Colors.of_owner() takes the seating and falls back to NEUTRAL for an id it cannot
+## find, so on a joined client, where `players` was empty for the whole session, BOTH
+## ARMIES DREW THE SAME GREY. So did the strength bars, the settlements and the armies on
+## the campaign map. `join()` sets up the transport and nothing ever sent it a roster.
+func _roster_changed() -> void:
+	if multiplayer.has_multiplayer_peer() and is_server():
+		var seats := player_ids()
+		var names := []
+		for seat in seats:
+			names.append(players[seat])
+		_roster.rpc(seats, names)
+	players_changed.emit()
+
+
+## Seats as an ORDERED array rather than the dictionary: the order is the thing that
+## decides colour, so sending it explicitly is what makes host and client agree by
+## construction instead of by both happening to sort the same way.
+@rpc("authority", "call_remote", "reliable")
+func _roster(seats: Array, names: Array) -> void:
+	if seats.size() != names.size():
+		return                             # off the network, so it is not to be trusted
+	players.clear()
+	for i in seats.size():
+		if typeof(seats[i]) != TYPE_INT:
+			continue
+		players[seats[i]] = str(names[i])
+	players_changed.emit()
+
+
 ## Server only. Add an AI player; call before start_campaign().
 func add_ai() -> int:
 	assert(is_server(), "only the server runs the opposition")
@@ -125,7 +179,11 @@ func add_ai() -> int:
 		seat -= 1
 	players[seat] = "AI %d" % (-seat)
 	_ais[seat] = Ai.new(seat)
-	players_changed.emit()
+	if use_jev and _jev == null and Jev.have_key():
+		_jev = Jev.new()
+		add_child(_jev)
+		news.emit("Jev is advising the opposition")
+	_roster_changed()
 	return seat
 
 
@@ -202,8 +260,10 @@ func play_replay(r) -> bool:
 	_playback = r
 	_playback_schedule = r.by_tick()
 	_battle_armies.clear()
+	_battle_forfeit = 0
 	_battle_tile = -1
 	_battle_seconds = 0.0
+	_battle_forfeit = 0
 	battle = bs
 	running = true
 	battle_epoch += 1
@@ -232,8 +292,10 @@ func start_demo_battle() -> void:
 		bs.add(left, line[i], Vector2(-Rules.DEPLOY_SEPARATION * 0.5, y), 0.0)
 		bs.add(right, line[i], Vector2(Rules.DEPLOY_SEPARATION * 0.5, y), PI)
 	_battle_armies.clear()
+	_battle_forfeit = 0
 	_battle_tile = -1
 	_battle_seconds = 0.0
+	_battle_forfeit = 0
 	_announce("demo battle: %d regiments a side" % line.size())
 	start_battle(bs)
 
@@ -285,10 +347,22 @@ func _process(delta: float) -> void:
 				_playback_schedule.clear()
 				stop_battle()
 			continue
-		if battle.is_over() or _battle_seconds >= Rules.BATTLE_TIME_LIMIT:
+		if battle.is_over() or _battle_forfeit != 0 \
+				or _battle_seconds >= Rules.BATTLE_TIME_LIMIT:
 			broadcast_battle()
 			_finish_battle()
 			return
+
+
+## True when `every` sim ticks have gone by since the AIs last thought.
+##
+## `last < 0` is the first think of a battle. `now < last` is a NEW battle, whose tick
+## counter has restarted below a stale value from the last one -- without that clause the
+## opposition would stand still until the new fight counted its way back up, which at 20
+## Hz is minutes. The guard lives here rather than as a reset in `start_battle`, so every
+## caller gets it instead of whoever remembers.
+static func due(now: int, last: int, every: int) -> bool:
+	return last < 0 or now < last or now - last >= every
 
 
 ## Polled from _process rather than hung off campaign_updated: an AI order triggers
@@ -297,16 +371,25 @@ func _think_for_ais() -> void:
 	if _ais.is_empty():
 		return
 	if battle != null:
-		_ai_ticks += 1
-		if _ai_ticks < AI_THINK_TICKS:
+		if not due(battle.tick, _last_think_tick, AI_THINK_TICKS):
 			return
-		_ai_ticks = 0
+		_last_think_tick = battle.tick
 		for seat in _ais:
+			# Never gated on the answer: a 20 Hz battle cannot wait on a network, so the
+			# posture lands a few ticks after the state it was asked about and the fight
+			# carries on meanwhile.
+			if _jev != null:
+				_jev.consider_battle(seat, battle, _ais[seat])
 			for bytes: PackedByteArray in _ais[seat].battle_orders(battle):
 				_receive_order(seat, bytes)
 		return
 	if campaign != null:
 		for seat in _ais:
+			# Asked once at the top of the turn. While the answer is out the AI is held
+			# back entirely -- campaign_orders is what appends End Turn, so holding it
+			# holds the turn rather than spending the money twice. A timeout clears it.
+			if _jev != null and _jev.consider_turn(seat, campaign, _ais[seat]):
+				continue
 			for bytes: PackedByteArray in _ais[seat].campaign_orders(campaign):
 				_receive_order(seat, bytes)
 
@@ -367,6 +450,16 @@ func order_raze(army_id: int) -> void:
 	submit(Orders.raze(army_id))
 
 
+## Give up the battle. Goes through submit() like every other order, so the host's own
+## surrender travels the same path a remote one does.
+func order_forfeit() -> void:
+	submit(Orders.forfeit(true))
+
+
+func order_stance(ids: PackedInt32Array, mask: int) -> void:
+	submit(Orders.stance(ids, mask))
+
+
 func order_research(tech: StringName) -> void:
 	submit(Orders.research(tech))
 
@@ -385,7 +478,8 @@ func _receive_order(sender: int, bytes: PackedByteArray) -> void:
 		_reject(sender, "malformed order")
 		return
 	if battle != null and _recorder != null and (order["type"] == Orders.Type.BATTLE_MOVE
-			or order["type"] == Orders.Type.SET_FORMATION or order["type"] == Orders.Type.FOCUS):
+			or order["type"] == Orders.Type.SET_FORMATION or order["type"] == Orders.Type.FOCUS
+			or order["type"] == Orders.Type.STANCE):
 		_recorder.note(battle.tick, sender, bytes)
 	match order["type"]:
 		Orders.Type.BATTLE_MOVE:
@@ -410,6 +504,46 @@ func _receive_order(sender: int, bytes: PackedByteArray) -> void:
 			_merge(sender, order)
 		Orders.Type.SPLIT:
 			_split(sender, order)
+		Orders.Type.FORFEIT:
+			_forfeit(sender, order)
+		Orders.Type.STANCE:
+			_stance(sender, order)
+
+
+func _stance(sender: int, order: Dictionary) -> void:
+	if battle == null:
+		_reject(sender, "no battle in progress")
+		return
+	for id in order["ids"]:
+		var r = battle.get_regiment(id)
+		if r == null or r.owner_id != sender:
+			_reject(sender, "regiment %d is not yours to order" % id)
+			continue
+		r.stance = int(order["mask"])
+
+
+## Give up the field. Deliberately NOT routed through _campaign_is_open: it is the one
+## order that only makes sense DURING a battle, where every campaign order is refused.
+##
+## The sender is the peer id the transport reports, never anything in the packet, so a
+## spectator or a third player cannot end somebody else's fight -- they have no army in
+## _battle_armies and are turned away here.
+func _forfeit(sender: int, order: Dictionary) -> void:
+	if battle == null:
+		_reject(sender, "no battle in progress")
+		return
+	if not bool(order["confirm"]):
+		return
+	if not _battle_armies.has(sender) and not _battle_armies.is_empty():
+		_reject(sender, "you have no army on this field")
+		return
+	# Only FLAGGED here, never finished here. _process ends a battle inside the tick
+	# loop, straight after a step and before any order lands on the new tick; ending it
+	# from the order handler instead left this tick's orders in the closing snapshot,
+	# while a replay stops before applying them and so reproduced a different battle.
+	# `_keep_the_recording()` says so out loud, which is how this was caught.
+	_battle_forfeit = sender
+	_announce("player %d has quit the field" % sender)
 
 
 # --- campaign orders ------------------------------------------------------
@@ -607,6 +741,7 @@ func _begin_battle(attacker: Dictionary, defender: Dictionary) -> void:
 	_battle_attacker = attacker["owner"]
 	_battle_armies = {attacker["owner"]: attacker["id"], defender["owner"]: defender["id"]}
 	_battle_seconds = 0.0
+	_battle_forfeit = 0
 
 	var bs = BattleState.new()
 	bs.lay_ground(int(campaign.terrain[_battle_tile]), _battle_tile * 7919 + campaign.turn)
@@ -648,7 +783,15 @@ func _finish_battle() -> void:
 				survivors[owner] = []
 			survivors[owner].append([r.kind, r.strength])
 
+	# A side that quits has lost the field whatever its regiments were still doing, so
+	# the forfeit overrides what the sim would have called it. With only two sides on a
+	# field, the winner is simply the other one.
 	var winner_id: int = battle.winner()
+	if _battle_forfeit != 0:
+		winner_id = 0
+		for owner in _battle_armies:
+			if owner != _battle_forfeit:
+				winner_id = owner
 	stop_battle()
 	battle = null
 
@@ -670,10 +813,20 @@ func _finish_battle() -> void:
 		else:
 			defender = army
 
+	# Breaking contact costs men: those who did not get away. Done before _settle_field
+	# so a forfeiting army that is cut down to nothing is disbanded with everyone else.
+	if _battle_forfeit != 0:
+		var quitter = campaign.armies.get(_battle_armies.get(_battle_forfeit, -1))
+		if quitter != null:
+			var left := campaign.retreat(quitter["id"])
+			_announce("player %d falls back to tile %d" % [_battle_forfeit, left]
+				if left >= 0 else "player %d is cornered and cannot fall back" % _battle_forfeit)
+
 	_announce("the field at tile %d goes to player %d" % [_battle_tile, winner_id])
 	if attacker != null and defender != null:
 		_settle_field(attacker, defender, _battle_tile, winner_id == _battle_attacker)
 	_battle_armies.clear()
+	_battle_forfeit = 0
 	_battle_over.rpc(battle_epoch)
 	battle_updated.emit(null)
 
@@ -696,7 +849,12 @@ func _settle_field(attacker: Dictionary, defender: Dictionary, contested: int, a
 	defender["move_left"] = 0
 	campaign.disband_if_empty(attacker["id"])
 	campaign.disband_if_empty(defender["id"])
-	if attacker_wins and not campaign.armies.has(defender["id"]):
+	# The ground is yours if nobody is left holding it -- the defender destroyed, or
+	# having quit the field and fallen back off it. Testing only for destruction meant a
+	# forfeit handed the enemy the win and the tile at the same time, which made giving
+	# up strictly worse than dying where you stood.
+	var held: bool = campaign.armies.has(defender["id"]) and int(defender["tile"]) == contested
+	if attacker_wins and not held:
 		attacker["tile"] = contested
 		campaign._capture_if_undefended(attacker)
 	for owner in owners:
@@ -789,7 +947,7 @@ func _battle_snapshot(epoch: int, bytes: PackedByteArray) -> void:
 
 func _on_peer_connected(id: int) -> void:
 	players[id] = "player %d" % id
-	players_changed.emit()
+	_roster_changed()
 	if battle != null:
 		broadcast_battle()
 	if campaign != null:
@@ -798,4 +956,4 @@ func _on_peer_connected(id: int) -> void:
 
 func _on_peer_disconnected(id: int) -> void:
 	players.erase(id)
-	players_changed.emit()
+	_roster_changed()

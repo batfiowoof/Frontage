@@ -82,7 +82,7 @@ static func apply_order(bs, sender: int, bytes: PackedByteArray) -> void:
 		return
 	var kind: int = order["type"]
 	if kind != Orders.Type.BATTLE_MOVE and kind != Orders.Type.SET_FORMATION \
-			and kind != Orders.Type.FOCUS:
+			and kind != Orders.Type.FOCUS and kind != Orders.Type.STANCE:
 		return
 	for id in order["ids"]:
 		var r = bs.get_regiment(id)
@@ -92,6 +92,8 @@ static func apply_order(bs, sender: int, bytes: PackedByteArray) -> void:
 			r.order_move(order["target"], order["facing"])
 		elif kind == Orders.Type.FOCUS:
 			r.focus = int(order["mark"])
+		elif kind == Orders.Type.STANCE:
+			r.stance = int(order["mask"])
 		elif not r.set_formation(order["formation"]) and int(order["width"]) > 0:
 			r.set_width(int(order["width"]))
 

@@ -13,8 +13,6 @@ extends RefCounted
 ##     his place and the rest of that file each move up one. No other file moves at all.
 ##   - a file that is emptied leaves a hole, and the file-closer's job of dressing the
 ##     line is done by walking a man across from the deepest file.
-##   - while a regiment is fighting, files rotate: the man at the front goes to the back
-##     and the rest step up, which is Roman line relief at the scale we can draw it.
 ##
 ## Keying men by their index in a flat rank-major array, which is what this used to do,
 ## makes the man to the LEFT inherit a dead man's place instead of the man behind him.
@@ -33,14 +31,17 @@ const FLOATS_PER_INSTANCE := 12          # 8 transform + 4 colour
 const CATCH_UP := 3.6
 ## Variation in that rate per man, so a block ripples on the move instead of sliding.
 const CATCH_UP_SPREAD := 0.45
-## A small shuffle so a standing regiment is not a frozen diagram.
-const SWAY := 1.1
+## A small shuffle so a standing regiment is not a frozen diagram. Kept well under half
+## the gap between two files: men are drawn as dots with their own outline now, and two
+## neighbours shuffling out of phase must not close the 3 units between them.
+const SWAY := 0.8
 const SWAY_RATE := 2.3
 ## Further than this from his place and a man has been teleported, not outrun.
 const SNAP_DISTANCE := 400.0
-## How often one file rotates its front man to the back while the regiment is fighting.
-## Zero turns relief off. Too short and the line reads as fidgeting rather than working.
-const RELIEF_INTERVAL := 3.0
+## How long a regiment reads as busy after its frontage changes. Purely a clock about an
+## animation: changing frontage costs nothing and gates nothing, but re-dressing a line is
+## not instant and the player should be able to see that it is happening.
+const DRESS_SECONDS := 3.0
 
 ## How fast a man swivels to meet something, radians per second. Far quicker than a
 ## regiment can wheel, because turning your own body is not a manoeuvre.
@@ -54,6 +55,38 @@ const NOTICE_BAND := 55.0
 ## edge into a hook; more than this and men drift out of their files and the formation
 ## stops reading as one.
 const LEAN := 7.0
+
+## How far round an enemy the fighting line bends, and how much of that to apply.
+##
+## LEAN on its own was the whole of "bows into a hook", and seven units is one file's
+## width -- too small to read as anything, so two regiments in contact looked like two
+## rectangles touching. This is the other half, and it is a different motion: LEAN moves a
+## man TOWARD what he faces, this one moves him AROUND it.
+##
+## A hundred and forty degrees carries the ends of the line right round onto the enemy's
+## flanks and a little past them -- a full envelopment rather than a bow. These two are
+## the dials if it reads shy or overdone.
+const WRAP_MAX := deg_to_rad(140.0)
+const WRAP := 1.0
+## Below this much of the notice band the bend fades out, so a man at the very edge of
+## what he can see is not snapped into the arc. Above it he gets the full curve: fading it
+## by distance the whole way made the ENDS of a line -- which are furthest from the enemy,
+## and are exactly the men who should be coming round -- bend the least.
+const WRAP_FADE := 0.35
+## How far outside an enemy's outline a man must stay. It has to cover THEIR lean as well
+## as his own body: their front rank edges LEAN units out toward him at the same time he
+## edges toward them, and CONTACT_GAP is 14, so seven units of lean from each side closes
+## the whole of it and the two front ranks land in the same place. Measured before this
+## existed: the closest man-to-man distance across a contact was 0.0 units, against a body
+## four across. Men standing inside other men is what "they overlap" looks like.
+const KEEP_CLEAR := 12.0
+## Closer than this to an enemy's centre and the arc is meaningless, so stop dividing by
+## it. A man standing on top of the thing he is fighting has no "round" to go.
+const WRAP_MIN_RADIUS := 12.0
+
+## A facing change past this is an ABOUT-FACE, not a wheel, and the men must not be swung
+## round for it. Comfortably over a right angle: the sim only ever flips by exactly PI.
+const ABOUT_FACE := deg_to_rad(150.0)
 
 
 class Troop extends RefCounted:
@@ -69,7 +102,8 @@ class Troop extends RefCounted:
 	var next_id := 0
 	var phase := 0.0
 	var centre := Vector2.ZERO
-	var relief := 0.0
+	var dress := 0.0                     # seconds left visibly re-dressing
+	var mount := 0.0                     # the facing the slots were last laid out at
 	var spacing := 1.0
 
 
@@ -110,6 +144,7 @@ func _advance(id: int, p: Dictionary, delta: float) -> int:
 
 	if troop == null or troop.max_strength != int(p["max_strength"]):
 		troop = _raise(int(p["width"]), int(p["max_strength"]), strength, id)
+		troop.mount = float(p["facing"])
 		_troops[id] = troop
 		for i in troop.world.size():
 			troop.world[i] = _place_of(troop, p, i)          # arrive already formed
@@ -117,8 +152,14 @@ func _advance(id: int, p: Dictionary, delta: float) -> int:
 		return strength
 
 	troop.spacing = float(p.get("spacing", 1.0))
+	troop.dress = maxf(0.0, troop.dress - delta)
+	# Turned right round: relabel rather than rotate, so nobody moves an inch.
+	if absf(angle_difference(float(p["facing"]), troop.mount)) > ABOUT_FACE:
+		_turn_about(troop)
+	troop.mount = float(p["facing"])
 	if troop.width != int(p["width"]):
 		_reform(troop, int(p["width"]))                      # walk into the new shape
+		troop.dress = DRESS_SECONDS
 
 	var hits: Array = p.get("hits", [])
 	while troop.world.size() > strength:
@@ -130,13 +171,8 @@ func _advance(id: int, p: Dictionary, delta: float) -> int:
 	while troop.world.size() < strength:
 		_enlist(troop, p)
 
-	if RELIEF_INTERVAL > 0.0 and p["state"] == Regiment.State.FIGHTING:
-		troop.relief += delta
-		while troop.relief >= RELIEF_INTERVAL:
-			troop.relief -= RELIEF_INTERVAL
-			_relieve_a_file(troop)
-
 	var threats: PackedVector2Array = p.get("threats", PackedVector2Array())
+	var shapes: PackedVector3Array = p.get("shapes", PackedVector3Array())
 	var reach := _nearest_approach(troop, threats)
 	var facing := float(p["facing"])
 
@@ -154,9 +190,28 @@ func _advance(id: int, p: Dictionary, delta: float) -> int:
 			var toward: Vector2 = threats[t] - here
 			if toward.length_squared() > 1.0:
 				want = toward.angle()
+				var near := _closeness(t, threats, reach, here)
 				# ...and he edges toward it, so the struck edge thickens and bows into a
 				# hook while the rest of the line keeps facing its own front.
-				target += toward.normalized() * LEAN * _closeness(t, threats, reach, here)
+				target += toward.normalized() * LEAN * near
+				# ...and the line he is standing in bends ROUND it, which is what turns
+				# two rectangles meeting edge-on into an encirclement you can see.
+				var shape := Vector3.ZERO
+				if t < shapes.size():
+					shape = shapes[t]
+				# Only the WIDER of the two bends, and only by as much as it is wider.
+				# Both sides wrapping is self-defeating: each one is happily outside the
+				# other's block, and they meet in the open ground beside it -- measured,
+				# our man at (0, 33) and theirs at (0, 33), the same square yard. Which
+				# is also the honest answer, because you envelop somebody by OVERLAPPING
+				# him, and two lines of the same width overlap nowhere.
+				var blend := clampf(near / WRAP_FADE, 0.0, 1.0) * WRAP * _advantage(p, shape)
+				if blend > 0.0:
+					target = target.lerp(_curl(target, threats[t], shape, troop.centre), blend)
+			# ...and wherever all that put him, he does not end up standing in somebody.
+			# Checked against EVERY enemy in contact, not just the one he is dealing with,
+			# or a man caught between two of them is clear of one and inside the other.
+			target = _keep_clear(target, threats, shapes)
 		troop.face[i] = rotate_toward(troop.face[i], want,
 			MAN_TURN_RATE * (1.0 + MAN_TURN_SPREAD * _wobble(troop.man_id[i])) * delta)
 
@@ -182,6 +237,101 @@ func _nearest_approach(troop: Troop, threats: PackedVector2Array) -> PackedFloat
 			best = minf(best, troop.world[i].distance_squared_to(threats[t]))
 		out[t] = sqrt(best) if best < INF else 0.0
 	return out
+
+
+## Bend the line round the enemy, keeping every man the same distance from his OUTLINE.
+##
+## The whole of it is that the man in the MIDDLE of the line is nearer the enemy than the
+## man at its END, so bringing everybody to the middle man's standoff carries the ends
+## FORWARD until a straight line has become a crescent. It falls out of the geometry
+## instead of being posed:
+##
+##   - the middle man has no offset along the line, so he does not move at all;
+##   - a WIDE line close in has men at large offsets over a small radius, so it wraps hard
+##     and visibly laps a narrow one, while a narrow or distant line barely curves. Which
+##     side envelops which is therefore not a decision anybody makes.
+##
+## It is the OUTLINE and not the centre, which is the part that took two goes. A regiment
+## is wide and shallow -- 133 across against 45 deep -- so going round it at a constant
+## distance from its middle sends the men wrapping straight through its flanks, and two
+## armies drawn inside one another is the opposite of looking like contact. `shape` is
+## (half-depth, half-frontage, facing); an ellipse on those axes is close enough to a
+## block and has no corners for men to catch on.
+##
+## `centre` is the regiment's own middle and only decides which way is "out".
+static func _curl(at: Vector2, enemy: Vector2, shape: Vector3, centre: Vector2) -> Vector2:
+	var out := centre - enemy
+	if out.length_squared() < 1.0:
+		return at
+	var u := out.normalized()
+	var v := Vector2(-u.y, u.x)
+	var d := (at - enemy).dot(u)
+	if d < WRAP_MIN_RADIUS:
+		return at                        # he is level with it or past it; nothing to bend
+	var theta := clampf((at - enemy).dot(v) / d, -WRAP_MAX, WRAP_MAX)
+	var dir := u.rotated(theta)
+	# How far he stands off the enemy's SURFACE now, kept the same all the way round.
+	var clear := d - _skin(u, shape)
+	return enemy + dir * (_skin(dir, shape) + clear)
+
+
+## How much wider this regiment is than the one it is fighting, 0 to 1. Nothing at all
+## when they are the same width, all of it at twice his frontage.
+##
+## This is what decides who envelops whom, and it is not a decision anybody makes -- it
+## falls out of the two frontages. It also gives the frontage you set by dragging a real
+## and visible payoff: widen your line and you wrap round him.
+static func _advantage(p: Dictionary, shape: Vector3) -> float:
+	var theirs := shape.y
+	if theirs <= 0.0:
+		return 1.0                       # nobody told us his size; assume we may
+	var mine := Formation.frontage(int(p["max_strength"]), int(p["width"]),
+		float(p.get("spacing", 1.0)))
+	return clampf((mine - theirs) / theirs, 0.0, 1.0)
+
+
+## Nobody stands inside the men he is fighting.
+##
+## The curl already hugs the enemy's outline, and LEAN already edges a man toward what he
+## faces -- but both of them are aiming at a FOOTPRINT, and the enemy's own men are drawn
+## right out to it and leaning back the other way. Two front ranks then occupy the same
+## ground. This is the floor under all of it: a hard clamp, applied last, after everything
+## else has had its say.
+static func _keep_clear(at: Vector2, threats: PackedVector2Array, shapes: PackedVector3Array) -> Vector2:
+	var out := at
+	for i in threats.size():
+		var off := out - threats[i]
+		var far := off.length()
+		if far < 0.01:
+			continue
+		var dir := off / far
+		var least := _keep_out(dir, shapes, i)
+		if far < least:
+			out = threats[i] + dir * least
+	return out
+
+
+static func _keep_out(dir: Vector2, shapes: PackedVector3Array, i: int) -> float:
+	var shape := shapes[i] if i < shapes.size() else Vector3.ZERO
+	return _skin(dir, shape) + KEEP_CLEAR
+
+
+## How far the enemy's outline reaches in this direction: the BOX his men actually stand
+## in, `shape.x` deep along his facing by `shape.y` across it. Zero means nobody told us
+## his size, in which case he is a point and the bend is a plain arc.
+##
+## A box and not an ellipse, which was the first try and looks like a harmless
+## simplification. It is not: a 12-file block is nearly square, and an ellipse inscribed
+## in a square is fifteen units short of it at the corners -- so men cleared its flanks by
+## a comfortable margin and stood in its corners. Men standing in other men is the whole
+## complaint, and it hid in the one place the approximation was worst.
+static func _skin(dir: Vector2, shape: Vector3) -> float:
+	var a := shape.x
+	var b := shape.y
+	if a <= 0.0 or b <= 0.0:
+		return 0.0
+	var local := dir.rotated(-shape.z)
+	return minf(a / maxf(0.0001, absf(local.x)), b / maxf(0.0001, absf(local.y)))
 
 
 ## Index of the threat this man should be dealing with, or -1 if he is well out of it.
@@ -226,6 +376,40 @@ func _raise(width: int, max_strength: int, strength: int, id: int) -> Troop:
 		troop.per_file[f] += 1
 		troop.next_id += 1
 	return troop
+
+
+## An about-face: the whole regiment turned right round, and NOBODY MOVES.
+##
+## A rectangle rotated 180 degrees about its centre stands on exactly the same ground, so
+## turning about is a relabelling and not a rotation. Negating a man's slot --
+## `file -> width-1-file`, `depth -> ranks-1-depth` -- and then rotating by `facing + PI`
+## returns his original world position exactly, for every man. Verified against
+## Formation.slot: 0.0000 units moved, against 140 for the same flip without relabelling.
+##
+## The rear rank becomes the front rank, which is what an about-face IS. Each man's own
+## body then turns round over about a second on MAN_TURN_RATE, and that is the only thing
+## you actually see move.
+func _turn_about(troop: Troop) -> void:
+	var by_file := {}
+	for i in troop.file.size():
+		troop.file[i] = troop.width - 1 - troop.file[i]
+		troop.depth[i] = troop.ranks - 1 - troop.depth[i]
+		if not by_file.has(troop.file[i]):
+			by_file[troop.file[i]] = []
+		by_file[troop.file[i]].append(i)
+
+	# Close each file up to the new front. A full regiment does not move at all -- the
+	# flipped depths already run 0..ranks-1. A depleted one, whose men sat in the front
+	# part of the nominal block, re-dresses forward by the empty depth, which is what
+	# ranks actually do after turning about.
+	troop.per_file.resize(troop.width)
+	troop.per_file.fill(0)
+	for f in by_file:
+		var men: Array = by_file[f]
+		men.sort_custom(func(a: int, b: int) -> bool: return troop.depth[a] < troop.depth[b])
+		for d in men.size():
+			troop.depth[men[d]] = d
+		troop.per_file[f] = men.size()
 
 
 ## A new frontage. The men keep where they are standing and are given new places to walk
@@ -350,29 +534,6 @@ func _close_the_line(troop: Troop) -> void:
 			return
 
 
-## Line relief: the front man of a file goes to the back and the rest step up. Cosmetic,
-## and the reason a held line looks like men working rather than a diagram.
-##
-## ponytail: he walks straight back through his own file rather than stepping round it,
-## so he briefly overlaps his file-mates. Give him a lane if that ever reads badly.
-func _relieve_a_file(troop: Troop) -> void:
-	var candidates := PackedInt32Array()
-	for f in troop.per_file.size():
-		if troop.per_file[f] >= 2:
-			candidates.append(f)
-	if candidates.is_empty():
-		return
-	var f: int = candidates[randi() % candidates.size()]
-	var back := troop.per_file[f] - 1
-	for i in troop.file.size():
-		if troop.file[i] != f:
-			continue
-		if troop.depth[i] == 0:
-			troop.depth[i] = back
-		else:
-			troop.depth[i] -= 1
-
-
 func _discharge(troop: Troop, i: int) -> void:
 	troop.world.remove_at(i)
 	troop.file.remove_at(i)
@@ -448,6 +609,14 @@ func _write(id: int, p: Dictionary, seating: Array, buffer: PackedFloat32Array, 
 func living(id: int) -> int:
 	var troop = _troops.get(id)
 	return 0 if troop == null else troop.world.size()
+
+
+## Seconds this regiment has left visibly re-dressing after a frontage change, for the
+## HUD. Client-side and derived from the mirror: the sim neither knows nor cares, because
+## changing frontage is free and the men walking into their new files is the whole of it.
+func dressing(id: int) -> float:
+	var troop = _troops.get(id)
+	return 0.0 if troop == null else troop.dress
 
 
 ## Every living man's place, as man_id -> (file, depth).

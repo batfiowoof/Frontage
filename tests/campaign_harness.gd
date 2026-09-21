@@ -13,7 +13,15 @@ const Campaign := preload("res://sim/campaign_state.gd")
 const Snapshot := preload("res://net/snapshot.gd")
 
 const TURNS := 8       # the armies start in opposite corners and need this long to meet
-const TIMEOUT := 180.0
+## Battles are fought in real time, so this budget is mostly one battle. It was 180s
+## when a head-on fight broke somebody at 75s; morale now tracks casualties rather than
+## the clock, so a formed tie runs past four minutes and the old budget could not cover
+## one. `_fight()` sends the host round a flank instead of grinding head-on, which is
+## both faster and a better exercise -- this covers that fight with room to spare.
+const TIMEOUT := 280.0
+
+## How long the joiner slugs it out before throwing in the towel.
+const FIGHT_SECONDS := 25.0
 const MAP_SEED := 20260920
 
 var net: Node
@@ -34,6 +42,8 @@ var peak_regiments := 0
 var fought := 0
 var was_fighting := false
 var charged := false
+var battle_seconds := 0.0
+var gave_up := false
 var men_before_battle := -1
 var men_after_battle := -1
 
@@ -89,12 +99,22 @@ func _process(delta: float) -> bool:
 
 	if net.battle != null:
 		was_fighting = true
+		battle_seconds += delta
 		_fight()
+		# Somebody has to end this. A head-on charge between formed regiments now runs
+		# past four minutes, and what this gate needs to prove is the handoff, not the
+		# grind -- so the judge fights for a bit and then quits the field, which is a
+		# real ending and exercises the forfeit order across two processes as well.
+		if role == "join" and battle_seconds > FIGHT_SECONDS and not gave_up:
+			gave_up = true
+			print("[join] battle: giving up the field after %.0fs" % battle_seconds)
+			net.order_forfeit()
 		return false
 	if was_fighting:
 		# The battle ended and the campaign is back. Act again this turn.
 		was_fighting = false
 		charged = false
+		battle_seconds = 0.0
 		acted_this_turn = false
 		fought += 1
 		men_after_battle = _my_men()
@@ -145,8 +165,16 @@ func _process(delta: float) -> bool:
 	return false
 
 
-## Charge everything at the enemy line. Crude, but it decides a battle, which is
-## all this harness needs -- whether it is *fun* is M10's question, not a test's.
+## Charge the enemy line, then give it up.
+##
+## Crude, but it decides a battle, which is all this harness needs. The forfeit is the
+## important half: since morale started tracking casualties rather than the clock, a
+## head-on tie between formed regiments runs past four minutes and into
+## BATTLE_TIME_LIMIT, and this gate exists to prove the campaign-battle-campaign handoff
+## rather than to sit through the slowest fight the combat model can produce. Forfeiting
+## is a real ending -- survivors go home, the field is lost, the campaign resumes -- so
+## it proves the same seam faster, and proves the forfeit order across two processes
+## while it is at it.
 func _fight() -> void:
 	if charged:
 		return

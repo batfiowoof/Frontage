@@ -1,3 +1,6 @@
 # Godot 4+ specific ignores
 .godot/
 /android/
+
+# Secrets. The key goes here; .env.example is the committed template.
+.env

@@ -50,6 +50,7 @@ func _start() -> void:
 		printerr("[ai] could not host: %d" % err)
 		quit(2)
 		return
+	net.use_jev = false          # a gate does not reach across the internet
 	net.add_ai()
 	net.add_ai()
 	net.news.connect(func(text: String) -> void:

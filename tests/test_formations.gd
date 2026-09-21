@@ -54,7 +54,15 @@ func test_re_forming_cannot_be_started_twice(t) -> void:
 	var r = Regiment.make(1, 1, &"spear", Vector2.ZERO)
 	t.ok(r.set_formation(&"column"))
 	t.ok(not r.set_formation(&"square"), "one manoeuvre at a time")
-	t.ok(not r.set_width(30), "and no fiddling with the frontage mid-change")
+	# Frontage is the exception, and deliberately so. Changing SHAPE is a manoeuvre and
+	# costs; widening the line is dressing it, and costs nothing -- so it is never
+	# refused, not even in the middle of a change of shape. Charging for it made the drag
+	# that sets it expensive and silently rate-limited [ and ] to one press per six
+	# seconds, with nothing anywhere to say why the second press did nothing.
+	t.ok(r.set_width(30), "but the frontage is free, even mid-change")
+	t.eq(r.width, 30)
+	t.near(r.reforming, Rules.FORMATION_CHANGE_SECONDS, 0.001,
+		"and it neither pays for the privilege nor extends what is already running")
 	t.eq(r.formation, &"column")
 
 
@@ -68,10 +76,10 @@ func test_the_player_sets_the_frontage_within_bounds(t) -> void:
 	var r = Regiment.make(1, 1, &"spear", Vector2.ZERO)
 	t.ok(r.set_width(30))
 	t.eq(r.width, 30)
-	r.reforming = 0.0
+	t.near(r.reforming, 0.0, 0.001, "dressing the line is free")
+	t.near(r.order_factor(), 1.0, 0.001, "and costs nothing in the fight either")
 	r.set_width(9999)
 	t.eq(r.width, mini(Rules.MAX_WIDTH, r.max_strength), "capped, not absurd")
-	r.reforming = 0.0
 	r.set_width(-4)
 	t.eq(r.width, Rules.MIN_WIDTH, "and never narrower than a file")
 

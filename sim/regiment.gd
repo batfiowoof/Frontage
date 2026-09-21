@@ -7,6 +7,16 @@ const Rules := preload("res://sim/rules.gd")
 
 enum State { IDLE, MOVING, FIGHTING, ROUTING, DEAD }
 
+## How a regiment behaves when nobody is telling it anything. A bitfield rather than two
+## bools because it goes on the wire, and one int is one int however many of these there
+## turn out to be.
+##
+## GUARD: hold this ground. Suppresses the chase, so a regiment told to attack somebody
+##   goes for them and a guarding one waits for them to come.
+## SKIRMISH: back away from whatever is closing, while there are arrows left. It is what
+##   makes a missile unit worth its own orders rather than a slow infantry block.
+enum Stance { GUARD = 1, SKIRMISH = 2 }
+
 var id := 0
 var owner_id := 0                  # multiplayer peer id
 var kind := &"spear"
@@ -28,11 +38,21 @@ var engaged_with := -1             # regiment id, or -1
 ## Fractional casualties waiting to become whole men. Server-side only: it is not on
 ## the wire, because a client never continues the simulation, only draws it.
 var damage_pool := 0.0
+## How fast it is actually going, world units a second. Server-side, like damage_pool: it
+## starts at zero, a replay opens from a snapshot where nothing is moving, and a client
+## only ever draws interpolated positions. Nothing on the wire has to carry it.
+var pace := 0.0
+
+## Seconds of charge left. Set when a regiment at a run reaches the enemy and burnt
+## down every tick after, so the bonus belongs to the impact and not to the melee.
+## Server-side, like damage_pool: it lasts three seconds and a client draws bodies.
+var charge := 0.0
 
 ## Seconds until it can loose again, and whoever the player told it to shoot at.
 ## Server-side only, like damage_pool: a client draws the battle, it does not run it.
 var reload := 0.0
 var focus := -1
+var stance := 0                    # a mask of Stance bits
 
 ## Fortification credit from whatever the regiment is standing behind, 0..1.
 ##
@@ -63,6 +83,33 @@ static func make(p_id: int, p_owner: int, p_kind: StringName, p_pos: Vector2, p_
 ## How hard it can still swing, 0..1, between exhausted and fresh.
 func readiness() -> float:
 	return lerpf(Rules.TIRED_EFFECTIVENESS, 1.0, clampf(stamina, 0.0, 1.0))
+
+
+## ...and the other three things exhaustion decides, read exactly the same way, because
+## they are one idea and not four. A spent regiment hits softer, is easier to kill, cannot
+## keep up, and breaks sooner; only the first of those used to be true.
+func vulnerability() -> float:
+	return lerpf(Rules.TIRED_VULNERABILITY, 1.0, clampf(stamina, 0.0, 1.0))
+
+
+func legs() -> float:
+	return lerpf(Rules.TIRED_PACE, 1.0, clampf(stamina, 0.0, 1.0))
+
+
+func nerve() -> float:
+	return lerpf(Rules.TIRED_RESOLVE, 1.0, clampf(stamina, 0.0, 1.0))
+
+
+## Turn right round without wheeling. A rectangle rotated 180 degrees about its centre
+## stands on exactly the same ground, so this costs no rotation at all -- the men hold
+## their places and the rear rank becomes the front rank. bodies.gd relabels them to
+## match, and the only price is that the regiment has to stop and start again.
+##
+## Refused in contact, and that is load-bearing: a regiment taken in the rear that could
+## flip to face its attacker would delete the whole flank-and-rear mechanic.
+func about_face() -> void:
+	facing = wrapf(facing + PI, -PI, PI)
+	pace = 0.0
 
 
 func tire(amount: float) -> void:
@@ -119,14 +166,25 @@ func natural_width() -> int:
 	return clampi(int(round(base)), Rules.MIN_WIDTH, maxi(Rules.MIN_WIDTH, max_strength))
 
 
+## Change the frontage. **Free, immediate, and never refused** -- unlike a change of
+## SHAPE, which still costs FORMATION_CHANGE_SECONDS at REFORM_PENALTY.
+##
+## The split is the point: picking a formation is a manoeuvre, widening the line is
+## dressing it. Charging for the frontage made the drag that sets it expensive to use and
+## silently rate-limited [ and ] to one step every six seconds -- the second press was
+## refused by the `reforming > 0` guard that used to be on this function, with nothing
+## anywhere to say so.
+##
+## Re-dressing is not instant to LOOK at: the men walk into their new files, and
+## bodies.gd runs a clock so the HUD can say so. That is a fact about the animation and
+## lives on the client, which is why there is nothing here to match it.
 func set_width(w: int) -> bool:
-	if state == State.DEAD or reforming > 0.0:
+	if state == State.DEAD:
 		return false
 	var wanted := clampi(w, Rules.MIN_WIDTH, mini(Rules.MAX_WIDTH, maxi(Rules.MIN_WIDTH, max_strength)))
 	if wanted == width:
 		return false
 	width = wanted
-	reforming = Rules.FORMATION_CHANGE_SECONDS
 	return true
 
 

@@ -13,7 +13,13 @@ const Colors := preload("res://view/colors.gd")
 const Bodies := preload("res://view/battle/bodies.gd")
 
 const BODY_SIZE := 4.0
+## Where the dot stops being solid and becomes its own outline, and how dark that gets.
+const DOT_RIM := 0.68
+const DOT_RIM_SHADE := 0.45
 const PICK_RADIUS := 46.0
+## Past this, a facing change is an about-face rather than a wheel: it is not interpolated
+## and bodies.gd relabels the men instead of swinging them round.
+const ABOUT_FACE := deg_to_rad(150.0)
 const EDGE_MARGIN := 24.0
 const EDGE_SPEED := 900.0
 const KEY_SPEED := 900.0
@@ -31,6 +37,9 @@ var _drag_select_from := Vector2.INF
 var _order_from := Vector2.INF
 var _panning := false
 var _formation_bar: HBoxContainer
+var _quit: Button
+var _quit_armed := false
+var _groups := {}                        # slot -> PackedInt32Array, view-side only
 
 
 func _ready() -> void:
@@ -57,7 +66,33 @@ func _build_bodies() -> void:
 	mm.mesh = quad
 	_bodies = MultiMeshInstance2D.new()
 	_bodies.multimesh = mm
+	_bodies.texture = _dot()
 	add_child(_bodies)
+
+
+## A man, as a round dot with a dark rim.
+##
+## Bare quads are a GRID, not men: four units across on a seven-unit pitch is 57% filled
+## laterally, and at the default zoom that is a 3px square 5px from its neighbour, which
+## the eye joins into one slab. The rim is what does the work -- it gives every man his
+## own outline, so two touching dots still read as two.
+##
+## The instance colour multiplies this, so white stays the team colour and the rim comes
+## out as a darker shade of it rather than a black ring round everybody.
+static func _dot(size := 16) -> ImageTexture:
+	var img := Image.create(size, size, true, Image.FORMAT_RGBA8)
+	var mid := float(size) * 0.5
+	for y in size:
+		for x in size:
+			var d := Vector2(float(x) + 0.5 - mid, float(y) + 0.5 - mid).length() / mid
+			# Solid to RIM_AT, darker out to the edge, then gone. The last few percent
+			# fade rather than cut, which is the whole of the antialiasing.
+			var shade := 1.0 if d < DOT_RIM else DOT_RIM_SHADE
+			img.set_pixel(x, y, Color(shade, shade, shade,
+				clampf(smoothstep(1.0, 0.86, d), 0.0, 1.0)))
+	# 1920 dots minified to three pixels shimmer badly without these.
+	img.generate_mipmaps()
+	return ImageTexture.create_from_image(img)
 
 
 func _build_hud() -> void:
@@ -81,6 +116,16 @@ func _build_hud() -> void:
 		b.text = String(shape)
 		b.pressed.connect(_on_formation.bind(shape))
 		_formation_bar.add_child(b)
+
+	# Giving up is a button rather than a key, and it asks twice. It ends the battle for
+	# everybody on your side and costs you the field and a share of the men; that is not
+	# something to lose to a mistyped bracket.
+	_quit = Button.new()
+	_quit.text = "give up the field"
+	_quit.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
+	_quit.position = Vector2(-160, -34)
+	_quit.pressed.connect(_on_give_up)
+	layer.add_child(_quit)
 
 
 # --- what we are drawing --------------------------------------------------
@@ -136,17 +181,26 @@ static func _engagements(state) -> Dictionary:
 				continue
 			if BattleState.gap_between(d, e) > Rules.CONTACT_GAP:
 				continue
-			_note(out, d.id, BattleState.side_of(d, e), e.pos)
-			_note(out, e.id, BattleState.side_of(e, d), d.pos)
+			_note(out, d.id, BattleState.side_of(d, e), e)
+			_note(out, e.id, BattleState.side_of(e, d), d)
 	return out
 
 
-static func _note(out: Dictionary, id: int, side: int, at: Vector2) -> void:
+## Where the enemy is AND how much room he takes up. The men bend their line round him,
+## and a block is wide and shallow -- 133 across against 45 deep -- so going round him at
+## a constant distance from his CENTRE would walk them straight through his flanks. The
+## footprint is derived from the mirror like everything else here and stays off the wire.
+static func _note(out: Dictionary, id: int, side: int, foe) -> void:
 	if not out.has(id):
-		out[id] = {"sides": [], "threats": PackedVector2Array()}
+		out[id] = {"sides": [], "threats": PackedVector2Array(),
+			"shapes": PackedVector3Array()}
 	if not out[id]["sides"].has(side):
 		out[id]["sides"].append(side)
-	out[id]["threats"].append(at)
+	out[id]["threats"].append(foe.pos)
+	out[id]["shapes"].append(Vector3(
+		Formation.half_depth(foe.max_strength, foe.width, foe.spacing()),
+		Formation.frontage(foe.max_strength, foe.width, foe.spacing()),
+		foe.facing))
 
 
 func _pose_of(a, b, alpha: float) -> Dictionary:
@@ -161,15 +215,21 @@ func _pose_of(a, b, alpha: float) -> Dictionary:
 		if b != null and b.regiments.has(id):
 			var n = b.regiments[id]
 			pos = r.pos.lerp(n.pos, alpha)
-			facing = lerp_angle(r.facing, n.facing, alpha)
+			# An about-face happens in a single tick and costs no rotation at all, so
+			# there is nothing to interpolate: easing across it would sweep the block
+			# through ninety degrees, which is the exact thing it exists to avoid.
+			facing = n.facing if absf(angle_difference(r.facing, n.facing)) > ABOUT_FACE \
+				else lerp_angle(r.facing, n.facing, alpha)
 		out[id] = {
 			"pos": pos, "facing": facing, "owner": r.owner_id, "kind": r.kind,
 			"strength": r.strength, "max_strength": r.max_strength,
 			"morale": r.morale, "stamina": r.stamina, "width": r.width, "state": r.state,
 			"formation": r.formation, "reforming": r.reforming, "spacing": r.spacing(),
-			"ammo": r.ammo,
+			"ammo": r.ammo, "focus": r.focus, "engaged_with": r.engaged_with,
+			"stance": r.stance,
 			"hits": fights[id]["sides"] if fights.has(id) else [],
 			"threats": fights[id]["threats"] if fights.has(id) else PackedVector2Array(),
+			"shapes": fights[id]["shapes"] if fights.has(id) else PackedVector3Array(),
 		}
 	return out
 
@@ -262,6 +322,13 @@ func _draw() -> void:
 			draw_arc(centre, half + 6.0, 0, TAU, 32, Color.WHITE, 2.0)
 			var nose := centre + Vector2(cos(p["facing"]), sin(p["facing"])) * (half + 14.0)
 			draw_line(centre, nose, Color.WHITE, 2.0)
+			# Who it has been told to deal with. An attack order that cannot be seen is
+			# an attack order you cannot tell you gave.
+			var mark := int(p.get("focus", -1))
+			if mark >= 0 and pose.has(mark):
+				var at: Vector2 = _men.centre_of(mark, pose[mark]["pos"])
+				draw_line(centre, at, Color(0.78, 0.36, 0.23, 0.75), 2.0)
+				draw_arc(at, 20.0, 0, TAU, 20, Color("c25b3a"), 2.0)
 
 		# Strength above, morale below: the two numbers a player actually steers by.
 		var bar := Vector2(half * 2.0, 4.0)
@@ -333,19 +400,35 @@ func _update_hud(pose: Dictionary) -> void:
 
 	_formation_bar.visible = not selected.is_empty()
 	if selected.is_empty() or not pose.has(selected[0]):
-		_hint.text = "drag to select, right-click to move, right-drag to set the facing"
+		_hint.text = ("drag to select, right-click to move, right-DRAG to draw the line"
+			+ "      ctrl+1-9 remembers a group, 1-9 recalls it")
 		return
 	var lead: Dictionary = pose[selected[0]]
 	var busy: float = lead["reforming"]
+	# Changing frontage costs nothing and gates nothing, but it is not instant to look
+	# at -- the men walk into their new files. The clock is the client's, from the mirror.
+	var dressing: float = _men.dressing(selected[0])
 	var quiver: int = lead.get("ammo", 0)
 	var reach := range_of_kind(lead["kind"])
-	_hint.text = "%s, %d across%s%s      [ and ] change the frontage" % [
+	var stance := int(lead.get("stance", 0))
+	_hint.text = "%s, %d across%s%s%s      [ ] frontage   G guard   H skirmish   right-click an enemy to attack it" % [
 		lead["formation"], int(lead["width"]),
 		"      %d volleys left, range %.0f" % [quiver, reach] if quiver > 0 else "",
-		"      RE-FORMING %.0fs" % busy if busy > 0.0 else ""]
+		("      RE-FORMING %.0fs" % busy if busy > 0.0
+			else "      RE-DRESSING %.0fs" % dressing if dressing > 0.0 else ""),
+		"      %s" % " ".join(_stance_names(stance)) if stance != 0 else ""]
 	for b: Button in _formation_bar.get_children():
 		b.disabled = busy > 0.0
 		b.modulate = Color("9fd8a0") if StringName(b.text) == lead["formation"] else Color.WHITE
+
+
+static func _stance_names(mask: int) -> PackedStringArray:
+	var out := PackedStringArray()
+	if mask & Regiment.Stance.GUARD:
+		out.append("GUARDING")
+	if mask & Regiment.Stance.SKIRMISH:
+		out.append("SKIRMISHING")
+	return out
 
 
 # --- camera ---------------------------------------------------------------
@@ -412,6 +495,52 @@ func _unhandled_input(event: InputEvent) -> void:
 			_widen(2)
 		elif event.keycode == KEY_BRACKETLEFT:
 			_widen(-2)
+		elif event.keycode == KEY_G:
+			_toggle_stance(Regiment.Stance.GUARD)
+		elif event.keycode == KEY_H:
+			_toggle_stance(Regiment.Stance.SKIRMISH)
+		elif event.keycode >= KEY_1 and event.keycode <= KEY_9:
+			_control_group(event.keycode - KEY_1, event.ctrl_pressed)
+
+
+## Ctrl+1..9 remembers this selection, 1..9 brings it back. View only: a control group
+## is a note about what you are looking at, not a fact about the world, so nothing here
+## goes near an order or the wire.
+func _control_group(slot: int, assign: bool) -> void:
+	if assign:
+		_groups[slot] = selected.duplicate()
+		return
+	var remembered: PackedInt32Array = _groups.get(slot, PackedInt32Array())
+	# Drop whoever has died since, or recalling an old group would select ghosts.
+	var pose := _display_state()
+	var alive := PackedInt32Array()
+	for id in remembered:
+		if pose.has(id):
+			alive.append(id)
+	selected = alive
+
+
+## Guard and skirmish are toggles over the whole selection. Set from the FIRST selected
+## regiment so a mixed selection lands somewhere predictable rather than each unit
+## flipping to the opposite of whatever it happened to be.
+func _toggle_stance(bit: int) -> void:
+	if selected.is_empty():
+		return
+	var pose := _display_state()
+	var lead: int = selected[0]
+	var now := int(pose[lead]["stance"]) if pose.has(lead) else 0
+	Net.order_stance(selected, (now & ~bit) if (now & bit) else (now | bit))
+
+
+## Two presses. The first arms it and says so, the second sends it.
+func _on_give_up() -> void:
+	if not _quit_armed:
+		_quit_armed = true
+		_quit.text = "sure? this loses the field"
+		return
+	_quit_armed = false
+	_quit.text = "give up the field"
+	Net.order_forfeit()
 
 
 func _on_formation(shape: StringName) -> void:
@@ -469,47 +598,187 @@ func _plan_order(from: Vector2, to: Vector2) -> Array:
 	return plan_order(_display_state(), selected, from, to)
 
 
+## The gap left between two neighbouring regiments in a line, so they are a line and
+## not one block.
+const SHOULDER := 16.0
+## Below this a right-drag is a right-click: you meant "go there", not "form up along
+## this".
+const DRAG_IS_A_LINE := 24.0
+## The deepest a DRAG may leave a regiment. Without a floor here, a short drag over
+## several regiments derives MIN_WIDTH and orders each of them into a two-file conga line
+## sixty ranks deep, which is not a formation and was never what the player drew. The
+## column and square buttons still reach the extremes -- natural_width() does not come
+## through this clamp -- so the drag owning the sane middle is the whole division.
+const DRAG_MAX_RANKS := 12
+
+
 ## The arithmetic, with nothing of the scene tree in it, so it tests headless the way
 ## bodies.gd does.
+##
+## **The drag IS the line.** Where you press and where you release are the two ends of
+## the formation, and the facing is perpendicular to it -- drag left to right and they
+## face away from you, as they do in every game that does this.
+##
+## **And the drag sets their FRONTAGE, not the air between them.** Each regiment takes an
+## equal share of the line you drew and stands that many files wide, so they end up
+## shoulder to shoulder as one continuous line: long drag, thin wide regiments; short
+## drag, deep blocks. The length used to become `extra`, slack inserted BETWEEN
+## neighbours, which meant a long drag gave you the same blocks further apart -- and with
+## one regiment selected it gave you nothing at all, because the slack was divided by
+## n - 1 and a lone unit went to the press point however far you dragged.
+##
+## A regiment has a maximum frontage, so a drag longer than the men can stand in caps and
+## centres instead of stretching. The ghost shows that by not growing, which is the answer
+## to "why will it not spread further" -- it cannot.
 static func plan_order(pose: Dictionary, chosen: PackedInt32Array, from: Vector2, to: Vector2) -> Array:
 	var out := []
 	if from == Vector2.INF or chosen.is_empty():
 		return out
-	var explicit := from.distance_to(to) > 12.0
-	var facing := (to - from).angle() if explicit else 0.0
 
-	# Spread the selection into a line across the facing rather than piling every
-	# regiment onto one point.
-	var across := Vector2(cos(facing + PI / 2.0), sin(facing + PI / 2.0))
-	var n := chosen.size()
-	for i in n:
-		var id: int = chosen[i]
-		if not pose.has(id):
-			continue
+	var here := []
+	for id in chosen:
+		if pose.has(id):
+			here.append(id)
+	if here.is_empty():
+		return out
+
+	var span := from.distance_to(to)
+	var drawn := span >= DRAG_IS_A_LINE
+	# A drag draws the line and the facing falls out of it; a click says where to go and
+	# each regiment turns toward its own destination.
+	var along := (to - from).normalized() if drawn else Vector2.RIGHT
+	var facing := along.rotated(-PI / 2.0).angle() if drawn else 0.0
+	if not drawn:
+		# No line to run along, so spread across the way they are travelling rather than
+		# always along world +Y, which used to stack them into a column pointing nowhere.
+		var travel := Vector2.ZERO
+		for id: int in here:
+			travel += from - pose[id]["pos"]
+		along = (travel.normalized().rotated(PI / 2.0)) if travel.length() > 1.0 else Vector2.RIGHT
+
+	# Left to right along the line as they already stand, so nobody is sent to the far
+	# end and the columns do not march through each other on the way.
+	here.sort_custom(func(a: int, b: int) -> bool:
+		return pose[a]["pos"].dot(along) < pose[b]["pos"].dot(along))
+
+	# Each regiment's share of the line it has to fill, which is what becomes its
+	# frontage. Shoulders come off the top first: they are gaps between units, not room
+	# for men, and with four regiments on a 40-unit drag they exceed the span outright.
+	#
+	# ponytail: equal shares, not shares weighted by headcount -- you drew a line and each
+	# unit fills its part of it. Weight by max_strength if a mixed selection reads wrong.
+	var share := maxf(0.0, span - SHOULDER * float(here.size() - 1)) / float(here.size())
+
+	# Measure everybody: the slots have to be packed cumulatively by each regiment's OWN
+	# frontage. Spacing every gap by one regiment's half-width put an archer and a cavalry
+	# 42 units apart when they needed 84, and ordered them to stand inside one another.
+	var halves := []
+	var widths := []
+	var needed := 0.0
+	for id: int in here:
 		var p: Dictionary = pose[id]
-		var spacing := float(p.get("spacing", 1.0))
-		var half := Formation.frontage(p["strength"], p["width"], spacing)
-		var slot := across * (float(i) - float(n - 1) * 0.5) * (half * 2.4)
-		var target: Vector2 = from + slot
+		var w := _files_for(p, share) if drawn else int(p["width"])
+		widths.append(w)
+		# max_strength, matching half_depth and the sim's own BattleState.reach(). Taken
+		# from current strength the ghost shrank as a regiment bled, while the footprint
+		# the sim actually tests against did not.
+		var half := Formation.frontage(p["max_strength"], w, spacing_of(p))
+		halves.append(half)
+		needed += half * 2.0
+	needed += SHOULDER * float(here.size() - 1)
+
+	# The line is as long as the men can actually stand, centred on the drag. There is no
+	# slack to distribute any more: the drag went into their FRONTAGE rather than into the
+	# air between them, so when nothing caps out `needed` is the span you drew. Slack is
+	# also what used to swallow the single-regiment case -- it was divided by n - 1.
+	var centre := (from + to) * 0.5 if drawn else from
+	var edge := -needed * 0.5
+
+	for i in here.size():
+		var id: int = here[i]
+		var p: Dictionary = pose[id]
+		var half: float = halves[i]
+		var w: int = widths[i]
+		var target: Vector2 = centre + along * (edge + half)
+		edge += half * 2.0 + SHOULDER
 		out.append({
 			"id": id,
 			"reach": range_of_kind(p["kind"]) if int(p.get("ammo", 0)) > 0 else 0.0,
 			"target": target,
-			"face": facing if explicit else (target - p["pos"]).angle(),
+			"face": facing if drawn else (target - p["pos"]).angle(),
 			"from": p["pos"],
+			"width": w,
+			"formation": p["formation"],
+			"rewidth": w != int(p["width"]),
 			"half_width": half,
-			"half_depth": Formation.half_depth(p["max_strength"], p["width"], spacing),
+			"half_depth": Formation.half_depth(p["max_strength"], w, spacing_of(p)),
 		})
 	return out
 
 
-## Right-click moves. Dragging while you do it sets the facing, so you can decide
-## which way a regiment meets what is coming -- the whole point of the flank.
+## How many files this regiment should stand in to fill `share` world units of the line.
+## The inverse of Formation.frontage(), which is (width - 1) * FILE_SPACING * spacing.
+##
+## No deadband beyond "it actually changed" and no reforming clamp: set_width is free now
+## and refuses nothing, so the honest answer is simply the frontage the drag asked for.
+## Both guards existed only to keep an ordinary move-drag from spending six seconds.
+static func _files_for(p: Dictionary, share: float) -> int:
+	var men := int(p["max_strength"])
+	# Never deeper than DRAG_MAX_RANKS, never wider than the sim itself would allow --
+	# max_strength as well as MAX_WIDTH, matching Regiment.set_width, or the ghost
+	# promises a frontage that comes back refused.
+	var top := mini(Rules.MAX_WIDTH, men)
+	# The floor yields to the ceiling, or a regiment big enough that DRAG_MAX_RANKS wants
+	# more files than MAX_WIDTH allows would hand clampi a minimum above its maximum.
+	var bottom := mini(maxi(Rules.MIN_WIDTH, ceili(float(men) / float(DRAG_MAX_RANKS))), top)
+	return clampi(roundi(share / (Rules.FILE_SPACING * spacing_of(p))) + 1, bottom, top)
+
+
+static func spacing_of(p: Dictionary) -> float:
+	return float(p.get("spacing", 1.0))
+
+
+## The enemy regiment under this point, or -1. Same radius as picking one of your own,
+## so clicking a unit means the same thing whoever owns it.
+func _enemy_at(at: Vector2) -> int:
+	var pose := _display_state()
+	var best := -1
+	var best_distance := PICK_RADIUS
+	for id in pose:
+		if pose[id]["owner"] == Net.my_id():
+			continue
+		var d: float = pose[id]["pos"].distance_to(at)
+		if d < best_distance:
+			best_distance = d
+			best = id
+	return best
+
+
+## Right-click moves. Right-DRAG draws the line itself -- press and release are the
+## two ends of the formation and the facing is square to it, so you decide both the
+## frontage and the way they meet what is coming.
 func _finish_order() -> void:
 	var from := _order_from
 	var to := get_global_mouse_position()
 	_order_from = Vector2.INF
+	# Right-clicking an enemy is an attack order, not a walk to where it happens to be
+	# standing. Anywhere else clears the mark, so calling a unit off is the same gesture
+	# as sending it somewhere.
+	if from != Vector2.INF and from.distance_to(to) < DRAG_IS_A_LINE and not selected.is_empty():
+		var mark := _enemy_at(to)
+		if mark >= 0:
+			Net.order_focus(selected, mark)
+			return
+		Net.order_focus(selected, -1)
 	# One order per regiment: the wire carries a single target, and a right-click is
-	# not a hot path.
+	# not a hot path. The frontage rides along as a second order rather than a sixth
+	# element on BATTLE_MOVE, because SET_FORMATION already carries a width and every
+	# .rpl ever recorded decodes BATTLE_MOVE as exactly five elements.
+	#
+	# The formation goes out UNCHANGED on purpose: _set_formation only reaches set_width
+	# when set_formation returned false, and asking for the shape it already has is what
+	# makes it return false.
 	for row: Dictionary in _plan_order(from, to):
 		Net.order_battle_move(PackedInt32Array([row["id"]]), row["target"], row["face"])
+		if row["rewidth"]:
+			Net.order_set_formation(PackedInt32Array([row["id"]]), row["formation"], row["width"])

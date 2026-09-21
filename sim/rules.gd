@@ -9,13 +9,46 @@ const SNAPSHOT_EVERY_N_TICKS := 2          # -> 10 Hz on the wire
 const INTERP_DELAY_MS := 100               # client renders this far in the past
 
 # --- battle: movement ---------------------------------------------------
-const MOVE_SPEED := 70.0                   # world units / second
-const TURN_SPEED := 3.0                    # radians / second
+## Top marching pace, and how quickly a regiment gets to it. Nothing used to build up:
+## a regiment was at full speed on the first tick of an order and still at full speed on
+## the tick it arrived, where it snapped onto its destination.
+const MOVE_SPEED := 45.0                   # world units / second, at a walk
+## Seconds to reach whatever top pace a regiment has, and to brake from it. A TIME and
+## not a rate: a flat units/s^2 would have a column and a line cover identical ground in
+## the first second, because they would both still be winding up, and the whole point of
+## a column is that it is quicker. Everything scales with its own top speed this way, so
+## cavalry lunges and a shield wall leans into it.
+const ACCELERATION_SECONDS := 3.0
+## The slowest a regiment closes the last few units. Braking alone approaches its target
+## asymptotically and would never actually get there, so the arrival used to be a snap of
+## up to ARRIVE_EPSILON -- a teleport bigger than a stride, right at the moment you are
+## looking at it. A crawl floor lets it walk the last bit in.
+const ARRIVE_CRAWL := 8.0
+## Radians a second, for a WHEEL: a change to the ground the block stands on. Turning
+## right round is not a wheel at all, it is an about-face, and it costs no rotation
+## whatever -- see Regiment.about_face and bodies.gd.
+##
+## It was 3.0, which put 180 degrees at a second: the end file of a 20-wide block swept
+## 209 units in that second, 200 u/s, nearly three times marching pace. The men were
+## flung sideways faster than they could walk.
+## 0.6 and not 0.9: the bar is that the END FILE of a wheeling line must not be carried
+## sideways faster than the men can march, and a 20-file block reaches 66.5 units out, so
+## the ceiling is MOVE_SPEED / 66.5. At 0.9 the sweep came to 60 u/s against a 45 u/s
+## march -- still outrunning them, just less absurdly than the 200 it used to be.
+const TURN_SPEED := 0.6
 ## A regiment locked in melee cannot pivot. Without this a flanked unit simply turns
 ## to face in half a second and the flank becomes a frontal attack before it has cost
 ## anybody anything -- which is precisely what made flanking decorative.
 const ENGAGED_TURN_MULT := 0.15
 const ARRIVE_EPSILON := 4.0
+## How fast two enemy regiments standing inside one another shove apart, world units a
+## second. Contact STOPS a march but has never undone an overlap that already happened,
+## so regiments that ended up merged simply stayed merged -- measured over a whole AI
+## battle, a third of all contact-ticks had a negative gap and the worst was 113 units,
+## most of a frontage. Two armies drawn on top of each other is exactly what "it does not
+## look like they are in contact" looks like, because they are not touching, they are
+## interleaved. Well under MOVE_SPEED so it reads as men shoving, not blocks jumping.
+const SEPARATION_SPEED := 40.0
 ## The space left between two front ranks when they meet. Contact is measured from
 ## the FRONTS of the two formations, not their centres: centre-to-centre meant two
 ## fresh blocks interpenetrated by 35 units on contact and then drifted apart as they
@@ -24,8 +57,13 @@ const CONTACT_GAP := 14.0
 const ROUT_SPEED_MULT := 1.35              # routers run faster than they marched
 
 ## Deployment: how far apart the two lines start, and the gap between regiments.
+##
+## DEPLOY_SPACING is a FRONTAGE plus a shoulder, so it is not free to pick: the widest
+## thing deployed stands (width - 1) * FILE_SPACING across, which at 20 files is 133. At
+## 110 the regiments in a line stood 23 units inside one another, and neighbours that
+## overlap flicker in and out of each other's reach for the whole battle.
 const DEPLOY_SEPARATION := 520.0
-const DEPLOY_SPACING := 110.0
+const DEPLOY_SPACING := 150.0
 ## A battle nobody can win still has to end, or the campaign never resumes.
 const BATTLE_TIME_LIMIT := 420.0
 
@@ -68,27 +106,74 @@ const RUNDOWN_DAMAGE_MULT := 3.0
 ## Resting is slower than tiring on purpose: relief is worth something because it
 ## cannot be done twice in a hurry.
 const STAMINA_DRAIN_FIGHTING := 0.03       # ~33s of melee to exhaust
+## Marching tires too, scaled by the pace actually being kept, so a slow walk costs little
+## and a rout -- at ROUT_SPEED_MULT -- costs more than a march. Crossing the field used to
+## be free, which made a flanking march a decision with no price on it.
+const STAMINA_DRAIN_MARCHING := 0.01       # at full pace; a third of fighting
 const STAMINA_RECOVERY := 0.015            # ~67s standing to recover
-const TIRED_EFFECTIVENESS := 0.45
+
+## What an exhausted regiment is worth, each read the same way: lerp(worst, 1.0, stamina).
+## One idea read four ways. Exhaustion used to reach damage DEALT and nothing else -- not
+## what a tired man suffers, not how fast he walks, and not how soon he breaks.
+const TIRED_EFFECTIVENESS := 0.45          # damage dealt
+const TIRED_VULNERABILITY := 1.35          # damage taken
+const TIRED_PACE := 0.6                    # how fast it can still march
+const TIRED_RESOLVE := 1.5                 # how fast its own morale goes
 
 # --- battle: morale -----------------------------------------------------
-## Frontal shock is deliberately tiny. At 3.0/s a head-on fight broke somebody in
-## under thirty seconds no matter what either player did, which is exactly the
-## mutual collapse that made battles feel wrong. Breaking a formed enemy from the
-## front should take minutes; from the flank, seconds.
+## Frontal shock is deliberately tiny, and it took two goes to get there. At 3.0/s a
+## head-on fight broke somebody inside thirty seconds whatever either player did. At
+## 0.6/s it still broke them at 75s having killed only 31 of 120 men -- 26% casualties
+## for 80% of the morale, so a regiment collapsed while visibly barely scratched.
+##
+## The trouble was two INDEPENDENT full-strength sinks summed together: either the flat
+## drain or the casualty term alone was tuned to break a regiment on its own. The flat
+## one is now a nudge and the casualties carry the frontal fight, which is what makes a
+## head-on tie unable to break itself -- the thing the combat model claims and did not
+## do. Flank and rear are untouched: breaking a formed enemy from the front should take
+## minutes, from the flank seconds.
 const MORALE_MAX := 100.0
 const MORALE_ROUT_THRESHOLD := 20.0
 const MORALE_RALLY_THRESHOLD := 45.0
-const MORALE_DRAIN_FIGHTING := 0.6         # per second while engaged frontally
+const MORALE_DRAIN_FIGHTING := 0.15        # per second while engaged frontally
 const MORALE_DRAIN_FLANKED := 5.0          # per second while engaged from the side
 const MORALE_DRAIN_REAR := 12.0            # per second while engaged from behind
 ## Morale lost for losing the WHOLE regiment, scaled by the fraction actually lost.
 ## Per-man drain would be scale-dependent: a 12-man skirmisher and a 120-man block
 ## would break at wildly different casualty rates, and big blocks would never break
 ## at all — they would die first, which deletes morale as a mechanic.
-## At 200, a regiment routs at roughly 40% losses.
-const MORALE_DRAIN_PER_FRACTION := 120.0
+## At 150, a regiment routs at roughly 41% losses.
+const MORALE_DRAIN_PER_FRACTION := 150.0
 const MORALE_RECOVERY := 4.0               # per second while idle and unengaged
+
+## A general steadies the men who can see him, and taking him out is worth doing.
+## He is not a separate unit: the biggest regiment on each side carries him, so there
+## is nothing to recruit and nothing new on the campaign map.
+## ponytail: biggest-regiment-is-the-general. A real commander unit is the upgrade,
+## and it would only change who gets the flag.
+const GENERAL_RADIUS := 260.0
+const GENERAL_STEADY := 0.7                # morale drain multiplier within his reach
+const GENERAL_RALLY := 2.0                 # extra morale/s for a router within it
+const GENERAL_FALLS := 25.0                # one-off shock to the whole army when he dies
+
+# --- battle: the charge -------------------------------------------------
+## Men at a run hit harder than men already locked in a shoving match, and then it is
+## over. Without this a horse is just fast infantry: cavalry costs more than anything
+## else on the field and had no moment that was its own.
+##
+## The window is short on purpose. It is the difference between a charge that lands and
+## one that is met, which makes WHEN you release cavalry the decision, and it is why the
+## brace flag on square and shield wall is worth the frontage it costs.
+const CHARGE_SECONDS := 3.0
+const CHARGE_MULT := 4.0                   # at the moment of impact, decaying to 1.0
+## What a braced formation takes out of it. Set spears stop a charge dead; that is what
+## they are for.
+const CHARGE_BRACED := 0.25
+
+## Skirmishing: how close something has to get, as a fraction of the shooter's own
+## reach, before it gives ground, and how far it gives at a time.
+const SKIRMISH_TRIGGER := 0.45
+const SKIRMISH_STEP := 160.0
 
 # --- battle: ground -----------------------------------------------------
 ## The battlefield is not a table. A few patches of ground, carried in from the hex the
@@ -129,11 +214,11 @@ const DEFAULT_WIDTH := 12
 ## `range` of 0 means it has nothing to shoot with. `volley` is the men a full-strength
 ## regiment kills with one, `reload` the seconds between them, `ammo` how many it brought.
 const KINDS := {
-	&"spear":   {"strength": 120, "width": 12, "cost": 120, "upkeep": 2, "speed": 1.0,  "requires": &"",         "range": 0.0,   "reload": 0.0, "volley": 0.0,  "ammo": 0},
-	&"sword":   {"strength": 100, "width": 10, "cost": 150, "upkeep": 3, "speed": 1.05, "requires": &"",         "range": 0.0,   "reload": 0.0, "volley": 0.0,  "ammo": 0},
-	&"archer":  {"strength": 80,  "width": 16, "cost": 140, "upkeep": 2, "speed": 1.0,  "requires": &"",         "range": 430.0, "reload": 3.0, "volley": 10.0, "ammo": 14},
-	&"pike":    {"strength": 140, "width": 14, "cost": 220, "upkeep": 4, "speed": 0.85, "requires": &"barracks", "range": 0.0,   "reload": 0.0, "volley": 0.0,  "ammo": 0},
-	&"cavalry": {"strength": 70,  "width": 10, "cost": 280, "upkeep": 5, "speed": 1.75, "requires": &"barracks", "range": 0.0,   "reload": 0.0, "volley": 0.0,  "ammo": 0},
+	&"spear":   {"strength": 120, "width": 20, "cost": 120, "upkeep": 2, "speed": 1.0,  "requires": &"",         "range": 0.0,   "reload": 0.0, "volley": 0.0,  "ammo": 0},
+	&"sword":   {"strength": 100, "width": 20, "cost": 150, "upkeep": 3, "speed": 1.05, "requires": &"",         "range": 0.0,   "reload": 0.0, "volley": 0.0,  "ammo": 0},
+	&"archer":  {"strength": 80,  "width": 20, "cost": 140, "upkeep": 2, "speed": 1.0,  "requires": &"",         "range": 430.0, "reload": 3.0, "volley": 10.0, "ammo": 14},
+	&"pike":    {"strength": 140, "width": 20, "cost": 220, "upkeep": 4, "speed": 0.85, "requires": &"barracks", "range": 0.0,   "reload": 0.0, "volley": 0.0,  "ammo": 0},
+	&"cavalry": {"strength": 70,  "width": 14, "cost": 280, "upkeep": 5, "speed": 1.75, "requires": &"barracks", "range": 0.0,   "reload": 0.0, "volley": 0.0,  "ammo": 0},
 }
 
 # --- shooting -----------------------------------------------------------
@@ -273,6 +358,11 @@ const ARMY_MOVE_POINTS := 3
 ## zero, which made upkeep a number with no teeth: you could field any army you liked
 ## as long as you did not mind the counter reading 0.
 const DESERTION_PER_TURN := 12
+
+## What breaking contact costs an army that quits the field: the men who did not get
+## away. Enough that forfeiting is a decision rather than a free undo, not so much that
+## fighting a lost battle to the end is ever the better option.
+const FORFEIT_STRAGGLERS := 0.15
 
 ## Men a regiment recovers per turn while sitting in one of its own settlements.
 ## Without this the campaign is a one-way decay and the second battle is always

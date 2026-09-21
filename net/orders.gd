@@ -15,8 +15,10 @@ const VERSION := 1
 const MAX_IDS_PER_ORDER := 64          # a box selection, not a whole army list
 const TILE_COUNT := Rules.MAP_W * Rules.MAP_H
 
+## APPEND ONLY. These ints go on the wire and into saved .rpl files, so renumbering
+## them silently reinterprets every recording ever made.
 enum Type { BATTLE_MOVE, ARMY_MOVE, RECRUIT, READY, BUILD, SET_FORMATION, FOCUS, RAZE,
-	RESEARCH, MERGE, SPLIT }
+	RESEARCH, MERGE, SPLIT, FORFEIT, STANCE }
 
 
 # --- encoding -------------------------------------------------------------
@@ -44,6 +46,19 @@ static func build(tile: int, structure: StringName) -> PackedByteArray:
 
 static func raze(army_id: int) -> PackedByteArray:
 	return var_to_bytes([VERSION, Type.RAZE, army_id])
+
+
+## How these regiments behave when left alone: a mask of Regiment.Stance bits.
+static func stance(ids: PackedInt32Array, mask: int) -> PackedByteArray:
+	return var_to_bytes([VERSION, Type.STANCE, ids, mask])
+
+
+## Give up the field. The payload is a confirm flag and carries no owner: which seat
+## forfeited is the sender, which the server takes from the peer id and never from the
+## packet. It also has to carry SOMETHING -- decode() refuses anything shorter than
+## three elements before a type-specific decoder is ever reached.
+static func forfeit(confirm: bool) -> PackedByteArray:
+	return var_to_bytes([VERSION, Type.FORFEIT, confirm])
 
 
 static func research(tech: StringName) -> PackedByteArray:
@@ -108,6 +123,10 @@ static func decode(bytes: PackedByteArray) -> Dictionary:
 			return _decode_merge(d)
 		Type.SPLIT:
 			return _decode_split(d)
+		Type.FORFEIT:
+			return _decode_forfeit(d)
+		Type.STANCE:
+			return _decode_stance(d)
 	return {}
 
 
@@ -157,6 +176,23 @@ static func _decode_ready(d: Array) -> Dictionary:
 	if d.size() != 3 or typeof(d[2]) != TYPE_BOOL:
 		return {}
 	return {"type": Type.READY, "value": d[2]}
+
+
+static func _decode_stance(d: Array) -> Dictionary:
+	if d.size() != 4 or typeof(d[2]) != TYPE_PACKED_INT32_ARRAY or typeof(d[3]) != TYPE_INT:
+		return {}
+	var ids: PackedInt32Array = d[2]
+	if ids.is_empty() or ids.size() > MAX_IDS_PER_ORDER:
+		return {}
+	if d[3] < 0 or d[3] > 3:
+		return {}                          # only the two bits that exist
+	return {"type": Type.STANCE, "ids": ids, "mask": d[3]}
+
+
+static func _decode_forfeit(d: Array) -> Dictionary:
+	if d.size() != 3 or typeof(d[2]) != TYPE_BOOL:
+		return {}
+	return {"type": Type.FORFEIT, "confirm": d[2]}
 
 
 static func _decode_build(d: Array) -> Dictionary:

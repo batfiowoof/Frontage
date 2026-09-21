@@ -50,9 +50,14 @@ func _ready() -> void:
 			_load_path = args[i + 1]
 			_autostart = true
 		elif args[i] == "--ai" and i + 1 < args.size():
+			# BEFORE add_ai(), not after. add_ai() emits players_changed, which runs
+			# _refresh_lobby -> _check_autostart, and that bails while _autostart is still
+			# false. In solo no peer ever connects to fire the signal a second time, so
+			# the flag was set just too late to ever be read and the campaign sat waiting
+			# behind a button. --replay has always got this right, two arms above.
+			_autostart = true
 			for n in int(args[i + 1]):
 				Net.add_ai()
-			_autostart = true
 
 
 ## Deal the campaign as soon as somebody else turns up.

@@ -16,16 +16,44 @@ const Campaign := preload("res://sim/campaign_state.gd")
 const Regiment := preload("res://sim/regiment.gd")
 const Formation := preload("res://sim/formation.gd")
 const Orders := preload("res://net/orders.gd")
+const BattleState := preload("res://sim/battle_state.gd")
 
 ## Where an advancing line aims relative to the enemy centre. It has to clear the
 ## enemy's own half-depth or the order points inside the enemy block, which now means
 ## marching past the front rank it was supposed to stop against.
 const STANDOFF := 120.0
-const LINE_SPACING := 110.0
+## The gap between two regiments in the AI's own line. This is a FRONTAGE plus a
+## shoulder, not a free number: a 20-file regiment stands 133 units across, so at the old
+## 110 the AI ordered its own line to stand INSIDE ITSELF and arrived as a clump instead
+## of a line. Same trap as DEPLOY_SPACING.
+const LINE_SPACING := 150.0
+## How far past the end of the enemy line the wings try to reach. Enough to clear their
+## flank by half a frontage -- NOT enough to double the line, which is what it used to do.
+##
+## A line no wider than the one it is walking at can only ever meet it head-on, so some
+## overhang is the whole of the envelopment. But stretching EVERY slot to get it spread
+## three regiments over 883 units where the enemy held 583, left 242 units of open ground
+## between neighbours, and was not a line at all: three detachments walking past the enemy
+## in parallel. Only the outermost regiment on each side reaches out now, and never by
+## more than one LINE_SPACING, so the formation stretches at its ends instead of coming
+## apart in its middle.
+const OVERHANG := 90.0
 ## How far round the enemy a cavalry sweep goes before turning in.
 const SWEEP_WIDE := 420.0
 const SWEEP_DEPTH := 260.0
 const SWEEP_ARRIVED := 90.0
+## Envelopment. How far OUTSIDE a pinned enemy's flank a wrapping regiment aims, past
+## what the two of them physically occupy, and how close it has to get before it commits.
+## Added to reach() rather than being a constant on its own, so it keeps meaning "outside
+## his flank" when frontages change instead of quietly becoming "into his front".
+const WRAP_MARGIN := 120.0
+const WRAP_ARRIVED := 80.0
+## How far back toward our OWN side the flank waypoint sits. The regiment starts behind
+## our line, so a point level with the enemy's flank is reached by cutting the corner --
+## straight through the fighting it was supposed to go round, clipping in and out of
+## contact the whole way. Pulled back, the walk stays on our side and only the final
+## turn-in, which the sim does, crosses the line at all.
+const WRAP_BACK := 170.0
 ## Close enough that a regiment should stop dressing its line and just go and hit
 ## somebody. Without this the last few regiments stand in their slots a hundred
 ## units to the side of the only remaining enemy, politely not joining in.
@@ -33,6 +61,23 @@ const ENGAGE_RANGE := 320.0
 
 ## How close a horseman has to be before the foot forms square.
 const HORSE_ALARM := 430.0
+
+## How far back a withdrawing regiment steps at a time. Re-issued when it arrives and
+## not before, for the same reason the archers stop re-ordering: a unit re-told every
+## frame to go somewhere never gets there.
+const WITHDRAW_STEP := 300.0
+
+## When to stop fighting altogether. An army being taken apart should save what is left
+## rather than feed the rest of it in, and an AI with no way to quit simply grinds every
+## lost battle to BATTLE_TIME_LIMIT -- four hundred and twenty seconds of a fight that
+## was decided in the first sixty.
+##
+## Both conditions, not either. Being outnumbered is not the same as being beaten: a
+## smaller army that is still formed can hold, and quitting on the count alone would
+## make the AI resign fights it was winning on ground it had chosen. Men already running
+## is the evidence the line has actually gone.
+const GIVE_UP_RATIO := 0.45        # our standing men against theirs
+const GIVE_UP_BROKEN := 0.34       # ...and this much of us already routing
 
 ## What it reaches for first. Cheap things early, and it alternates trees rather than
 ## emptying one, because a pool shared between them is the whole point.
@@ -47,6 +92,16 @@ const BUILD_ORDER := [&"walls", &"farm", &"barracks", &"library", &"market", &"m
 var seat := 0
 var _acted_on_turn := -1
 var _sweep_to := {}                # regiment id -> latched waypoint, or null once past it
+var _wrap_to := {}                 # regiment id -> latched flank waypoint, erased on arrival
+
+## What Jev thinks, when there is a Jev. Plain data, written from outside by net/jev.gd
+## and only ever READ in here -- no preload, no Node, nothing on the wire, so this file
+## stays the pure RefCounted it has to be. Every key is a preference among options this
+## file had already found to be legal, so an empty dictionary is not a broken AI, it is
+## the AI as it was before Jev existed. Each reader below tries the advised value once
+## and then falls into the same loop it always ran, which is what makes bad advice,
+## stale advice and no advice all cost exactly nothing.
+var advice := {}
 
 
 func _init(owner_id: int) -> void:
@@ -82,10 +137,14 @@ func campaign_orders(cs) -> Array:
 ## does put things on the map where they can be come for.
 func _build_something(cs, out: Array) -> void:
 	var purse := int(cs.gold.get(seat, 0))
+	var wanted: Array = BUILD_ORDER
+	var advised = advice.get("build")
+	if advised != null and Rules.STRUCTURES.has(advised):
+		wanted = [advised] + BUILD_ORDER    # tried first, then the old order behind it
 	for s: Dictionary in cs.settlements:
 		if s["owner"] != seat:
 			continue
-		for name: StringName in BUILD_ORDER:
+		for name: StringName in wanted:
 			if int(Rules.STRUCTURES[name]["cost"]) > purse:
 				continue
 			for tile in cs.structures.size():
@@ -98,6 +157,12 @@ func _build_something(cs, out: Array) -> void:
 
 ## One tech a turn at most, the first in its order it can actually pay for.
 func _learn_something(cs, out: Array) -> void:
+	# can_learn is the gate, not the advice. Something it cannot afford or has not the
+	# prerequisites for falls through to the list, exactly as if nobody had asked.
+	var advised = advice.get("tech")
+	if advised != null and cs.can_learn(seat, advised):
+		out.append(Orders.research(advised))
+		return
 	for name: StringName in TECH_ORDER:
 		if cs.can_learn(seat, name):
 			out.append(Orders.research(name))
@@ -179,6 +244,13 @@ func _nearest_prize(cs) -> int:
 			break
 	if home < 0:
 		return -1
+	# A named settlement wins if it is still somebody else's. Distance alone rates a
+	# defended capital and an empty village the same, which is the one judgement here
+	# most worth handing over.
+	var advised := int(str(advice.get("target", "-1")))
+	for s: Dictionary in cs.settlements:
+		if int(s["tile"]) == advised and s["owner"] != seat:
+			return advised
 	var best := -1
 	var best_distance := 1 << 30
 	for s: Dictionary in cs.settlements:
@@ -220,6 +292,11 @@ func battle_orders(bs) -> Array:
 	if mine.is_empty() or foes.is_empty():
 		return []
 
+	# Checked before anything else is ordered: there is no point dressing a line that is
+	# about to walk off the field. One order, and the battle is over.
+	if _beaten(mine, foes):
+		return [Orders.forfeit(true)]
+
 	var enemy_centre := _centre(foes)
 	var my_centre := _centre(mine)
 	var approach := (enemy_centre - my_centre)
@@ -229,12 +306,53 @@ func battle_orders(bs) -> Array:
 	var across := Vector2(-approach.y, approach.x)
 
 	var out := []
+	var posture := StringName(str(advice.get("posture", &"commit")))
+
+	# Withdrawing is an order, not the absence of one. The sim stops a march INTO the
+	# enemy and not one away from it, so this genuinely breaks contact -- and the horses
+	# have to be called off with everyone else, or they go on riding round a fight that
+	# is no longer happening. Re-issued only once a regiment has arrived or been caught,
+	# never while it is already walking back.
+	# Latches are keyed by regiment id and this object outlives the battle, so without a
+	# prune a dead regiment's waypoint persists -- and worse, ids from the LAST battle
+	# silence a regiment in this one before it has moved.
+	var alive := {}
+	for r: Regiment in mine:
+		alive[r.id] = true
+	for id in _sweep_to.keys():
+		if not alive.has(id):
+			_sweep_to.erase(id)
+	for id in _wrap_to.keys():
+		if not alive.has(id):
+			_wrap_to.erase(id)
+
+	if posture == &"withdraw":
+		_sweep_to.clear()
+		_wrap_to.clear()
+		for r: Regiment in mine:
+			if r.state == Regiment.State.ROUTING or r.state == Regiment.State.MOVING:
+				continue
+			out.append(Orders.battle_move(PackedInt32Array([r.id]),
+				r.pos - approach * WITHDRAW_STEP, approach.angle()))
+		return out
+
+	# Has anybody actually met? Until then everything forms a line and walks, exactly as
+	# before. Envelopment is an answer to a fight that exists, not an opening move.
+	var locked := false
+	for r: Regiment in mine:
+		if r.state == Regiment.State.FIGHTING:
+			locked = true
+			break
+
 	var foot := []
 	for r: Regiment in mine:
 		if r.can_shoot():
 			continue                       # handled by _stand_off
-		if float(Rules.KINDS[r.kind]["speed"]) >= 1.4:
-			_sweep(r, out, enemy_centre, approach, across)
+		if float(Rules.KINDS[r.kind]["speed"]) >= Rules.CAVALRY_SPEED:
+			_sweep(r, out, my_centre, enemy_centre, approach, across)
+		elif locked and posture == &"commit" \
+				and _wrap(r, foes, out, my_centre, enemy_centre, approach, across):
+			pass                           # going round; it must not also get a line slot
 		else:
 			foot.append(r)
 
@@ -248,6 +366,12 @@ func battle_orders(bs) -> Array:
 
 	# Everything slow forms one line and walks at them -- unless somebody is already
 	# within reach, in which case it goes and fights instead of dressing ranks.
+	#
+	# The line is laid out to OVERLAP theirs at the ends, which is where the envelopment
+	# comes from. Spaced by a flat constant it was 110 units per regiment against their
+	# 150, so it was always the NARROWER line: its ends were the ones being lapped round,
+	# and no regiment ever found itself past a flank with nobody in front of it.
+	var reach_out := _half_span(foes, enemy_centre, across) + OVERHANG
 	for i in foot.size():
 		var r: Regiment = foot[i]
 		if r.state != Regiment.State.IDLE and r.state != Regiment.State.MOVING:
@@ -255,12 +379,32 @@ func battle_orders(bs) -> Array:
 		var near = _nearest(r, foes)
 		var target: Vector2
 		var face: float
-		if near != null and r.pos.distance_to(near.pos) < ENGAGE_RANGE:
+		# Holding keeps the standoff line so the archers can work -- nobody looses on the
+		# move or in a melee, so closing is what ends the shooting. Skipping this one
+		# branch is the whole difference between holding and committing.
+		if posture != &"hold" and near != null and r.pos.distance_to(near.pos) < ENGAGE_RANGE:
 			target = near.pos
 			face = (near.pos - r.pos).angle()
 		else:
-			target = enemy_centre + across * (float(i) - float(foot.size() - 1) * 0.5) * LINE_SPACING
-			target -= approach * STANDOFF
+			# Everyone keeps the line's own spacing; only the outermost regiment on each
+			# side is pushed out past the end of theirs, and never by more than one more
+			# spacing. It scales itself: with three regiments the wings reach as far as
+			# that allows, and with five the line already overhangs so they barely move.
+			var slot := (float(i) - float(foot.size() - 1) * 0.5) * LINE_SPACING
+			if foot.size() >= 3 and (i == 0 or i == foot.size() - 1):
+				# Stretch out toward their flank, but never far enough to leave more than
+				# one regiment's own width of open ground beside it. That is the line
+				# between a line with horns and a set of separate columns, and it is the
+				# rule the last attempt had no expression of at all.
+				var span := Formation.frontage(r.max_strength, r.width, r.spacing()) * 2.0
+				var most := maxf(0.0, span * 2.0 - LINE_SPACING)
+				slot += signf(slot) * clampf(reach_out - absf(slot), 0.0, most)
+			target = enemy_centre + across * slot - approach * STANDOFF
+			# A regiment walking at the enemy FACES the enemy. Aiming each slot at the
+			# enemy centre instead turned the wings 72 degrees off the advance -- walking
+			# in with their own flanks presented, which is the one thing the whole combat
+			# model says not to do. Turning in is what _wrap is for, after contact, with a
+			# latched waypoint and a focus order.
 			face = approach.angle()
 		if r.pos.distance_to(target) > 20.0:
 			out.append(Orders.battle_move(PackedInt32Array([r.id]), target, face))
@@ -303,6 +447,25 @@ func _mind_the_cavalry(mine: Array, foes: Array, out: Array) -> void:
 			out.append(Orders.set_formation(PackedInt32Array([r.id]), wanted, 0))
 
 
+## Is this beaten rather than merely losing? `mine` carries our routers, `foes` does not
+## carry theirs, so both counts are of men still willing to fight.
+static func _beaten(mine: Array, foes: Array) -> bool:
+	var ours := 0
+	var theirs := 0
+	var broken := 0
+	for r: Regiment in mine:
+		if r.state == Regiment.State.ROUTING:
+			broken += 1
+		else:
+			ours += r.strength
+	for r: Regiment in foes:
+		theirs += r.strength
+	if theirs <= 0:
+		return false
+	return float(ours) < float(theirs) * GIVE_UP_RATIO \
+		and float(broken) / float(mine.size()) >= GIVE_UP_BROKEN
+
+
 static func _nearest(r: Regiment, others: Array):
 	var best = null
 	var best_distance := INF
@@ -320,12 +483,12 @@ static func _nearest(r: Regiment, others: Array):
 ## The waypoint is LATCHED the first time. Recomputing it each second from a moving
 ## enemy centre had the horse chasing a point that receded as fast as it rode, so it
 ## circled the battle forever and the battle never ended.
-func _sweep(r: Regiment, out: Array, enemy_centre: Vector2, approach: Vector2, across: Vector2) -> void:
+func _sweep(r: Regiment, out: Array, my_centre: Vector2, enemy_centre: Vector2, approach: Vector2, across: Vector2) -> void:
 	if r.state == Regiment.State.FIGHTING or r.state == Regiment.State.ROUTING:
 		return
 
 	if not _sweep_to.has(r.id):
-		var side: float = 1.0 if r.pos.dot(across) >= 0.0 else -1.0
+		var side := _side_of_the_line(r, my_centre, across)
 		_sweep_to[r.id] = enemy_centre + across * SWEEP_WIDE * side - approach * SWEEP_DEPTH * 0.2
 
 	var waypoint = _sweep_to[r.id]
@@ -338,6 +501,116 @@ func _sweep(r: Regiment, out: Array, enemy_centre: Vector2, approach: Vector2, a
 
 	var behind: Vector2 = enemy_centre + approach * SWEEP_DEPTH
 	out.append(Orders.battle_move(PackedInt32Array([r.id]), behind, (enemy_centre - behind).angle()))
+
+
+## Which wing of OUR OWN line this regiment stands on, +1 or -1.
+##
+## Measured from our centre. `_sweep` used to measure from the world ORIGIN, so two
+## horsemen both on the left of our line but right of the map's middle both swung the
+## same way and the other flank was never touched.
+static func _side_of_the_line(r: Regiment, my_centre: Vector2, across: Vector2) -> float:
+	return 1.0 if (r.pos - my_centre).dot(across) >= 0.0 else -1.0
+
+
+## Go round the end of the line rather than queueing up behind it. Returns true if this
+## regiment is enveloping, so the caller leaves it out of the line.
+##
+## Three stages, and the last one is the trick. A flank position is by definition a point
+## computed from a MOVING enemy, which is the shape of bug that has already eaten the
+## archers, the cavalry sweep and the withdrawal step: re-issue it every think and the
+## regiment creeps after a receding point and never arrives. So the outward leg is
+## LATCHED, and the moment it lands the regiment is handed to the sim instead --
+## `Orders.focus` means "deal with that one", and BattleState._pursue keeps the target
+## current every tick, closing from whichever side the regiment is standing on, without
+## anybody issuing another order at all.
+func _wrap(r: Regiment, foes: Array, out: Array, my_centre: Vector2, enemy_centre: Vector2, approach: Vector2, across: Vector2) -> bool:
+	if r.state == Regiment.State.ROUTING:
+		_wrap_to.erase(r.id)
+		return false
+
+	# It has found somebody. That was the entire point, so the manoeuvre is OVER: mark it
+	# done, name the man it ran into so the sim keeps it on him, and never speak to it
+	# again. Without this the regiment kept its now-stale waypoint, and the moment the
+	# melee let go of it for a tick it was ordered back out to a patch of grass the enemy
+	# had long since left -- in and out of contact, twice a second, all battle.
+	if r.state == Regiment.State.FIGHTING or r.engaged_with != -1:
+		if _wrap_to.get(r.id) != null:
+			_wrap_to[r.id] = null
+			if r.engaged_with != -1 and r.focus != r.engaged_with:
+				out.append(Orders.focus(PackedInt32Array([r.id]), r.engaged_with))
+		return false
+	if _wrap_to.has(r.id) and _wrap_to[r.id] == null:
+		return false                       # already had its go; it is line infantry now
+
+	# Already committed: the sim is walking it in, and re-ordering would only reset it to
+	# MOVING at a point it has since left. Say nothing, and stay out of the line.
+	#
+	# If the man it named is gone from `foes` -- dead, or broken and running -- fall
+	# through and pick another. Nothing is cleared here: this file emits ORDERS and never
+	# touches sim state, and the focus order below overwrites it anyway.
+	if _marked(r, foes):
+		return true
+
+	var side := _side_of_the_line(r, my_centre, across)
+	var mark = _outermost(foes, enemy_centre, across, side)
+	if mark == null:
+		return false
+
+	if not _wrap_to.has(r.id):
+		# Outside his flank, not into his front: half his FRONTAGE plus half our depth,
+		# and then enough margin that the approach is unmistakably round the end.
+		var clear := BattleState.reach(mark, BattleState.Exposure.FLANK) \
+			+ BattleState.reach(r, BattleState.Exposure.FRONT) + WRAP_MARGIN
+		_wrap_to[r.id] = mark.pos + across * side * clear - approach * WRAP_BACK
+
+	var waypoint: Vector2 = _wrap_to[r.id]
+	if r.pos.distance_to(waypoint) > WRAP_ARRIVED:
+		out.append(Orders.battle_move(PackedInt32Array([r.id]), waypoint,
+			(mark.pos - r.pos).angle()))
+		return true
+
+	# Round the end. Hand it to the sim and stop talking to it.
+	_wrap_to.erase(r.id)
+	out.append(Orders.focus(PackedInt32Array([r.id]), mark.id))
+	return true
+
+
+## Has this regiment been told to deal with somebody who is still on the field? If so the
+## sim is steering it every tick and nothing here should say another word to it.
+static func _marked(r: Regiment, foes: Array) -> bool:
+	if r.focus < 0:
+		return false
+	for f: Regiment in foes:
+		if f.id == r.focus:
+			return true
+	return false                           # dead, or broken and running
+
+
+## The enemy furthest out on this side of the field, preferring one that is already
+## pinned: a regiment somebody else is holding by the nose cannot turn to meet you, which
+## is the entire reason for going round.
+static func _outermost(foes: Array, enemy_centre: Vector2, across: Vector2, side: float):
+	var best = null
+	var best_along := -INF
+	var best_pinned := false
+	for f: Regiment in foes:
+		var along := (f.pos - enemy_centre).dot(across) * side
+		var pinned: bool = f.engaged_with != -1
+		if best == null or (pinned and not best_pinned) \
+				or (pinned == best_pinned and along > best_along):
+			best = f
+			best_along = along
+			best_pinned = pinned
+	return best
+
+
+## How far the outermost of these reaches from their own centre, across the line of
+## approach. Half the width of the formation we are walking at.
+static func _half_span(regiments: Array, centre: Vector2, across: Vector2) -> float:
+	var out := 0.0
+	for r: Regiment in regiments:
+		out = maxf(out, absf((r.pos - centre).dot(across)))
+	return out
 
 
 static func _centre(regiments: Array) -> Vector2:

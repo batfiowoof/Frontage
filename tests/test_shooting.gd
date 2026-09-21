@@ -119,8 +119,12 @@ func test_archers_in_a_melee_stop_shooting(t) -> void:
 	var bs = BattleState.new()
 	var bows = bs.add(1, &"archer", Vector2.ZERO, 0.0)
 	var far_mark = bs.add(2, &"spear", Vector2(bows.range_of() * 0.5, 0), PI)
-	# ...and somebody in their faces.
-	bs.add(2, &"sword", Vector2(70, 0), PI)
+	# ...and somebody in their faces. Front rank to front rank, not a fixed number: an
+	# archer that stands wider stands shallower and reaches less far forward.
+	var brawler = bs.add(2, &"sword", Vector2.ZERO, PI)
+	var apart := BattleState.contact_distance(bows, brawler, Rules.CONTACT_GAP * 0.5)
+	brawler.pos = Vector2(apart, 0)
+	brawler.target = brawler.pos
 	_run(bs, 8.0)
 	t.eq(bows.ammo, int(Rules.KINDS[&"archer"]["ammo"]),
 		"both hands are busy")

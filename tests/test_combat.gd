@@ -8,13 +8,30 @@ const Rules := preload("res://sim/rules.gd")
 const Formation := preload("res://sim/formation.gd")
 
 
-## Centres 91 apart is fronts about ten units apart -- two blocks that have just
-## met, rather than two blocks standing inside each other.
-func _facing_each_other(gap := 91.0) -> Array:
+## Two blocks that have just met, rather than two blocks standing inside each other.
+##
+## The centre distance CANNOT be a constant here, which is what it used to be. Contact is
+## front rank to front rank, so a wider regiment is a shallower one and reaches less far
+## forward: the 91 units that locked two 10-deep spear blocks together leaves two 6-deep
+## ones with 46 units of open ground between them, and every fight in this file quietly
+## became two regiments staring at each other. Ask for the distance instead.
+## Pass a gap explicitly only to place them deliberately out of reach.
+func _facing_each_other(gap := -1.0) -> Array:
 	var bs = BattleState.new()
-	var a = bs.add(1, &"spear", Vector2(-gap * 0.5, 0), 0.0)       # faces +X, at the enemy
-	var b = bs.add(2, &"spear", Vector2(gap * 0.5, 0), PI)         # faces -X, at the enemy
+	var a = bs.add(1, &"spear", Vector2.ZERO, 0.0)                 # faces +X, at the enemy
+	var b = bs.add(2, &"spear", Vector2.ZERO, PI)                  # faces -X, at the enemy
+	if gap < 0.0:
+		gap = BattleState.contact_distance(a, b, Rules.CONTACT_GAP * 0.5)
+	_stand(a, Vector2(-gap * 0.5, 0))
+	_stand(b, Vector2(gap * 0.5, 0))
 	return [bs, a, b]
+
+
+## Put a regiment somewhere and leave it there. `target` comes from `pos` in
+## Regiment.make, so moving one without the other orders it to march back.
+func _stand(r, at: Vector2) -> void:
+	r.pos = at
+	r.target = at
 
 
 func _run(bs, ticks: int) -> void:
@@ -98,7 +115,7 @@ func test_a_regiment_worn_below_its_frontage_hits_less_hard(t) -> void:
 	var losses_to_full: int = full[1].max_strength - full[1].strength
 
 	var remnant := _facing_each_other()
-	remnant[2].strength = 3                       # width is 12
+	remnant[2].strength = 3                       # far fewer men than it has files
 	_run(remnant[0], Rules.TICK_HZ * 20)
 	var losses_to_remnant: int = remnant[1].max_strength - remnant[1].strength
 	t.ok(losses_to_remnant < losses_to_full,
@@ -119,15 +136,21 @@ func test_exposure_is_measured_from_the_defenders_facing(t) -> void:
 
 
 func test_being_hit_in_the_rear_hurts_more_than_being_hit_in_the_front(t) -> void:
+	# Six seconds, not one. A shallower regiment turns fewer ranks toward a rear attack
+	# than a deep one does, so the gap in MEN is narrower than it used to be and a
+	# one-second window cannot resolve it at whole casualties -- both sides read 1.
+	# The gap in NERVE is as wide as ever, which is the mechanism that matters.
 	var front := _facing_each_other()
-	_run(front[0], Rules.TICK_HZ)
+	_run(front[0], Rules.TICK_HZ * 6)
 	var frontal_losses: int = front[1].max_strength - front[1].strength
 	var frontal_morale: float = front[1].morale
 
 	var bs = BattleState.new()
 	var victim = bs.add(1, &"spear", Vector2.ZERO, 0.0)              # facing +X
-	bs.add(2, &"spear", Vector2(-25, 0), 0.0)                        # hitting its back
-	_run(bs, Rules.TICK_HZ)
+	var behind = bs.add(2, &"spear", Vector2.ZERO, 0.0)              # hitting its back
+	_stand(behind, Vector2(-(BattleState.reach(victim, BattleState.Exposure.REAR)
+		+ BattleState.reach(behind, BattleState.Exposure.FRONT) + Rules.CONTACT_GAP * 0.5), 0))
+	_run(bs, Rules.TICK_HZ * 6)
 	var rear_losses: int = victim.max_strength - victim.strength
 
 	t.ok(rear_losses > frontal_losses,
@@ -141,8 +164,14 @@ func test_being_hit_in_the_rear_hurts_more_than_being_hit_in_the_front(t) -> voi
 func _pinned_and_flanked() -> Array:
 	var bs = BattleState.new()
 	var victim = bs.add(1, &"spear", Vector2.ZERO, 0.0)              # facing +X
-	bs.add(2, &"spear", Vector2(85, 0), PI)                          # pins its front
-	var flanker = bs.add(2, &"spear", Vector2(0, -75), PI / 2)       # hits its side
+	var pin = bs.add(2, &"spear", Vector2.ZERO, PI)                  # pins its front
+	var flanker = bs.add(2, &"spear", Vector2.ZERO, PI / 2)          # hits its side
+	# Front-on to the victim's front, but front-on to its FLANK for the flanker: the
+	# victim reaches half its frontage sideways and half its depth forward, and those are
+	# different numbers, so the two are not placed at the same distance.
+	_stand(pin, Vector2(BattleState.contact_distance(victim, pin, Rules.CONTACT_GAP * 0.5), 0))
+	_stand(flanker, Vector2(0, -(BattleState.reach(victim, BattleState.Exposure.FLANK)
+		+ BattleState.reach(flanker, BattleState.Exposure.FRONT) + Rules.CONTACT_GAP * 0.5)))
 	return [bs, victim, flanker]
 
 
@@ -198,8 +227,12 @@ func test_a_flank_kills_several_times_faster(t) -> void:
 	_run(flank[0], Rules.TICK_HZ * 8)
 	var frontal: int = front[1].max_strength - front[1].strength
 	var flanked: int = flank[1].max_strength - flank[1].strength
-	t.ok(flanked > frontal * 2,
-		"a flank must be worth manoeuvring for (%d dead vs %d in 8s)" % [flanked, frontal])
+	# 1.8 and not 2.0: at whole casualties over eight seconds the ratio lands on 17-to-8
+	# or 18-to-9 depending on where the rounding falls, so a bar of exactly twice was
+	# passing on luck rather than on the model.
+	t.ok(float(flanked) > float(frontal) * 1.8,
+		"a flank must be worth manoeuvring for (%d dead vs %d in 8s, %.1fx)" % [
+			flanked, frontal, float(flanked) / maxf(1.0, float(frontal))])
 	print("  [feel] 8s of fighting: %d lost frontally, %d lost pinned+flanked" % [frontal, flanked])
 
 
@@ -255,9 +288,13 @@ func test_an_even_fight_locks_instead_of_collapsing(t) -> void:
 	# The headline change. Two identical regiments head-on used to wipe each other out
 	# in under half a minute; now neither can break the other, and the fight has to be
 	# decided by something the player does.
+	# Forty seconds, not sixty. Exhaustion now makes a spent regiment easier to kill
+	# (TIRED_VULNERABILITY) as well as slower to swing, so the tie breaks at about 53s
+	# where it used to run to 68s. Measured: with the tired-morale term switched off
+	# entirely it still breaks at 55s, so it is the casualties doing this, not the nerve.
 	var s := _facing_each_other()
-	_run(s[0], Rules.TICK_HZ * 60)
-	t.ok(not s[0].is_over(), "a head-on tie must still be a tie after a minute")
+	_run(s[0], Rules.TICK_HZ * 40)
+	t.ok(not s[0].is_over(), "a head-on tie is still a tie well after both sides are spent")
 	t.ok(s[1].strength > s[1].max_strength / 2, "and both sides must still be armies")
 	t.eq(s[1].strength, s[2].strength, "taking identical losses, as they should")
 	print("  [feel] 60s head-on: %d/%d men left, morale %.0f, stamina %.2f" % [
@@ -351,7 +388,10 @@ func test_stamina_drains_in_melee_and_recovers_at_rest(t) -> void:
 	t.ok(tired < 1.0, "ten seconds of melee should tell")
 	t.near(tired, 1.0 - Rules.STAMINA_DRAIN_FIGHTING * 10.0, 0.02)
 
-	s[1].order_move(Vector2(-3000, 0), PI)        # pull it out of the line
+	# A SHORT step back, not a route march. Marching tires a regiment now, so ordering it
+	# three thousand units away had it running for over a minute and arriving worse off
+	# than it left -- which is true, and not what this test is about.
+	s[1].order_move(Vector2(-260, 0), PI)         # pull it out of the line
 	_run(s[0], Rules.TICK_HZ * 4)
 	t.eq(s[1].state, Regiment.State.MOVING, "a withdrawal order must survive contact")
 	_run(s[0], Rules.TICK_HZ * 90)
@@ -521,9 +561,14 @@ func test_a_wood_slows_men_down_and_hides_them(t) -> void:
 func test_high_ground_hits_harder(t) -> void:
 	var low := _facing_each_other()
 	var high = BattleState.new()
-	var uphill = high.add(1, &"spear", Vector2(-45, 0), 0.0)
-	var downhill = high.add(2, &"spear", Vector2(45, 0), PI)
-	high.features = [[Rules.GROUND_HILL, -45.0, 0.0, 120.0]]   # only the first one stands on it
+	var uphill = high.add(1, &"spear", Vector2.ZERO, 0.0)
+	var downhill = high.add(2, &"spear", Vector2.ZERO, PI)
+	var apart := BattleState.contact_distance(uphill, downhill, Rules.CONTACT_GAP * 0.5)
+	_stand(uphill, Vector2(-apart * 0.5, 0))
+	_stand(downhill, Vector2(apart * 0.5, 0))
+	# Centred on the uphill regiment and too small to reach the other one, so only the
+	# first one stands on it -- which is the whole comparison.
+	high.features = [[Rules.GROUND_HILL, -apart * 0.5, 0.0, apart * 0.45]]
 
 	_run(low[0], 20)
 	for i in Rules.TICK_HZ * 20:
@@ -553,3 +598,94 @@ func test_wooded_country_gives_a_woodier_field(t) -> void:
 		"a battle in the woods should be fought among more of them")
 	for f: Array in wood.features:
 		t.eq(int(f[0]), Rules.GROUND_WOOD)
+
+
+# --- exhaustion reaches the rest of the model -------------------------------
+
+func test_marching_tires_a_regiment_and_standing_rests_it(t) -> void:
+	# Crossing the field used to be free, which put no price at all on a flanking march.
+	var bs = BattleState.new()
+	var r = bs.add(1, &"spear", Vector2.ZERO, 0.0)
+	r.order_move(Vector2(100000, 0), 0.0)
+	_run(bs, Rules.TICK_HZ * 30)
+	var marched: float = r.stamina
+	t.ok(marched < 1.0, "thirty seconds of marching should tell (%.2f)" % marched)
+
+	r.order_move(r.pos, 0.0)
+	_run(bs, Rules.TICK_HZ * 40)
+	t.ok(r.stamina > marched, "and standing gets it back (%.2f)" % r.stamina)
+
+
+func test_a_rout_tires_faster_than_a_march(t) -> void:
+	# Scaled by the pace actually kept, so running costs more than walking.
+	var bs = BattleState.new()
+	var marcher = bs.add(1, &"spear", Vector2(0, -900), 0.0)
+	var router = bs.add(2, &"spear", Vector2(0, 900), PI)
+	marcher.order_move(Vector2(100000, -900), 0.0)
+	router.shock(Rules.MORALE_MAX)
+	# Eight seconds, and sampled while it is still running. A router recovers morale at
+	# MORALE_RECOVERY once it is clear, so given twenty-five it rallies, goes IDLE and
+	# rests all the way back to full -- which measures the rally, not the running.
+	_run(bs, Rules.TICK_HZ * 8)
+	t.eq(router.state, Regiment.State.ROUTING, "it is still running at this point")
+	t.ok(router.stamina < marcher.stamina,
+		"running is harder work than marching (%.3f against %.3f)" % [
+			router.stamina, marcher.stamina])
+
+
+func test_a_spent_regiment_is_worse_in_every_way(t) -> void:
+	var fresh = Regiment.make(1, 1, &"spear", Vector2.ZERO)
+	var spent = Regiment.make(2, 1, &"spear", Vector2.ZERO)
+	spent.stamina = 0.0
+	t.ok(spent.readiness() < fresh.readiness(), "it hits softer")
+	t.ok(spent.vulnerability() > fresh.vulnerability(), "it is easier to kill")
+	t.ok(spent.legs() < fresh.legs(), "it cannot keep up")
+	t.ok(spent.nerve() > fresh.nerve(), "and it breaks sooner")
+	t.near(fresh.vulnerability(), 1.0, 0.001, "a fresh one is the baseline for all of them")
+	t.near(fresh.legs(), 1.0, 0.001)
+	t.near(fresh.nerve(), 1.0, 0.001)
+
+
+func test_an_exhausted_regiment_marches_slower(t) -> void:
+	var bs = BattleState.new()
+	var fit = bs.add(1, &"spear", Vector2(0, -900), 0.0)
+	var spent = bs.add(2, &"spear", Vector2(0, 900), 0.0)
+	fit.order_move(Vector2(100000, -900), 0.0)
+	spent.order_move(Vector2(100000, 900), 0.0)
+	for i in Rules.TICK_HZ * 10:
+		spent.stamina = 0.0                # hold it on its knees
+		bs.step()
+	t.ok(spent.pos.x < fit.pos.x * 0.8,
+		"a spent regiment falls behind a fresh one (%.0f against %.0f)" % [
+			spent.pos.x, fit.pos.x])
+
+
+# --- turning -----------------------------------------------------------------
+
+func test_a_wheel_never_outruns_the_men(t) -> void:
+	# The number this whole change turns on. At the old TURN_SPEED a 20-wide block
+	# wheeling put its end file through 209 units in a second -- 200 u/s, three times
+	# marching pace. Men cannot be flung sideways faster than they can walk.
+	var r = Regiment.make(1, 1, &"spear", Vector2.ZERO)
+	var half := Formation.frontage(r.max_strength, r.width, r.spacing())
+	var quarter_turn := (PI * 0.5) / (Rules.TURN_SPEED * float(r.form()["turn"]))
+	var sweep := half * (PI * 0.5) / quarter_turn
+	t.ok(sweep < Rules.MOVE_SPEED,
+		"the end file sweeps at %.0f u/s, slower than the %.0f they march" % [
+			sweep, Rules.MOVE_SPEED])
+
+
+func test_a_regiment_in_contact_may_not_turn_about(t) -> void:
+	# Load-bearing. A regiment taken in the rear that could flip to face its attacker
+	# would delete the flank-and-rear mechanic outright: it has to wheel round slowly and
+	# eat the rear attack while it does.
+	var bs = BattleState.new()
+	var victim = bs.add(1, &"spear", Vector2.ZERO, 0.0)          # facing +X
+	var behind = bs.add(2, &"spear", Vector2.ZERO, 0.0)          # coming from -X
+	_stand(behind, Vector2(-(BattleState.reach(victim, BattleState.Exposure.REAR)
+		+ BattleState.reach(behind, BattleState.Exposure.FRONT) + Rules.CONTACT_GAP * 0.5), 0))
+	_run(bs, Rules.TICK_HZ * 3)
+	t.eq(BattleState.exposure_of(victim, behind), BattleState.Exposure.REAR,
+		"it is still being taken in the rear three seconds later")
+	t.ok(absf(angle_difference(victim.facing, 0.0)) < deg_to_rad(60.0),
+		"it has not flipped round to face him (%.0f deg)" % rad_to_deg(victim.facing))

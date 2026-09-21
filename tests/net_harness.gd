@@ -198,6 +198,36 @@ func _check_orders_landed(bs) -> void:
 		_fail("only %d snapshots arrived" % snapshots)
 	if not moved:
 		_fail("nothing ever moved: the server is not simulating, or not transmitting")
+	_check_i_know_who_is_playing(bs)
+
+
+## A client has to be told the ROSTER, and nothing used to tell it.
+##
+## `players` was written only on the server, `join()` never filled it and no rpc carried
+## it, so a joined client's player_ids() was empty for the whole session. Four view call
+## sites take that array as the seating and Colors.of_owner() returns NEUTRAL for an id it
+## cannot find in it -- so on the client BOTH ARMIES DREW THE SAME GREY, along with the
+## strength bars and every settlement and army on the campaign map. Nothing failed, no
+## warning was pushed, and the host's own window looked perfect.
+func _check_i_know_who_is_playing(bs) -> void:
+	var seats: Array = net.player_ids()
+	if seats.is_empty():
+		_fail("I do not know who is playing: player_ids() is empty, so everybody draws grey")
+		return
+	if not seats.has(net.my_id()):
+		_fail("my own seat %d is not in the roster %s" % [net.my_id(), str(seats)])
+	# The test the colour actually turns on. Colors.of_owner() looks an owner up in this
+	# array and gives NEUTRAL when it is not there, so every owner ON THE FIELD has to be
+	# in it, and there have to be at least two of them or both armies match anyway.
+	var owners := {}
+	for id in bs.sorted_ids():
+		owners[bs.regiments[id].owner_id] = true
+	for owner in owners:
+		if not seats.has(owner):
+			_fail("regiments owned by %d are on the field but %d is not in the roster %s -- "
+				% [owner, owner, str(seats)] + "they will all draw NEUTRAL grey")
+	if owners.size() < 2:
+		_fail("only one owner on the field, so this proves nothing about telling sides apart")
 
 
 # --- verdict --------------------------------------------------------------
