@@ -38,10 +38,29 @@ const SWAY := 0.8
 const SWAY_RATE := 2.3
 ## Further than this from his place and a man has been teleported, not outrun.
 const SNAP_DISTANCE := 400.0
-## How long a regiment reads as busy after its frontage changes. Purely a clock about an
-## animation: changing frontage costs nothing and gates nothing, but re-dressing a line is
-## not instant and the player should be able to see that it is happening.
-const DRESS_SECONDS := 3.0
+
+## A man's ceiling is his own regiment's current speed plus this, and he gets to it at
+## MAN_ACCEL. Taken from the regiment's measured movement rather than from the rules
+## tables, so cavalry, a column, marsh and an exhausted regiment's legs() all come out
+## right without the view knowing that any of them exist -- he can always keep station,
+## and has a dressing pace in hand on top.
+##
+## He had NO limit at all before this. Speed was proportional to distance, so a man 100
+## units from his slot moved at 349 u/s against a 45 u/s march, and one 200 units out hit
+## 699. Worse, an exponential closes 95% of ANY gap in 0.83s, so a one-file shuffle and a
+## complete reshape took exactly as long as each other -- which is why re-forming looked
+## instant however drastic it was, and why a wheel read as a rigid spin instead of the
+## outer files lagging the way men actually do.
+const MAN_ACCEL := 45.0
+## How much men differ from one another in how fast they walk. Deliberately far gentler
+## than CATCH_UP_SPREAD, which shapes how raggedly they ARRIVE: putting 0.45 on the
+## ceiling as well had the slowest man walking at 11 u/s against the quickest at 29, so a
+## reshape took as long as its most dawdling member and every one of them looked ill.
+const PACE_SPREAD := 0.15
+## How long a regiment reads as busy after its frontage changes is not a constant any
+## more: it is the distance the end man has to walk over the pace he walks it, worked out
+## at Rules.DRESS_SPEED where the change happens. A flat 3.0 was a guess that happened to
+## be generous -- the men were finishing in under one second.
 
 ## How fast a man swivels to meet something, radians per second. Far quicker than a
 ## regiment can wheel, because turning your own body is not a manoeuvre.
@@ -98,12 +117,14 @@ class Troop extends RefCounted:
 	var depth := PackedInt32Array()      # his place in it, 0 = front rank
 	var man_id := PackedInt32Array()     # stable identity, so his gait survives a death
 	var face := PackedFloat32Array()     # which way he is looking, his own business
+	var speed := PackedFloat32Array()    # how fast he is walking, so he has weight
 	var per_file := PackedInt32Array()   # how many men each column holds
 	var next_id := 0
 	var phase := 0.0
 	var centre := Vector2.ZERO
 	var dress := 0.0                     # seconds left visibly re-dressing
 	var mount := 0.0                     # the facing the slots were last laid out at
+	var was_at := Vector2.INF            # where his regiment stood last frame
 	var spacing := 1.0
 
 
@@ -158,8 +179,14 @@ func _advance(id: int, p: Dictionary, delta: float) -> int:
 		_turn_about(troop)
 	troop.mount = float(p["facing"])
 	if troop.width != int(p["width"]):
+		# How far the end man has to go, at the pace he goes it -- the same arithmetic the
+		# sim ramps its frontage on, so the HUD counts down the walk you are watching. A
+		# flat three seconds was a guess that happened to be generous: the men were
+		# finishing in under one.
+		var was_wide := Formation.frontage(troop.max_strength, troop.width, troop.spacing)
 		_reform(troop, int(p["width"]))                      # walk into the new shape
-		troop.dress = DRESS_SECONDS
+		var now_wide := Formation.frontage(troop.max_strength, troop.width, troop.spacing)
+		troop.dress = absf(now_wide - was_wide) / Rules.DRESS_SPEED
 
 	var hits: Array = p.get("hits", [])
 	while troop.world.size() > strength:
@@ -177,6 +204,13 @@ func _advance(id: int, p: Dictionary, delta: float) -> int:
 	var facing := float(p["facing"])
 
 	var ease := 1.0 - exp(-CATCH_UP * delta)
+	# What his regiment is doing, measured rather than looked up. A man may always match
+	# it, whatever it is, and has DRESS_SPEED in hand on top for getting into his file.
+	var at: Vector2 = p["pos"]
+	var carried: float = 0.0 if troop.was_at == Vector2.INF or delta <= 0.0 \
+		else troop.was_at.distance_to(at) / delta
+	troop.was_at = at
+	var ceiling: float = carried + Rules.DRESS_SPEED
 	var sum := Vector2.ZERO
 	for i in troop.world.size():
 		var here: Vector2 = troop.world[i]
@@ -217,9 +251,17 @@ func _advance(id: int, p: Dictionary, delta: float) -> int:
 
 		if here.distance_squared_to(target) > SNAP_DISTANCE * SNAP_DISTANCE:
 			troop.world[i] = target
+			troop.speed[i] = 0.0
 		else:
+			# The exponential still sets the SHAPE of the approach -- it is what stops a
+			# man jittering on his slot -- but it no longer sets how fast he gets there.
 			var rate := ease * (1.0 + CATCH_UP_SPREAD * _wobble(troop.man_id[i]))
-			troop.world[i] = here.lerp(target, clampf(rate, 0.0, 1.0))
+			var step := here.lerp(target, clampf(rate, 0.0, 1.0)) - here
+			var wants: float = minf(step.length() / maxf(delta, 0.0001),
+				ceiling * (1.0 + PACE_SPREAD * _wobble(troop.man_id[i])))
+			troop.speed[i] = move_toward(troop.speed[i], wants, MAN_ACCEL * delta)
+			var go: float = troop.speed[i] * delta
+			troop.world[i] = here + (step if step.length() <= go else step.normalized() * go)
 		sum += troop.world[i]
 	troop.centre = sum / float(maxi(1, troop.world.size()))
 	return strength
@@ -373,6 +415,7 @@ func _raise(width: int, max_strength: int, strength: int, id: int) -> Troop:
 		troop.man_id.append(troop.next_id)
 		troop.world.append(Vector2.ZERO)
 		troop.face.append(0.0)
+		troop.speed.append(0.0)
 		troop.per_file[f] += 1
 		troop.next_id += 1
 	return troop
@@ -417,21 +460,39 @@ func _turn_about(troop: Troop) -> void:
 ## its new shape. M17 hands this to the player, so it is worth being right now.
 func _reform(troop: Troop, width: int) -> void:
 	width = maxi(1, width)
+	# FILE-major, so a man keeps his place ALONG the line and only steps sideways as far
+	# as the frontage actually changed. Dealing rank-major -- which this used to do --
+	# re-numbers everybody the moment the rank count changes, so widening twelve files to
+	# fourteen scrambled the whole regiment and sent men thirty-five units to stand
+	# seven units further out. A small change has to be a small walk.
 	var order := []
 	for i in troop.file.size():
-		order.append([troop.depth[i] * 4096 + troop.file[i], i])
+		order.append([troop.file[i] * 4096 + troop.depth[i], i])
 	order.sort_custom(func(a, b) -> bool: return a[0] < b[0])
 
 	troop.width = width
 	troop.ranks = maxi(1, ceili(float(troop.max_strength) / float(width)))
 	troop.per_file.resize(width)
 	troop.per_file.fill(0)
-	for place in order.size():
-		var i: int = order[place][1]
-		var f := place % width
-		troop.file[i] = f
-		troop.depth[i] = place / width
-		troop.per_file[f] += 1
+	# The deeper files go on the left, which is where _raise puts them too.
+	var base := order.size() / width
+	var extra := order.size() % width
+	var place := 0
+	for f in width:
+		var deep := base + (1 if f < extra else 0)
+		# Lateral order picks which FILE a man lands in; his own current depth picks
+		# where in it. Dealing depths straight off the sweep sent the man at the back of
+		# one file to the FRONT of the next -- a seventy-six unit sprint up the length of
+		# the block to widen the line by seven. A man who was deep stays deep.
+		var taking := []
+		for d in deep:
+			taking.append(order[place][1])
+			place += 1
+		taking.sort_custom(func(a: int, b: int) -> bool: return troop.depth[a] < troop.depth[b])
+		for d in taking.size():
+			troop.file[taking[d]] = f
+			troop.depth[taking[d]] = d
+		troop.per_file[f] = deep
 
 
 func _enlist(troop: Troop, p: Dictionary) -> void:
@@ -443,6 +504,7 @@ func _enlist(troop: Troop, p: Dictionary) -> void:
 	troop.man_id.append(troop.next_id)
 	troop.world.append(Vector2.ZERO)
 	troop.face.append(float(p["facing"]))
+	troop.speed.append(0.0)
 	troop.next_id += 1
 	troop.per_file[f] += 1
 	troop.world[troop.world.size() - 1] = _place_of(troop, p, troop.world.size() - 1)
@@ -536,6 +598,7 @@ func _close_the_line(troop: Troop) -> void:
 
 func _discharge(troop: Troop, i: int) -> void:
 	troop.world.remove_at(i)
+	troop.speed.remove_at(i)
 	troop.file.remove_at(i)
 	troop.depth.remove_at(i)
 	troop.man_id.remove_at(i)
@@ -668,6 +731,17 @@ func positions(id: int) -> Dictionary:
 		return out
 	for i in troop.world.size():
 		out[troop.man_id[i]] = troop.world[i]
+	return out
+
+
+## How fast every living man is walking, as man_id -> world units a second.
+func paces(id: int) -> Dictionary:
+	var out := {}
+	var troop = _troops.get(id)
+	if troop == null:
+		return out
+	for i in troop.speed.size():
+		out[troop.man_id[i]] = troop.speed[i]
 	return out
 
 

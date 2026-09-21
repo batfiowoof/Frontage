@@ -181,6 +181,7 @@ func step() -> void:
 	for id in sorted_ids():
 		_step_regiment(regiments[id], dt)
 
+	_spread_panic(dt)
 	_separate(dt)
 
 
@@ -632,10 +633,15 @@ func _accumulate_strike(attacker: Regiment, defender: Regiment, dt: float, kills
 
 ## How many files a regiment can turn toward an enemy at this angle. Frontally it
 ## fights on its full width; from the side or behind, only the ends of its ranks.
+## The width it is FIGHTING at, which lags the width it was ordered into by however long
+## the men take to walk there. `reach()` deliberately still reads `width` -- the footprint
+## is in flux while they walk anyway, and ramping it too would have contact distance
+## wobbling through every re-dress for nothing.
 static func files_engaged(r: Regiment, exposure: Exposure) -> int:
+	var w := r.fighting_width()
 	if exposure == Exposure.FRONT:
-		return Formation.files_across(r.strength, r.width)
-	return Formation.ranks_deep(r.strength, r.width)
+		return Formation.files_across(r.strength, w)
+	return Formation.ranks_deep(r.strength, w)
 
 
 ## Men fight only where the formations actually touch, so an attacker cannot bring
@@ -685,6 +691,11 @@ static func exposure_of(defender: Regiment, attacker: Regiment) -> Exposure:
 func _step_regiment(r: Regiment, dt: float) -> void:
 	if r.reforming > 0.0:
 		r.reforming = maxf(0.0, r.reforming - dt)
+	if r.dressed < 1.0:
+		# At the pace the men are walking, over the distance they actually have to cover,
+		# so the ramp and the walk finish together whatever size the change was.
+		var walk := r.dress_walk()
+		r.dressed = 1.0 if walk <= 0.01 else minf(1.0, r.dressed + Rules.DRESS_SPEED / walk * dt)
 	if r.charge > 0.0:
 		r.charge = maxf(0.0, r.charge - dt)
 	match r.state:
@@ -692,6 +703,11 @@ func _step_regiment(r: Regiment, dt: float) -> void:
 			return
 		Regiment.State.MOVING:
 			_advance(r, dt)
+			# Marching men catch their breath too. Recovery used to be gated on the
+			# STATE rather than on being safe, so a router pulled itself together at
+			# 4.0/s while a regiment merely repositioning recovered nothing at all --
+			# running away restored morale and manoeuvring did not.
+			_hearten(r, dt)
 		Regiment.State.ROUTING:
 			_advance(r, dt)
 			# Broken men who get clear of the fighting pull themselves together, and
@@ -699,15 +715,11 @@ func _step_regiment(r: Regiment, dt: float) -> void:
 			# known how to rally at MORALE_RALLY_THRESHOLD -- it was simply never
 			# called for a router, because recovery lived in the IDLE branch and a
 			# router is never IDLE. The rally threshold was unreachable code.
-			if r.engaged_with == -1:
-				var rate := Rules.MORALE_RECOVERY
-				if _in_reach_of_general(r):
-					rate += Rules.GENERAL_RALLY
-				r.recover(rate * dt)
+			_hearten(r, dt)
 		Regiment.State.IDLE:
 			r.pace = 0.0
+			_hearten(r, dt)
 			if r.engaged_with == -1:
-				r.recover(Rules.MORALE_RECOVERY * dt)
 				r.rest(Rules.STAMINA_RECOVERY * dt)
 			_turn_toward(r, r.target_facing, dt)
 		Regiment.State.FIGHTING:
@@ -717,6 +729,83 @@ func _step_regiment(r: Regiment, dt: float) -> void:
 			var foe = regiments.get(r.engaged_with)
 			if foe != null:
 				_turn_toward(r, (foe.pos - r.pos).angle(), dt * Rules.ENGAGED_TURN_MULT, false)
+
+
+## Morale comes back to anybody who is out of contact and has had a moment to breathe.
+##
+## The moment is the point. Breaking contact used to start the climb on the very next
+## tick -- a router clears CONTACT_GAP in well under a second at ROUT_SPEED_MULT -- so a
+## break cost six seconds and nothing else.
+func _hearten(r: Regiment, dt: float) -> void:
+	if r.engaged_with != -1:
+		r.rally_wait = Rules.RALLY_DELAY
+		return
+	if r.rally_wait > 0.0:
+		r.rally_wait = maxf(0.0, r.rally_wait - dt)
+		return
+	var rate := Rules.MORALE_RECOVERY
+	if r.state == Regiment.State.ROUTING and _in_reach_of_general(r):
+		rate += Rules.GENERAL_RALLY
+	r.recover(rate * dt)
+
+
+## Everything that frightens a regiment without anyone striking it: a neighbour breaking,
+## its own army coming apart, standing on its own, and the heart a charge puts in it.
+##
+## This is what gives a battle its shape. Before it, every regiment's morale was entirely
+## its own business, so two lines simply ground each other down until one happened to
+## cross a threshold. A line breaks from one end now.
+func _spread_panic(dt: float) -> void:
+	var ids := sorted_ids()
+
+	# How much of each side is still willing to fight, for the army-collapse term.
+	var standing := {}
+	var total := {}
+	for id in ids:
+		var r: Regiment = regiments[id]
+		if not r.is_alive():
+			continue
+		total[r.owner_id] = int(total.get(r.owner_id, 0)) + 1
+		if r.state != Regiment.State.ROUTING:
+			standing[r.owner_id] = int(standing.get(r.owner_id, 0)) + 1
+
+	for id in ids:
+		var r: Regiment = regiments[id]
+		if not r.is_alive() or r.state == Regiment.State.ROUTING:
+			continue
+
+		var fright := 0.0
+		var beside := false
+		for other_id in ids:
+			if other_id == id:
+				continue
+			var o: Regiment = regiments[other_id]
+			if not o.is_alive():
+				continue
+			var apart := r.pos.distance_to(o.pos)
+			if o.owner_id != r.owner_id:
+				continue
+			if o.state == Regiment.State.ROUTING:
+				if apart <= Rules.PANIC_RADIUS:
+					fright += Rules.PANIC_SHOCK * dt
+			elif apart <= Rules.SHOULDER_RADIUS:
+				beside = true
+
+		# An army that has lost most of itself wavers whatever each regiment thinks.
+		var left := int(standing.get(r.owner_id, 0))
+		var had := maxi(1, int(total.get(r.owner_id, 0)))
+		if float(left) / float(had) < Rules.ARMY_BREAKS:
+			fright += Rules.COLLAPSE_SHOCK * dt
+
+		if not beside:
+			fright += Rules.ALONE_SHOCK * dt
+		if _in_reach_of_general(r):
+			fright *= Rules.GENERAL_STEADY
+		r.shock(fright)
+
+		# ...and a regiment at the moment of impact is briefly braver.
+		if r.charge > 0.0:
+			r.recover(Rules.CHARGE_HEART * dt)
 
 
 func _advance(r: Regiment, dt: float) -> void:

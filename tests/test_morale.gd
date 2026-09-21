@@ -89,7 +89,10 @@ func test_a_router_that_gets_clear_pulls_itself_together(t) -> void:
 	r.shock(2.0)                       # tip it over the threshold
 	t.eq(r.state, Regiment.State.ROUTING, "it has broken")
 	# Alone on the field, nothing chasing it.
-	_run(bs, Rules.TICK_HZ * 20)
+	# A rally is the better part of a minute now: RALLY_DELAY to steady itself, then the
+	# climb at MORALE_RECOVERY. It used to be six seconds, which is what made a broken
+	# regiment a temporary inconvenience rather than a hole in the line.
+	_run(bs, int((Rules.RALLY_DELAY + Rules.MORALE_MAX / Rules.MORALE_RECOVERY + 5.0) * Rules.TICK_HZ))
 	t.eq(r.state, Regiment.State.IDLE, "and with nobody after it, it comes back")
 	t.ok(r.morale >= Rules.MORALE_RALLY_THRESHOLD, "at the rally threshold or better")
 
@@ -183,3 +186,109 @@ func test_a_decoded_mirror_names_the_same_general(t) -> void:
 	var mirror = Snapshot.decode_battle(Snapshot.encode_battle(bs))
 	t.ok(mirror != null, "it decodes")
 	t.eq(mirror.generals, bs.generals, "and picks the same men out of the same bytes")
+
+
+# --- the flow of a battle ---------------------------------------------------
+
+## A line of `n` of ours along Y, far from any enemy, all steady.
+func _a_line(n: int) -> Array:
+	var bs = BattleState.new()
+	var line := []
+	for i in n:
+		line.append(bs.add(1, &"spear", Vector2(0, float(i) * Rules.SHOULDER_RADIUS * 0.7), 0.0))
+	return [bs, line]
+
+
+## The one that gives a battle its shape. `Regiment.shock()` has always documented
+## "seeing a neighbour break" as one of its callers; nothing ever called it for that, so
+## every regiment's morale was entirely its own business and two lines simply ground each
+## other down until one happened to cross a threshold.
+func test_a_break_at_one_end_travels_down_the_line(t) -> void:
+	var s := _a_line(4)
+	var line: Array = s[1]
+	line[0].shock(Rules.MORALE_MAX)                 # the end regiment breaks
+	t.eq(line[0].state, Regiment.State.ROUTING, "it has gone")
+	_run(s[0], Rules.TICK_HZ * 4)
+
+	t.ok(line[1].morale < Rules.MORALE_MAX, "its neighbour feels it (%.0f)" % line[1].morale)
+	t.ok(line[1].morale < line[3].morale,
+		"and the far end feels it less (%.0f against %.0f)" % [line[1].morale, line[3].morale])
+
+	# ...and with nobody broken, the same line holds. Or this is measuring gravity.
+	var calm := _a_line(4)
+	_run(calm[0], Rules.TICK_HZ * 4)
+	t.near(calm[1][1].morale, Rules.MORALE_MAX, 0.001, "a line with nobody broken is steady")
+
+
+func test_a_regiment_that_breaks_too_often_is_finished(t) -> void:
+	var r = Regiment.make(1, 1, &"spear", Vector2.ZERO)
+	for i in Rules.ROUTS_BEFORE_SHATTERED - 1:
+		r.shock(Rules.MORALE_MAX)
+		t.eq(r.state, Regiment.State.ROUTING, "it breaks")
+		t.ok(not r.shattered(), "but it is not finished yet")
+		r.recover(Rules.MORALE_MAX)
+		t.eq(r.state, Regiment.State.IDLE, "and it comes back")
+
+	r.shock(Rules.MORALE_MAX)
+	t.ok(r.shattered(), "once too often and it is shattered")
+	r.recover(Rules.MORALE_MAX)
+	t.eq(r.state, Regiment.State.ROUTING, "and it never comes back, however calm it gets")
+	t.ok(r.morale > Rules.MORALE_RALLY_THRESHOLD,
+		"even well above the rally threshold (%.0f)" % r.morale)
+
+
+func test_a_wreck_never_gets_a_full_bar_back(t) -> void:
+	# There was no permanent morale damage of any kind: a regiment that broke at 41%
+	# casualties climbed all the way back to 100 in twenty seconds and returned as though
+	# nothing had happened to it.
+	var s := _a_line(2)
+	var r: Regiment = s[1][0]
+	r.take_casualties(r.max_strength / 2)
+	r.rally_wait = 0.0
+	_run(s[0], Rules.TICK_HZ * 200)
+	t.ok(r.morale <= r.morale_ceiling() + 0.001,
+		"half a regiment can only be half as steady (%.0f, ceiling %.0f)" % [
+			r.morale, r.morale_ceiling()])
+	t.ok(r.morale < Rules.MORALE_MAX * 0.9, "and nowhere near a full bar")
+
+
+func test_an_army_that_has_lost_most_of_itself_wavers(t) -> void:
+	# On the COUNT, not on each regiment's own morale: "if the entire army has lost many
+	# of its units, this causes every unit to waver regardless of Leadership".
+	var bs = BattleState.new()
+	var survivor = bs.add(1, &"spear", Vector2.ZERO, 0.0)
+	var mate = bs.add(1, &"spear", Vector2(0, Rules.SHOULDER_RADIUS * 0.5), 0.0)
+	for i in 4:
+		bs.add(1, &"spear", Vector2(0, -600.0 - float(i) * 40.0), 0.0).shock(Rules.MORALE_MAX)
+	t.near(survivor.morale, Rules.MORALE_MAX, 0.001, "it has not been touched")
+	_run(bs, Rules.TICK_HZ * 4)
+	t.ok(survivor.morale < Rules.MORALE_MAX - 4.0,
+		"but its army is going and it knows (%.0f)" % survivor.morale)
+	t.ok(mate.morale < Rules.MORALE_MAX, "and so does the man beside it")
+
+
+func test_pulling_a_regiment_out_of_the_line_lets_it_recover(t) -> void:
+	# Recovery used to be gated on the STATE, not on safety: a router recovered at 4.0/s
+	# while a regiment merely repositioning recovered nothing, so running away restored
+	# morale and manoeuvring did not.
+	var s := _a_line(2)
+	var r: Regiment = s[1][0]
+	r.morale = 50.0
+	r.rally_wait = 0.0
+	r.order_move(Vector2(0, -900), 0.0)
+	_run(s[0], Rules.TICK_HZ * 10)
+	t.eq(r.state, Regiment.State.MOVING, "it is still marching")
+	t.ok(r.morale > 50.0, "and catching its breath while it goes (%.0f)" % r.morale)
+
+
+func test_how_many_times_it_has_run_survives_the_wire(t) -> void:
+	var bs = BattleState.new()
+	var r = bs.add(1, &"spear", Vector2.ZERO, 0.0)
+	r.shock(Rules.MORALE_MAX)
+	r.recover(Rules.MORALE_MAX)
+	r.shock(Rules.MORALE_MAX)
+	t.eq(r.routs, 2, "it has broken twice")
+	var back = Snapshot.decode_battle(Snapshot.encode_battle(bs))
+	t.ok(back != null)
+	if back != null:
+		t.eq(back.regiments[r.id].routs, 2, "and the mirror knows, or it draws a banner it should not")

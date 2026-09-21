@@ -35,7 +35,9 @@ func _a_charge(shape := &"line") -> Array:
 	# here stopped being contact at all the moment the default frontages moved.
 	horse.order_move(Vector2(-BattleState.contact_distance(horse, foot,
 		Rules.CONTACT_GAP * 0.5), 0.0), 0.0)
-	for i in Rules.TICK_HZ * 6:
+	# Twelve seconds, not six: the horse starts three hundred units out and the march is
+	# slower than it was. It still arrives at a gallop, it just takes a gallop's time.
+	for i in Rules.TICK_HZ * 12:
 		bs.step()
 		if horse.charge > 0.0:
 			break

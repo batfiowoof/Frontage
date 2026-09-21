@@ -7,6 +7,7 @@ const Formation := preload("res://sim/formation.gd")
 const Regiment := preload("res://sim/regiment.gd")
 const Rules := preload("res://sim/rules.gd")
 const BattleState := preload("res://sim/battle_state.gd")
+const BattleView := preload("res://view/battle/battle_view.gd")
 
 const ID := 7
 
@@ -225,9 +226,13 @@ func test_men_lag_behind_a_moving_regiment_and_then_catch_up(t) -> void:
 	t.ok(lagging.x > start.x, "they have started moving")
 	t.ok(lagging.x < 60.0, "but have not teleported with it (%.1f)" % lagging.x)
 
-	# ...and a couple of seconds later they should have arrived. The tolerance has to
-	# clear the idle shuffle, which never settles to exactly zero on purpose.
-	for i in 120:
+	# ...and they WALK the rest, which now takes as long as walking it should. The
+	# regiment is standing still here, so the men have only their dressing pace to close
+	# sixty units with: three seconds of it, not the 0.83 an unbounded ease took for any
+	# distance at all. The tolerance clears the idle shuffle, which never settles to
+	# exactly zero on purpose.
+	var walk := 60.0 / Rules.DRESS_SPEED
+	for i in int((walk + 1.5) * 60.0):
 		men.build(_pose(120, Vector2(60, 0)), [1], 1.0 / 60.0)
 	t.near(men.centre_of(ID, Vector2.ZERO).x, 60.0, 3.0, "and then they catch up")
 
@@ -439,12 +444,17 @@ func test_a_frontage_change_starts_a_re_dress_clock(t) -> void:
 	men.build(_pose(120, Vector2.ZERO, 0.0, [], Regiment.State.IDLE, 12), [1], 0.016)
 	t.near(men.dressing(ID), 0.0, 0.001, "standing still, nothing to re-dress")
 
+	# The clock is the WALK, not a constant: how far the end man goes over the pace he
+	# goes it. Twelve files to twenty moves him 28 units, so it is 1.4s, and a bigger
+	# reshape is a longer clock. It used to be a flat 3.0 whatever you asked for.
+	var walk := absf(Formation.frontage(120, 20, 1.0) - Formation.frontage(120, 12, 1.0))
+	var expect := walk / Rules.DRESS_SPEED
 	men.build(_pose(120, Vector2.ZERO, 0.0, [], Regiment.State.IDLE, 20), [1], 1.0 / 60.0)
-	t.near(men.dressing(ID), Bodies.DRESS_SECONDS, 0.05, "a new frontage starts the clock")
+	t.near(men.dressing(ID), expect, 0.05, "a new frontage starts a clock the size of the walk")
 	t.eq(men.living(ID), 120, "and it is only a clock -- it loses nobody")
 
 	var places := men.places(ID)
-	for i in int((Bodies.DRESS_SECONDS + 1.0) * 60.0):
+	for i in int((expect + 1.0) * 60.0):
 		men.build(_pose(120, Vector2.ZERO, 0.0, [], Regiment.State.IDLE, 20), [1], 1.0 / 60.0)
 	t.near(men.dressing(ID), 0.0, 0.001, "it runs down and stops at zero")
 	t.eq(men.places(ID), places, "and changes nobody's place on its way")
@@ -647,6 +657,53 @@ func test_the_men_hug_the_enemy_without_walking_into_him(t) -> void:
 	t.ok(wrapped > 0, "and some of them did come round onto his flank (%d of them)" % wrapped)
 
 
+## The other side of that fight: a block at `at`, `width` files wide, facing back at the
+## origin and bending round us exactly as we bend round it.
+func _facing_us(at: Vector2, width: int) -> Bodies:
+	var men = Bodies.new()
+	men.build(_pose(120, at, PI, [], Regiment.State.FIGHTING, width), [1], 0.016)
+	for i in 400:
+		men.build(_pose(120, at, PI, [], Regiment.State.FIGHTING, width,
+			PackedVector2Array([Vector2.ZERO]),
+			PackedVector3Array([_block(width, 0.0)])), [1], 1.0 / 60.0)
+	return men
+
+
+## "Soldiers still overlap into each other though", as two numbers.
+##
+## Clearing the enemy's BOX is not the same as clearing his MEN: his front rank leans LEAN
+## units out of its own box toward us while ours leans the same distance back at him, and
+## CONTACT_GAP is 14 -- so seven units from each side closes the whole of it and the two
+## front ranks land in the same square yard. `KEEP_CLEAR` is the clamp that stops it,
+## applied last and against every enemy in contact rather than only the one a man is
+## dealing with, because somebody caught between two of them is otherwise clear of one and
+## standing inside the other. Nothing measured it, while CLAUDE.md quoted a figure from it.
+func test_no_man_stands_on_an_enemy(t) -> void:
+	# At the distance the SIM puts them, which is front rank to front rank and not centre
+	# to centre -- two blocks placed at a fixed gap may be locked or not touching at all.
+	var apart := Formation.half_depth(120, 20, 1.0) * 2.0 + Rules.CONTACT_GAP
+	var theirs := Vector2(apart, 0)
+
+	var ours := _settle_against(20, theirs, _block(20, PI))
+	var them := _facing_us(theirs, 20)
+
+	var closest := INF
+	var overlapping := 0
+	for mine in ours.positions(ID).values():
+		for his in them.positions(ID).values():
+			var d: float = mine.distance_to(his)
+			closest = minf(closest, d)
+			if d < BattleView.BODY_SIZE:
+				overlapping += 1
+
+	t.eq(overlapping, 0, "no man of ours stands on a man of theirs")
+	t.ok(closest >= BattleView.BODY_SIZE,
+		"the nearest pair is %.1f units apart, against a body %.0f across" % [
+			closest, BattleView.BODY_SIZE])
+	print("  [feel] closest man to an enemy man: %.1f units, %d overlapping pairs" % [
+		closest, overlapping])
+
+
 func test_the_bend_never_re_files_anybody(t) -> void:
 	# The whole licence for this is that it is decoration. The moment it changed who
 	# stood where, every invariant above it would be up for grabs.
@@ -719,3 +776,87 @@ func test_a_quarter_turn_really_does_wheel(t) -> void:
 	for man in before:
 		worst = maxf(worst, before[man].distance_to(after[man]))
 	t.ok(worst > 40.0, "a quarter turn is a wheel and the men go with it (%.0f)" % worst)
+
+
+# --- the men have weight ----------------------------------------------------
+
+## How far the fastest man ACTUALLY moved over one frame, as units a second.
+##
+## Measured from his position, never from whatever the code believes his speed to be: the
+## first version of this asked `paces()` and passed happily with the speed limit deleted,
+## because the intended speed is still computed whether or not anything obeys it.
+func _step_fastest(men, pose: Dictionary, delta: float) -> float:
+	var before: Dictionary = men.positions(ID)
+	men.build(pose, [1], delta)
+	var after: Dictionary = men.positions(ID)
+	var top := 0.0
+	for man in after:
+		if before.has(man):
+			top = maxf(top, before[man].distance_to(after[man]) / delta)
+	return top
+
+
+## The test that would have caught it. A man had NO speed limit: his pace was
+## proportional to how far he was from his slot, so one 100 units out moved at 349 u/s and
+## one 200 units out at 699, against a regiment that marches at 45. Rotation has always
+## had a governor; translation had none.
+func test_a_man_never_outruns_his_own_regiment(t) -> void:
+	var men = Bodies.new()
+	_settle(men, 120)
+
+	# A reshape big enough that the end man has a hundred units to cover.
+	var wide := _pose(120, Vector2.ZERO, 0.0, [], Regiment.State.IDLE, 40)
+	var worst := 0.0
+	for i in 600:
+		worst = maxf(worst, _step_fastest(men, wide, 1.0 / 60.0))
+	t.ok(worst <= Rules.DRESS_SPEED * 1.6,
+		"nobody exceeds a dressing pace while the regiment stands still (%.0f u/s)" % worst)
+
+	# ...and the same through a quarter turn, where the outer files have furthest to go.
+	var wheel = Bodies.new()
+	_settle(wheel, 120)
+	var turned := _pose(120, Vector2.ZERO, PI / 2.0, [], Regiment.State.IDLE)
+	var spun := 0.0
+	for i in 600:
+		spun = maxf(spun, _step_fastest(wheel, turned, 1.0 / 60.0))
+	t.ok(spun <= Rules.DRESS_SPEED * 1.6,
+		"nor while the block wheels round (%.0f u/s)" % spun)
+	print("  [feel] fastest man: %.0f u/s re-forming, %.0f u/s wheeling, against a %.0f u/s march" % [
+		worst, spun, Rules.MOVE_SPEED])
+
+
+## A bigger change takes longer. It used to take 0.83s whatever you asked for, because an
+## exponential closes the same FRACTION of any gap per second -- which is exactly why
+## re-forming looked instant however drastic it was.
+func test_a_bigger_reshape_takes_longer(t) -> void:
+	t.ok(_reshape_seconds(12, 14) > 0.0, "a small change still takes some time")
+	var small := _reshape_seconds(12, 14)
+	var large := _reshape_seconds(12, 40)
+	t.ok(large > small * 2.0,
+		"twelve files to forty takes far longer than twelve to fourteen (%.1fs against %.1fs)" % [
+			large, small])
+	print("  [feel] reshape: 12->14 files %.1fs, 12->40 files %.1fs" % [small, large])
+
+
+## How long the men take to settle into `to` files, coming from `from`.
+func _reshape_seconds(from: int, to: int) -> float:
+	var men = Bodies.new()
+	men.build(_pose(120, Vector2.ZERO, 0.0, [], Regiment.State.IDLE, from), [1], 0.016)
+	for i in 240:
+		men.build(_pose(120, Vector2.ZERO, 0.0, [], Regiment.State.IDLE, from), [1], 1.0 / 60.0)
+	var slots: Dictionary = men.slots(ID)
+	for i in 900:
+		men.build(_pose(120, Vector2.ZERO, 0.0, [], Regiment.State.IDLE, to), [1], 1.0 / 60.0)
+		var settled := true
+		var where: Dictionary = men.positions(ID)
+		slots = men.slots(ID)
+		for man in where:
+			# Five units, which is less than a file apart: "visibly standing in his
+			# place", not "the exponential tail has finished". The approach eases in on
+			# purpose, so the last unit takes as long as the first twenty.
+			if where[man].distance_to(slots[man]) > 5.0:
+				settled = false
+				break
+		if settled:
+			return float(i) / 60.0
+	return 15.0

@@ -12,7 +12,7 @@ const INTERP_DELAY_MS := 100               # client renders this far in the past
 ## Top marching pace, and how quickly a regiment gets to it. Nothing used to build up:
 ## a regiment was at full speed on the first tick of an order and still at full speed on
 ## the tick it arrived, where it snapped onto its destination.
-const MOVE_SPEED := 45.0                   # world units / second, at a walk
+const MOVE_SPEED := 32.0                   # world units / second, at a walk
 ## Seconds to reach whatever top pace a regiment has, and to brake from it. A TIME and
 ## not a rate: a flat units/s^2 would have a column and a line cover identical ground in
 ## the first second, because they would both still be winding up, and the whole point of
@@ -24,6 +24,16 @@ const ACCELERATION_SECONDS := 3.0
 ## up to ARRIVE_EPSILON -- a teleport bigger than a stride, right at the moment you are
 ## looking at it. A crawl floor lets it walk the last bit in.
 const ARRIVE_CRAWL := 8.0
+## How fast a man sidesteps into a new file, over and above whatever his regiment is
+## already doing. Less than half a march, because dressing a line is not marching.
+##
+## It sets the pace of the men in bodies.gd AND the rate the sim's frontage ramps at, from
+## the same distance, so the fighting and the walking finish together by construction
+## rather than by two constants that happen to agree. A man used to have no speed limit at
+## all: at 100 units from his slot he moved at 349 u/s against a 45 u/s march, and because
+## the ease was exponential, 95% of ANY gap closed in 0.83s -- a one-file shuffle and a
+## total reshape took exactly as long as each other.
+const DRESS_SPEED := 20.0
 ## Radians a second, for a WHEEL: a change to the ground the block stands on. Turning
 ## right round is not a wheel at all, it is an about-face, and it costs no rotation
 ## whatever -- see Regiment.about_face and bodies.gd.
@@ -35,7 +45,11 @@ const ARRIVE_CRAWL := 8.0
 ## sideways faster than the men can march, and a 20-file block reaches 66.5 units out, so
 ## the ceiling is MOVE_SPEED / 66.5. At 0.9 the sweep came to 60 u/s against a 45 u/s
 ## march -- still outrunning them, just less absurdly than the 200 it used to be.
-const TURN_SPEED := 0.6
+## 0.45, not 0.6: the ceiling is MOVE_SPEED / 66.5, and the march came down to 32. The
+## rule is that the END FILE of a wheeling line may not be carried sideways faster than
+## the men can walk, and test_a_wheel_never_outruns_the_men has now caught this twice --
+## once at 0.9 against a 45 u/s march, and again at 0.6 against a 32 u/s one.
+const TURN_SPEED := 0.45
 ## A regiment locked in melee cannot pivot. Without this a flanked unit simply turns
 ## to face in half a second and the flank becomes a frontal attack before it has cost
 ## anybody anything -- which is precisely what made flanking decorative.
@@ -144,7 +158,43 @@ const MORALE_DRAIN_REAR := 12.0            # per second while engaged from behin
 ## at all — they would die first, which deletes morale as a mechanic.
 ## At 150, a regiment routs at roughly 41% losses.
 const MORALE_DRAIN_PER_FRACTION := 150.0
-const MORALE_RECOVERY := 4.0               # per second while idle and unengaged
+## Coming back from a break is the slow half of morale, and it used to be the fast half.
+## At 4.0/s a regiment climbed from the rout threshold to the rally threshold in SIX
+## SECONDS -- against a frontal melee drain of 0.15 to 0.225/s, so one second of standing
+## still undid eighteen to twenty-seven seconds of fighting. And it could do it all battle.
+const MORALE_RECOVERY := 1.2               # per second, once it has had a moment
+## ...and it needs that moment first. Breaking contact used to start the climb on the very
+## next tick, because a router clears CONTACT_GAP in well under a second.
+const RALLY_DELAY := 6.0
+
+## What a broken regiment takes with it. One rout cascading down a line is the single
+## loudest thing on a Total War field and the reason their battles END rather than grind:
+## "a single rout can cause a chain-reaction in the army". Every regiment's morale here
+## was entirely its own business, so battles were decided by attrition.
+##
+## `Regiment.shock()` has always documented "seeing a neighbour break" as one of its
+## callers. Nothing has ever called it for that.
+const PANIC_RADIUS := 300.0
+const PANIC_SHOCK := 3.0                   # per second, per routing friend in sight
+
+## How many times a regiment can break before it is finished. Past this it never rallies
+## again and runs until it is off the field -- Total War's "shattered", which is what
+## stops a broken flank quietly re-forming and coming back.
+const ROUTS_BEFORE_SHATTERED := 3
+
+## When a side is this far gone, everything it has left starts to waver whatever its own
+## morale says. "If the entire army as a whole has lost many of its units, this causes
+## every unit of an army to waver and rout regardless of Leadership."
+const ARMY_BREAKS := 0.4                   # fraction of its regiments still standing
+## It has to beat MORALE_RECOVERY handily or the two cancel: at 2.5 against a 1.2 climb
+## and the general's 0.7, a collapsing army bled half a point a second and never went.
+const COLLAPSE_SHOCK := 4.0                # per second, to everything still fighting
+
+## A regiment with nobody alongside is jumpier than one in a line, and one at the moment
+## of impact is briefly braver. Both are small; both reward keeping a line together.
+const SHOULDER_RADIUS := 220.0
+const ALONE_SHOCK := 0.6                   # per second with no friend to either side
+const CHARGE_HEART := 4.0                  # per second of morale back while charging
 
 ## A general steadies the men who can see him, and taking him out is worth doing.
 ## He is not a separate unit: the biggest regiment on each side carries him, so there

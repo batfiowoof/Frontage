@@ -44,6 +44,10 @@ const REGIMENT_FIELDS := [
 	# enemy it is going for, or an order you gave is invisible until it lands.
 	["focus", TYPE_INT],
 	["stance", TYPE_INT],
+	# How many times it has broken. On the wire because a SHATTERED regiment is drawn with
+	# no banner at all, and a client cannot derive "it has run three times" from anything
+	# else it holds -- morale and state both look the same on the third rout as the first.
+	["routs", TYPE_INT],
 ]
 
 

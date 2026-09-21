@@ -31,6 +31,29 @@ const STRUCTURE := {
 }
 
 
+## What each kind is called on its banner. Two letters, because the banner is twenty-six
+## pixels wide whatever the zoom and a word does not fit in it.
+const KIND_MARK := {
+	&"spear": "SP",
+	&"sword": "SW",
+	&"archer": "AR",
+	&"pike": "PK",
+	&"cavalry": "CV",
+}
+
+
+static func mark_of_kind(kind: StringName) -> String:
+	return KIND_MARK.get(kind, "??")
+
+
+## Morale as Total War shows it on a banner: green while it is healthy, yellow once
+## something is eating it, red when the regiment is about to go.
+static func of_morale(fraction: float) -> Color:
+	if fraction > 0.6:
+		return Color("6fbf73")
+	return Color("d8c66a") if fraction > 0.3 else Color("c25b3a")
+
+
 static func of_structure(name: StringName) -> Color:
 	return STRUCTURE.get(name, Color.MAGENTA)
 

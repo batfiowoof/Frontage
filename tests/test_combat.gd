@@ -689,3 +689,66 @@ func test_a_regiment_in_contact_may_not_turn_about(t) -> void:
 		"it is still being taken in the rear three seconds later")
 	t.ok(absf(angle_difference(victim.facing, 0.0)) < deg_to_rad(60.0),
 		"it has not flipped round to face him (%.0f deg)" % rad_to_deg(victim.facing))
+
+
+# --- widening does not pay until the men are standing in it -----------------
+
+## Kills dealt by `a` to `b` over `seconds`, from a standing contact.
+func _damage_over(a, b, bs, seconds: float) -> int:
+	var was: int = b.strength
+	_run(bs, int(seconds * Rules.TICK_HZ))
+	return was - b.strength
+
+
+func test_a_wider_line_does_not_pay_until_the_men_are_in_it(t) -> void:
+	# set_width is free and always was, but it used to be INSTANT as well: files_engaged
+	# read r.width live, so the order landed and the kill rate changed on the next tick,
+	# 50ms later, while the men were still visibly walking into their new files.
+	var s := _facing_each_other()
+	var bs = s[0]
+	var wide: Regiment = s[1]
+	_run(bs, Rules.TICK_HZ)
+
+	var before := BattleState.files_engaged(wide, BattleState.Exposure.FRONT)
+	t.ok(wide.set_width(wide.width * 2), "it takes the order")
+	t.eq(BattleState.files_engaged(wide, BattleState.Exposure.FRONT), before,
+		"and fights at the frontage it is still standing in, not the one it was told")
+
+	_run(bs, Rules.TICK_HZ)                # a second in, part way there
+	var midway := BattleState.files_engaged(wide, BattleState.Exposure.FRONT)
+	t.ok(midway > before, "it comes on as the men walk (%d files, was %d)" % [midway, before])
+	t.ok(midway < wide.width, "but it is not there yet")
+
+	_run(bs, Rules.TICK_HZ * 8)
+	t.eq(BattleState.files_engaged(wide, BattleState.Exposure.FRONT), wide.width,
+		"and arrives in full once they are standing in it")
+	t.near(wide.dressed, 1.0, 0.001)
+
+
+func test_a_regiment_in_a_melee_cannot_widen_its_way_out(t) -> void:
+	# The exploit this closes. A unit already locked in contact cannot walk anywhere --
+	# _settle_state snaps it back to FIGHTING with target = pos -- but the SET_FORMATION
+	# from the same drag still landed, so dragging a wide line across a melee DOUBLED ITS
+	# OUTPUT IN PLACE IN 50 MS for nothing. It was the cheapest thing in the game.
+	var slow := _facing_each_other()
+	var fast := _facing_each_other()
+	_run(slow[0], Rules.TICK_HZ)
+	_run(fast[0], Rules.TICK_HZ)
+	t.eq(fast[1].state, Regiment.State.FIGHTING, "it is locked in")
+
+	fast[1].set_width(fast[1].width * 2)
+	var widened := _damage_over(fast[1], fast[2], fast[0], 1.0)
+	var plain := _damage_over(slow[1], slow[2], slow[0], 1.0)
+	t.ok(widened <= plain + 1,
+		"doubling its frontage mid-melee buys nothing this second (%d dead against %d)" % [
+			widened, plain])
+
+
+func test_a_width_set_directly_fights_at_that_width_at_once(t) -> void:
+	# The guard that keeps snapshot decode and every test that pokes r.width honest:
+	# `dressed` defaults to 1.0, so only set_width() ever starts a ramp.
+	var r = Regiment.make(1, 1, &"spear", Vector2.ZERO)
+	r.width = 24
+	t.near(r.dressed, 1.0, 0.001, "nothing is part-way through anything")
+	t.eq(r.fighting_width(), 24, "it fights at the width it was given")
+	t.eq(BattleState.files_engaged(r, BattleState.Exposure.FRONT), 24)

@@ -84,8 +84,8 @@ means green. Add a test file to the `TESTS` list in `run.gd` to register it.
 ## Measured
 
 Snapshot cost with the `var_to_bytes` encoder (`tests/test_snapshot.gd` prints it):
-**187 B/regiment**, so 100 regiments = 18.8 KB/snapshot = 184 KB/s per client at 10 Hz.
-A realistic 40-regiment battle is ~73 KB/s per client. Fine on LAN, marginal over the
+**195 B/regiment**, so 100 regiments = 19.6 KB/snapshot = 191 KB/s per client at 10 Hz.
+A realistic 40-regiment battle is ~76 KB/s per client. Fine on LAN, marginal over the
 internet with several clients. Hand-roll a `PackedFloat32Array` codec (roughly halves it)
 when that number starts to hurt, delta encoding after that.
 
@@ -131,10 +131,10 @@ makes a flank one-sided rather than merely favourable.
 
 Measured (`tests/test_combat.gd` prints these):
 
-	head-on, 60s        82/120 men left, morale 40, spent, still locked
-	pinned + flanked    breaks at 12s, versus 53s frontally
+	head-on, 60s        82/120 men left, morale 23, spent, still locked
+	pinned + flanked    breaks at 11s, versus 42s frontally
 	8s of fighting      18 lost when flanked, 9 when fronted
-	same frontage       3-deep breaks at 15s, 10-deep at 53s
+	same frontage       3-deep breaks at 14s, 10-deep at 42s
 	two blocks meet     centres 57 apart, fronts 12 apart
 	3s of contact       a charge kills 6, a shoving match 2
 	4s of charge        a line loses 6, a braced square 1
@@ -146,9 +146,11 @@ say**. The one knob that undoes it without touching the shapes is
 `KILLS_PER_FILE_PER_SEC` (0.06; 0.036 restores the old pace exactly).
 
 The casualty ratios held -- a flank is still 5x a frontal fight -- but one absolute did
-not: a head-on tie now resolves itself at **68s** where it used to run to the
-`BATTLE_TIME_LIMIT`. "A head-on tie cannot break itself" is therefore weaker than it
-reads above: it still cannot be broken QUICKLY, but it no longer cannot be broken at all.
+not: a head-on tie began resolving itself at **68s** where it used to run to the
+`BATTLE_TIME_LIMIT`, and it is **42s** now. "A head-on tie cannot break itself" is
+therefore weaker than it reads above: it still cannot be broken QUICKLY, but it no longer
+cannot be broken at all. The erosion is tracked where each piece of it happened -- see
+**Exhaustion** and **Coming back, which used to be free**.
 
 ## Marching, wheeling, and turning about
 
@@ -256,10 +258,27 @@ six seconds AND refuse while one was running, which made the drag that sets fron
 expensive to use and silently rate-limited `[` and `]` to one press every six seconds --
 the second press was dropped by a guard with nothing anywhere to say so.
 
-Free is not instant to LOOK at: the men walk into their new files and `bodies.gd` runs a
-`DRESS_SECONDS` clock so the HUD can say "RE-DRESSING". That clock is a fact about an
-animation, so it lives on the client, derived from the width already in the mirror --
-no sim state, no snapshot field, nothing a replay has to reproduce.
+**Free, but it does not arrive before the men do.** The men have to walk into their new
+files, and until they are there the regiment goes on fighting at the frontage it is
+actually standing in: `was_width`, blended out over `dressed`, read by `files_engaged`.
+Both are server-side like `pace` -- they start settled and a replay rebuilds them from the
+orders -- and `dressed` defaults to 1.0, which is what keeps everything that writes
+`width` directly honest. Snapshot decode and every test that pokes `r.width = 24` leave it
+at 1.0 and get the width they asked for. Only `set_width()` starts a ramp.
+
+Without that, a regiment already locked in a melee -- which cannot walk anywhere, because
+`_settle_state` snaps it back to FIGHTING with `target = pos` -- still took the
+SET_FORMATION from the same drag and **doubled its output in place in 50 ms, for
+nothing**. Dragging a wide line across a melee was the cheapest thing in the game.
+
+`reach()` deliberately still reads `width` and not the blend: the footprint is in flux
+while the men walk anyway, and ramping it too would have contact distance wobbling through
+every re-dress for no gain.
+
+The ramp and the walk take the same time by construction, not by two constants that agree
+today -- both are `|frontage(new) - frontage(old)|` over `DRESS_SPEED`. The HUD counts down
+the walk you are watching, where it used to assert a flat three seconds while the men
+finished in under one.
 
 **The default frontages are 4-6 ranks, not 10.** They used to be near-square -- a
 120-man spear at 12 files was 77 units across by 81 deep, and a sword was 63 by 81,
@@ -270,9 +289,9 @@ to pick: `DEPLOY_SPACING` is a frontage plus a shoulder, and at 110 against the 
 
 Measured (`tests/test_formations.gd` prints these):
 
-	24 files vs 6 files      15 killed against 3 over 12s
-	spears vs cavalry, 8s    a line loses 6 and kills 8
-	                         a shield wall loses 2 and kills 14
+	24 files vs 6 files      16 killed against 4 over 12s
+	spears vs cavalry, 8s    a line loses 6 and kills 9
+	                         a shield wall loses 2 and kills 15
 
 Two things that are easy to get wrong here:
 
@@ -305,6 +324,56 @@ as much as a fresh block did.
 **The rally was unreachable code.** `Regiment.recover()` has always known how to rally at
 `MORALE_RALLY_THRESHOLD`, but the sim only called it in the IDLE branch and a router is
 never IDLE. Broken men who get clear now pull themselves together.
+
+### Coming back, which used to be free
+
+A regiment breaks at 20 and rallies at 45, so the number that matters is the climb between
+them. At the old `MORALE_RECOVERY` of 4.0/s that was **six seconds** -- against a frontal
+melee drain of 0.15 to 0.225/s. One second of standing still undid eighteen to twenty-seven
+seconds of fighting, and it could be done all battle.
+
+Four things now stand between a broken regiment and the line:
+
+- **`RALLY_DELAY` first.** Breaking contact used to start the climb on the very next tick,
+  because a router clears `CONTACT_GAP` in well under a second at `ROUT_SPEED_MULT`.
+- **`MORALE_RECOVERY` is 1.2/s**, so a rally costs the better part of a minute.
+- **`morale_ceiling()` caps it at `MORALE_MAX * fraction()`.** A regiment that broke at 41%
+  casualties used to climb all the way back to a full bar in twenty seconds and return as
+  though nothing had happened. There was no permanent morale damage of any kind, and that
+  is most of why units seemed to recover instantly.
+- **`ROUTS_BEFORE_SHATTERED`.** Past three breaks a regiment is finished: `recover()`
+  refuses to rally it however calm it gets, and it runs until it is off the field. Total
+  War's shattered state, and what stops a broken flank quietly re-forming.
+
+Recovery also follows **safety, not state**. It was gated on the state machine, so a router
+pulled itself together at 4.0/s while a regiment merely repositioning recovered nothing --
+running away restored morale and manoeuvring did not. `_hearten()` now covers IDLE, MOVING
+and ROUTING alike, gated on being out of contact and having had its moment.
+
+### What breaks a line, which is the whole shape of a battle
+
+`Regiment.shock()` has always documented *"seeing a neighbour break"* as one of its
+callers. **Nothing ever called it for that.** Every regiment's morale was entirely its own
+business, so two lines simply ground each other down until one happened to cross a
+threshold, and battles were decided by attrition. `_spread_panic()` is where a battle gets
+its shape instead:
+
+	PANIC_SHOCK      a routing friend within PANIC_RADIUS frightens you
+	COLLAPSE_SHOCK   your army being under ARMY_BREAKS of itself frightens you
+	ALONE_SHOCK      having nobody within SHOULDER_RADIUS frightens you
+	CHARGE_HEART     ...and being mid-charge puts heart back
+
+The first is the one that matters: one break at the end of a line travels down it, so a
+battle now ends suddenly from one flank. `COLLAPSE_SHOCK` has to beat `MORALE_RECOVERY`
+handily or the two simply cancel -- at 2.5 against a 1.2 climb through the general's 0.7,
+a collapsing army bled half a point a second and never actually went.
+
+All of it passes through `GENERAL_STEADY`, so a commander holds a line together against
+exactly the thing that unravels it.
+
+**The head-on tie is down to 42s**, from 53. That figure has gone 125 -> 68 -> 53 -> 42
+across the frontage retune, the exhaustion work and this. `PANIC_SHOCK` and
+`TIRED_VULNERABILITY` are the dials if it has gone too far.
 
 **The biggest regiment on each side carries the general.** No unit to recruit and nothing
 new on the campaign map. He steadies the men within `GENERAL_RADIUS` -- himself included,
@@ -405,7 +474,7 @@ Measured (`tests/test_encircle.gd` prints it), over a whole four-a-side AI battl
 	coherent line   73% front, 27% round the side -- flattered too, by regiments
 	                standing INSIDE one another, which leaves exposure_of an
 	                arbitrary angle to report
-	now             80% front, 20% round the side, with the blocks separated
+	now             83% front, 17% round the side, with the blocks separated
 
 That outcome test is the only one here that measures the RESULT rather than the orders, and
 the only one that would still fail if every piece of the geometry were right and the
@@ -455,7 +524,7 @@ quiver. Two rules make them a question of where you put them rather than a numbe
 
 Out of arrows they are simply bad infantry, which is what stops a missile duel being free.
 Formation matters more here than anywhere: over 16 seconds under the same archers, a line
-loses 48 men, loose order 18, and a square 60.
+loses 48 men, loose order 18, and a square 59.
 
 Selecting archers draws their reach as a ring, and rings the enemies inside it: gold for
 the ones they can actually hit, red with a line back to the shooter for the ones a friend
@@ -493,17 +562,17 @@ except the formation bar and `[` `]`**, which is why it read as one immovable bl
 far you dragged. With ONE regiment selected it was worse than useless: the slack was
 divided by `n - 1`, so a lone unit was sent to the PRESS point at its original width.
 
-Three clamps, none of them optional, all of them in `plan_order` so the ghost shows the
-shape the regiment is actually going to be in:
+One clamp, in `plan_order` so the ghost shows the shape the regiment is going to be in:
 
 - `DRAG_MAX_RANKS` floors the frontage. Shoulders alone exceed a short drag over several
   regiments, so the share goes negative and the raw answer is `MIN_WIDTH`: two files,
   sixty ranks deep. The `column` and `square` buttons still reach the extremes, because
   `natural_width()` does not come through here.
-- A deadband of two files. A change of one is not worth `FORMATION_CHANGE_SECONDS`, and
-  without it every ordinary move-drag would re-form the regiment it was only moving.
-- `reforming > 0` returns the current width, because `set_width` refuses outright while a
-  regiment is mid-change and a preview must not draw an order the server drops.
+
+Both of the clamps that used to sit beside it are gone, and the file says so: a two-file
+deadband, and a `reforming > 0` fallback. They existed only to keep an ordinary move-drag
+from spending `FORMATION_CHANGE_SECONDS`, and frontage stopped costing that.
+`test_order_preview.gd` now tests the ABSENCE of the second one.
 
 A regiment has a maximum frontage, so a drag longer than the men can stand in **caps and
 centres** rather than stretching, and the ghost says so by not growing. Tests here measure
@@ -603,8 +672,9 @@ TOWARD what he faces, the bend moves him AROUND it, and `KEEP_CLEAR` overrules t
 Measured (`tests/test_bodies.gd` prints these):
 
 	a wider line's front rank    125..136 units from the enemy, was 132..155
-	closest man to enemy man     4.9 to 7.6 units, and 0 overlapping pairs;
-	                             it was 0.0 units, against a body 4 across
+	closest man to enemy man     4.9 units, 0 overlapping pairs; without the
+	                             clamp it is 0.1 units and 6 pairs, against a
+	                             body 4 across
 
 It is a rendering displacement and nothing more: a man keeps his `(file, depth)`, and
 `places()` is identical with and without an enemy in front of him. The moment the bend
@@ -640,6 +710,47 @@ Men chase their slots in **world** space, not local, so a regiment that turns or
 drags them after it and they catch up. Easing in local space rotates the block rigidly,
 which is the glued look.
 
+**And a man walks.** He has a ceiling and an acceleration, which he did not have at all:
+his speed was proportional to how far he was from his slot, so one 100 units out moved at
+349 world units a second and one 200 units out at 699, against a regiment that marches at
+45. Rotation had a governor -- `MAN_TURN_RATE` -- and translation had none.
+
+Worse than the top speed was the shape of it. An exponential closes the same FRACTION of
+any gap per second, so **95% of ANY distance closed in 0.83 seconds**: a one-file dressing
+shuffle and a complete reshape took exactly as long as each other. That is why re-forming
+looked instant however drastic it was, and why a wheel read as a rigid spin -- the outer
+files, which should lag, simply teleported round.
+
+The ceiling is **his own regiment's current speed plus `DRESS_SPEED`**, measured from the
+pose rather than looked up, so cavalry, a column, marsh and an exhausted regiment's
+`legs()` all come out right without the view knowing that any of them exist. He can always
+keep station, and has a dressing pace in hand on top. The exponential still sets the SHAPE
+of the approach -- it is what stops him jittering on his slot -- but no longer how fast he
+gets there. `PACE_SPREAD` is deliberately far gentler than `CATCH_UP_SPREAD`: that one
+makes men ARRIVE raggedly, and putting it on the ceiling as well had the slowest man
+walking at 11 u/s while the quickest did 29.
+
+**`_reform` deals file-major, and sorts each file by the depth the men are already at.**
+Both halves matter and both were wrong. Dealing rank-major re-numbers everybody the moment
+the rank count changes, so widening twelve files to fourteen scrambled the whole regiment;
+and dealing depths straight off the lateral sweep sent the man at the BACK of one file to
+the FRONT of the next. Measured, worst man on a 12-to-14 change:
+
+	rank-major                     76 units  (further than 12-to-20 moved him)
+	file-major, depths off sweep   76 units
+	file-major, depths by his own  15 units
+
+A small change has to be a small walk. It now is:
+
+	12 -> 14 files    0.8s
+	12 -> 40 files    5.9s
+	fastest man       23 u/s, against a 45 u/s march -- it was 521
+
+`tests/test_bodies.gd` measures that from where the men actually ARE, one frame to the
+next, never from what the code believes their speed to be. The first version of that test
+asked the speed accessor and passed happily with the limit deleted, because the intended
+speed is still computed whether or not anything obeys it.
+
 **A man is a round dot with a dark rim**, not a bare quad. Four units across on a
 seven-unit pitch is 57% filled, and at the default zoom that is a 3px square 5px from its
 neighbour, which the eye joins into one slab. The rim is what does the work: it gives
@@ -647,9 +758,39 @@ every man his own outline, so two touching dots still read as two. The texture i
 generated in code and tinted by the per-instance colour, so it costs no asset and keeps
 the team colour exactly as it was.
 
-Measured: 16 regiments x 120 men costs **4.97 ms/frame**, about a third of a 60fps budget.
+Measured: 16 regiments x 120 men costs **6.33 ms/frame**, about a third of a 60fps budget.
 `tests/test_bodies.gd` prints it. If it ever stops fitting, the integration moves to a
 shader rather than the look being abandoned.
+
+## Banners
+
+A flag above each regiment: what it is, how it is holding up, and something you can
+actually click. It follows Total War, where the banner IS the morale readout -- a coloured
+bar for state, a white flag when the unit is routing, and **no banner at all once it is
+shattered**, which is the clearest way to say that one is never coming back.
+
+It is drawn in world space but at a **constant size on screen** (`BANNER_W` / zoom), which
+is the entire point: a regiment's own footprint shrinks to nothing as you zoom out, and the
+banner is the thing that stays hittable.
+
+**Picking was worse than it looked, and the banner is what fixed it.** It was one circle of
+`PICK_RADIUS`, 46 world units, around the sim's centre point:
+
+	a 14-file regiment    half-frontage  45.5   (just inside)
+	a 20-file regiment    half-frontage  66.5   (wings unclickable)
+	a 40-file regiment    half-frontage 136.5   (the middle third, and no more)
+
+At the zoomed-out end that circle was 23 pixels across, and the click-versus-drag threshold
+was 6.0 **world** units -- a pixel and a half, so a small wobble turned every click into a
+box-select. Drawing used `_men.centre_of()` while picking used `pos`, so at half strength
+the block you could see sat forward of the circle you had to hit. Box-select tested only
+`pos`, so a regiment whose whole line was inside the box but whose centre was a few units
+outside it was left behind.
+
+`pick_at()` replaces both pickers -- they were near-identical loops differing only in an
+owner comparison -- and tries the banner, then the regiment's real footprint, then the
+circle as a last resort. It is **static and takes a pose**, so it tests headless the way
+`plan_order` does. Nothing covered picking at all before `tests/test_picking.gd`.
 
 ## The map
 
@@ -734,51 +875,8 @@ regiment would cost ~32 B each on a wire already at 171; the header is a few doz
 for the whole battle. It has to be on the wire at all because a replay rebuilds the fight
 from the opening snapshot -- the same reason `defense` is on there.
 
-Measured: over a 50s duel, untrained keeps 82 men and leaves the enemy 82; drilled and
-armoured keeps 88 and leaves them 75. Fifty seconds, not seventy: past about sixty both
-sides have broken and run, and two regiments that have stopped taking casualties measure
-nothing.
-
-## Replays## Armies
-
-Two armies **cannot share a hex**. `army_at()` returns the first army on one, and
-movement, collision detection and razing all lean on that, so a stack would quietly break
-all three. Everything about merging and splitting follows from it.
-
-- **Merge** folds one army into an adjacent one of yours. Regiments transfer up to the
-  cap and the remainder stays behind as a smaller army; the result takes `min` of the two
-  movement allowances, so combining is never a way to buy a move. Shift-click in the UI.
-- **Split** detaches chosen regiments onto an **adjacent, passable, empty** hex -- it
-  marches out rather than standing in place -- with no movement left that turn. Something
-  always stays behind.
-
-Both are deliberate orders rather than automatic, for the same reason razing is: a column
-marching past its own garrison must not silently swallow it.
-
-Splitting exists because you have fast cavalry and you have razing. Peeling one horse
-regiment off a stack to go burn farmland is the move that makes raiding worth doing.
-
-## The tech trees
-
-Two trees, **one pool**. Research is a third resource produced by settlements and by
-libraries; both trees spend it, so every tech taken in one is a tech not taken in the
-other. That tension is the reason there are two trees rather than one long list.
-
-`Rules.TECHS` is one table: tree, cost, prerequisites, and one effect. Effects are **data,
-not code** -- a small set of keys the sim reads uniformly (`yield`, `build_cost`,
-`work_radius`, `town_gold`; `attack`, `armour`, `horse_speed`, `horse_attack`, `stamina`,
-`resolve`, `siege`) -- so adding a tech is a table row and a test, never a new branch.
-
-`ADDITIVE` in `campaign_state.gd` decides which keys sum and which compound, in one place.
-
-**Battle techs are per owner, not per regiment.** The battle snapshot carries a small
-`techs` header and `BattleState.tech()` derives the multipliers. Four more floats on every
-regiment would cost ~32 B each on a wire already at 171; the header is a few dozen bytes
-for the whole battle. It has to be on the wire at all because a replay rebuilds the fight
-from the opening snapshot -- the same reason `defense` is on there.
-
-Measured: over a 50s duel, untrained keeps 82 men and leaves the enemy 82; drilled and
-armoured keeps 88 and leaves them 75. Fifty seconds, not seventy: past about sixty both
+Measured: over a 50s duel, untrained keeps 81 men and leaves the enemy 81; drilled and
+armoured keeps 92 and leaves them 76. Fifty seconds, not seventy: past about sixty both
 sides have broken and run, and two regiments that have stopped taking casualties measure
 nothing.
 
@@ -853,14 +951,14 @@ a SHARE rather than a count, for the same reason.
 **It no longer beats the two-second poll, and that is the envelopment's doing.** It used
 to ask 31 times where a clock asked 108. Now the AI sends its spare regiments round a
 flank, regiments join and leave melees far more often, and the fight genuinely changes
-more -- 111 questions against 92 on the clock. The bar that still holds, and the one that
-matters for something that fires on a change, is against asking EVERY THINK: 111 against
-536. The in-flight guard is what caps the real cost at one question per seat at a time,
-so a livelier fingerprint buys information rather than calls.
+more -- it is within a handful of the clock either way. The bar that still holds, and the
+one that matters for something that fires on a change, is against asking EVERY THINK: 47
+against 288. The in-flight guard is what caps the real cost at one question per seat at a
+time, so a livelier fingerprint buys information rather than calls.
 
 Measured (`tests/test_jev.gd` prints it):
 
-	94s battle       111 stance questions, 92 on the old 2s timer, 536 every think
+	51s battle       47 stance questions, 50 on the old 2s timer, 288 every think
 	round trip       ~860ms cold; the in-flight guard caps it at one per seat
 
 Every answer is logged to `user://jev.log`, beside the replays and the saves and for the

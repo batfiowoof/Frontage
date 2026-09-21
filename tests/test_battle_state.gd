@@ -116,13 +116,26 @@ func test_routers_outrun_marchers_and_do_not_stop(t) -> void:
 	t.eq(router.state, Regiment.State.ROUTING, "and they do not stop when they arrive")
 
 
-func test_idle_regiments_recover_morale(t) -> void:
+## This used to read `t.near(r.morale, 50.0 + Rules.MORALE_RECOVERY, 0.01)` -- written
+## against the constant, so changing 4.0 to 0.8 still passed and the recovery rate was in
+## practice untested. What matters is not the number, it is that a regiment has to stand
+## there for a WHILE before it gets anything back.
+func test_a_regiment_has_to_stand_a_while_before_morale_comes_back(t) -> void:
 	var bs = BattleState.new()
 	var r = bs.add(1, &"spear", Vector2.ZERO)
+	# A friend at its shoulder, or ALONE_SHOCK quietly eats the thing being measured: a
+	# regiment standing on its own loses heart, which is a different test.
+	bs.add(1, &"spear", Vector2(0, Rules.SHOULDER_RADIUS * 0.5))
 	r.morale = 50.0
-	for i in Rules.TICK_HZ:
+	r.rally_wait = Rules.RALLY_DELAY
+	for i in int((Rules.RALLY_DELAY - 1.0) * Rules.TICK_HZ):
 		bs.step()
-	t.near(r.morale, 50.0 + Rules.MORALE_RECOVERY, 0.01, "a second of standing about")
+	t.near(r.morale, 50.0, 0.001, "nothing at all while it is still catching its breath")
+
+	for i in int(10.0 * Rules.TICK_HZ):
+		bs.step()
+	t.ok(r.morale > 50.0, "and then it starts to come back (%.1f)" % r.morale)
+	t.ok(r.morale < Rules.MORALE_MAX, "gradually, not all at once")
 
 
 func test_engaged_regiments_do_not_recover(t) -> void:

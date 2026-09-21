@@ -17,6 +17,12 @@ const BODY_SIZE := 4.0
 const DOT_RIM := 0.68
 const DOT_RIM_SHADE := 0.45
 const PICK_RADIUS := 46.0
+## The banner above each regiment, in SCREEN pixels -- it holds its size however far you
+## zoom out, which is the whole point of it. A regiment's own footprint is a world-space
+## thing and shrinks to nothing; the banner is what you can always hit.
+const BANNER_W := 26.0
+const BANNER_H := 30.0
+const BANNER_LIFT := 6.0                   # screen px between the bars and the flag
 ## Past this, a facing change is an about-face rather than a wheel: it is not interpolated
 ## and bodies.gd relabels the men instead of swinging them round.
 const ABOUT_FACE := deg_to_rad(150.0)
@@ -348,6 +354,8 @@ func _draw() -> void:
 		draw_rect(Rect2(top + Vector2(0, 10), Vector2(bar.x * stamina, 3.0)),
 			Color("6fa8c9") if stamina > 0.3 else Color("8a6fc9"))
 
+		_draw_banner(p, centre, id in selected)
+
 	if _drag_select_from != Vector2.INF:
 		var box := Rect2(_drag_select_from, get_global_mouse_position() - _drag_select_from).abs()
 		draw_rect(box, Color(1, 1, 1, 0.12))
@@ -361,6 +369,44 @@ func _draw() -> void:
 		draw_line(_order_from, mouse, Color("9fd8a0"), 2.0)
 		for row: Dictionary in _plan_order(_order_from, mouse):
 			_draw_ghost(row)
+
+
+## The flag above a regiment: what it is, how it is holding up, and something big enough
+## to click. A shattered regiment has none, which is how you can tell.
+func _draw_banner(p: Dictionary, centre: Vector2, is_selected: bool) -> void:
+	var zoom := _camera.zoom.x
+	var rect := banner_rect(p, centre, zoom)
+	if rect.size.x <= 0.0:
+		return
+	var unit := 1.0 / maxf(zoom, 0.01)
+	var routing: bool = int(p["state"]) == Regiment.State.ROUTING
+
+	# The pole, then the cloth.
+	draw_line(Vector2(centre.x, rect.end.y), Vector2(centre.x, centre.y - rect.size.y * 0.1),
+		Color(0.16, 0.15, 0.14, 0.7), 1.5 * unit)
+	var cloth := Color.WHITE if routing else Colors.of_owner(int(p["owner"]), Net.player_ids())
+	draw_rect(rect, Color(0.1, 0.09, 0.08, 0.85))
+	draw_rect(rect.grow(-1.5 * unit), cloth)
+	if is_selected:
+		draw_rect(rect, Color.WHITE, false, 2.0 * unit)
+
+	# Morale across the top, the way a Total War banner carries it.
+	var band := Rect2(rect.position + Vector2(1.5, 1.5) * unit,
+		Vector2(rect.size.x - 3.0 * unit, 4.0 * unit))
+	var fraction: float = clampf(float(p["morale"]) / Rules.MORALE_MAX, 0.0, 1.0)
+	draw_rect(band, Color(0, 0, 0, 0.45))
+	draw_rect(Rect2(band.position, Vector2(band.size.x * fraction, band.size.y)),
+		Colors.of_morale(fraction))
+
+	# ...and what it is. A routing regiment shows a bare white flag instead.
+	if routing:
+		return
+	var font := ThemeDB.fallback_font
+	var mark := Colors.mark_of_kind(p["kind"])
+	var size := int(maxf(1.0, 13.0 * unit))
+	var wide := font.get_string_size(mark, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x
+	draw_string(font, rect.position + Vector2(rect.size.x * 0.5 - wide * 0.5, rect.size.y * 0.82),
+		mark, HORIZONTAL_ALIGNMENT_LEFT, -1, size, Color(0.11, 0.10, 0.09))
 
 
 func _draw_ghost(row: Dictionary) -> void:
@@ -567,26 +613,36 @@ func _finish_selection() -> void:
 	if from == Vector2.INF:
 		return
 	var pose := _display_state()
+	var zoom := _camera.zoom.x
 	var picked := PackedInt32Array()
-	if from.distance_to(to) < 6.0:
-		# A click takes the nearest regiment, not everything under a zero-size box.
-		var best := -1
-		var best_distance := PICK_RADIUS
-		for id in pose:
-			if pose[id]["owner"] != Net.my_id():
-				continue
-			var d: float = pose[id]["pos"].distance_to(to)
-			if d < best_distance:
-				best_distance = d
-				best = id
+	# A CLICK in pixels, not in world units. The threshold was 6.0 world units, which at
+	# the zoomed-out end is a pixel and a half -- a small wobble of the mouse turned every
+	# click into a box-select.
+	if from.distance_to(to) * zoom < 6.0:
+		var best := pick_at(pose, to, Net.my_id(), true, zoom, _centres(pose))
 		if best >= 0:
 			picked.append(best)
 	else:
 		var box := Rect2(from, to - from).abs()
+		var centres := _centres(pose)
 		for id in pose:
-			if pose[id]["owner"] == Net.my_id() and box.has_point(pose[id]["pos"]):
+			if pose[id]["owner"] != Net.my_id():
+				continue
+			# Its men, not its centre point: a regiment whose whole line is inside the box
+			# but whose centre is a few units outside it used to be left behind.
+			if box.has_point(centres.get(id, pose[id]["pos"])) or box.has_point(pose[id]["pos"]):
 				picked.append(id)
 	selected = picked
+
+
+## Where each regiment is DRAWN, which is the mean of its living men and not the sim's
+## centre point. Picking used one and drawing the other, so at half strength the block you
+## could see sat forward of the circle you had to click.
+func _centres(pose: Dictionary) -> Dictionary:
+	var out := {}
+	for id in pose:
+		out[id] = _men.centre_of(id, pose[id]["pos"])
+	return out
 
 
 ## Where a right-drag would put everything, as one row per regiment.
@@ -742,16 +798,60 @@ static func spacing_of(p: Dictionary) -> float:
 ## so clicking a unit means the same thing whoever owns it.
 func _enemy_at(at: Vector2) -> int:
 	var pose := _display_state()
+	return pick_at(pose, at, Net.my_id(), false, _camera.zoom.x, _centres(pose))
+
+
+## What is under this point: a regiment of `my_id`'s if `want_mine`, otherwise anybody
+## else's. Static, and it takes a pose, so it tests headless the way plan_order does.
+##
+## Three tests in order of how deliberate the click is -- the banner, then the regiment's
+## real footprint, then a circle as a last resort. It used to be the circle alone, at
+## PICK_RADIUS 46 world units around the sim's centre point, and a 20-file line is 66.5
+## units to its shoulder: **the wings of your own line were not clickable at all**, and a
+## 40-file line offered only the middle third of itself.
+static func pick_at(pose: Dictionary, at: Vector2, my_id: int, want_mine: bool,
+		zoom: float, centres := {}) -> int:
 	var best := -1
-	var best_distance := PICK_RADIUS
+	var best_score := INF
 	for id in pose:
-		if pose[id]["owner"] == Net.my_id():
+		var p: Dictionary = pose[id]
+		if (int(p["owner"]) == my_id) != want_mine:
 			continue
-		var d: float = pose[id]["pos"].distance_to(at)
-		if d < best_distance:
-			best_distance = d
-			best = id
+		var centre: Vector2 = centres.get(id, p["pos"])
+
+		if banner_rect(p, centre, zoom).has_point(at):
+			return id                      # you aimed at the flag; nothing beats that
+
+		# Inside the block it is standing in, measured the way the sim measures it.
+		var spacing := spacing_of(p)
+		var half_w := Formation.frontage(p["max_strength"], p["width"], spacing)
+		var half_d := Formation.half_depth(p["max_strength"], p["width"], spacing)
+		var local := (at - centre).rotated(-float(p["facing"]))
+		if absf(local.x) <= half_d and absf(local.y) <= half_w:
+			var depth := maxf(absf(local.x) / maxf(half_d, 0.001),
+				absf(local.y) / maxf(half_w, 0.001))
+			if depth < best_score:
+				best_score = depth
+				best = id
+		elif best_score == INF:
+			var d := centre.distance_to(at)
+			if d < PICK_RADIUS and d + 1000.0 < best_score:
+				best_score = d + 1000.0    # only if nothing was actually hit
+				best = id
 	return best
+
+
+## The flag above a regiment, in WORLD space but a constant size on screen. Returns an
+## empty rect for a shattered regiment: Total War takes the banner away entirely, and it
+## is the clearest way to say "this one is never coming back".
+static func banner_rect(p: Dictionary, centre: Vector2, zoom: float) -> Rect2:
+	if int(p.get("routs", 0)) >= Rules.ROUTS_BEFORE_SHATTERED:
+		return Rect2()
+	var w := BANNER_W / maxf(zoom, 0.01)
+	var h := BANNER_H / maxf(zoom, 0.01)
+	var half := Formation.frontage(p["max_strength"], p["width"]) + 10.0
+	var bottom := centre.y - half - 16.0 - BANNER_LIFT / maxf(zoom, 0.01)
+	return Rect2(centre.x - w * 0.5, bottom - h, w, h)
 
 
 ## Right-click moves. Right-DRAG draws the line itself -- press and release are the

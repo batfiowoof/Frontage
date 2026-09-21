@@ -4,6 +4,7 @@ extends RefCounted
 ## Combat resolution lives in battle_state.gd — this file never looks at other regiments.
 
 const Rules := preload("res://sim/rules.gd")
+const Formation := preload("res://sim/formation.gd")
 
 enum State { IDLE, MOVING, FIGHTING, ROUTING, DEAD }
 
@@ -43,6 +44,21 @@ var damage_pool := 0.0
 ## only ever draws interpolated positions. Nothing on the wire has to carry it.
 var pace := 0.0
 
+## The frontage it is still actually FIGHTING at, and how far through the re-dress it is.
+## Server-side like `pace`: they start settled and a replay rebuilds them from the orders.
+##
+## `dressed` defaults to 1.0 and that is load-bearing. Everything that writes `width`
+## directly -- snapshot decode, and every test that pokes `r.width = 24` -- leaves it at
+## 1.0 and gets the width it asked for with no blending. Only `set_width()` starts a ramp.
+## How many times it has broken, and how long since it was last in contact. `routs` is on
+## the wire: the banner has to show a shattered regiment as having no flag at all, and a
+## client cannot derive that from anything else it holds.
+var routs := 0
+var rally_wait := 0.0
+
+var was_width := 0
+var dressed := 1.0
+
 ## Seconds of charge left. Set when a regiment at a run reaches the enemy and burnt
 ## down every tick after, so the bonus belongs to the impact and not to the melee.
 ## Server-side, like damage_pool: it lasts three seconds and a client draws bodies.
@@ -72,6 +88,7 @@ static func make(p_id: int, p_owner: int, p_kind: StringName, p_pos: Vector2, p_
 	r.strength = spec["strength"]
 	r.max_strength = spec["strength"]
 	r.width = spec["width"]
+	r.was_width = r.width
 	r.pos = p_pos
 	r.facing = p_facing
 	r.target = p_pos
@@ -175,17 +192,42 @@ func natural_width() -> int:
 ## refused by the `reforming > 0` guard that used to be on this function, with nothing
 ## anywhere to say so.
 ##
-## Re-dressing is not instant to LOOK at: the men walk into their new files, and
-## bodies.gd runs a clock so the HUD can say so. That is a fact about the animation and
-## lives on the client, which is why there is nothing here to match it.
+## Free, but **it does not arrive before the men do**. The men have to walk into their new
+## files, and until they are there the regiment goes on fighting at the frontage it is
+## actually standing in -- `was_width`, blended out over `dressed`.
+##
+## Without that, a regiment already locked in a melee -- which cannot walk anywhere,
+## because `_settle_state` snaps it back to FIGHTING with `target = pos` -- still took the
+## SET_FORMATION from the same drag and DOUBLED ITS OUTPUT IN PLACE IN 50 MS, for nothing.
+## Dragging a wide line across a melee was the cheapest thing in the game.
 func set_width(w: int) -> bool:
 	if state == State.DEAD:
 		return false
 	var wanted := clampi(w, Rules.MIN_WIDTH, mini(Rules.MAX_WIDTH, maxi(Rules.MIN_WIDTH, max_strength)))
 	if wanted == width:
 		return false
+	# Blend out from wherever it had actually got to, not from the last width ORDERED, or
+	# a second drag part-way through the first would start it over from a line it never
+	# stood in.
+	was_width = fighting_width()
+	dressed = 0.0
 	width = wanted
 	return true
+
+
+## How far the end man still has to walk, which is what paces both the re-dress and the
+## ramp. Zero when there is nothing to do.
+func dress_walk() -> float:
+	return absf(Formation.frontage(max_strength, width, spacing())
+		- Formation.frontage(max_strength, was_width, spacing()))
+
+
+## The frontage it is FIGHTING at right now, somewhere between the one it is standing in
+## and the one it was told to take up.
+func fighting_width() -> int:
+	if dressed >= 1.0 or was_width <= 0:
+		return width
+	return int(round(lerpf(float(was_width), float(width), dressed)))
 
 
 func is_alive() -> bool:
@@ -240,17 +282,34 @@ func shock(amount: float) -> void:
 		_start_rout()
 
 
+## A regiment that has broken too many times is finished: it never rallies again and runs
+## until it is off the field. Three routs, as Total War has it.
+func shattered() -> bool:
+	return routs >= Rules.ROUTS_BEFORE_SHATTERED
+
+
+## The best morale this regiment can still reach. A wreck does not get a full bar back:
+## one that broke at 41% casualties used to climb all the way to 100 in twenty seconds and
+## come back as though nothing had happened. There was no permanent morale damage of any
+## kind, which is most of why units seemed to recover instantly.
+func morale_ceiling() -> float:
+	return Rules.MORALE_MAX * maxf(0.15, fraction())
+
+
 func recover(amount: float) -> void:
 	if state == State.DEAD:
 		return
-	morale = minf(Rules.MORALE_MAX, morale + amount)
-	if state == State.ROUTING and morale >= Rules.MORALE_RALLY_THRESHOLD:
+	morale = minf(morale_ceiling(), maxf(morale, morale + amount))
+	# Shattered men do not come back, however calm they get on the way out.
+	if state == State.ROUTING and not shattered() and morale >= Rules.MORALE_RALLY_THRESHOLD:
 		state = State.IDLE
 		target = pos
 
 
 func _start_rout() -> void:
 	state = State.ROUTING
+	routs += 1
+	rally_wait = Rules.RALLY_DELAY
 	engaged_with = -1
 	# Run directly away from whatever it was facing.
 	target = pos - Vector2.from_angle(facing) * 1000.0

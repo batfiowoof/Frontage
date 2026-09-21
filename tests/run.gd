@@ -25,6 +25,7 @@ const TESTS := [
 	"res://tests/test_forfeit.gd",
 	"res://tests/test_targeting.gd",
 	"res://tests/test_charge.gd",
+	"res://tests/test_picking.gd",
 	"res://tests/test_encircle.gd",
 	"res://tests/test_jev.gd",
 ]
