@@ -432,8 +432,49 @@ const STRUCTURES := {
 	&"library":  {"cost": 180, "gold": 0,  "food": 0,  "research": 6, "on": [0, 3], "unlocks": [],                    "defense": 0.0,  "in_town": false},
 	&"barracks": {"cost": 250, "gold": 0,  "food": 0,  "research": 0, "on": [0, 3], "unlocks": [&"pike", &"cavalry"], "defense": 0.0,  "in_town": false},
 	&"walls":    {"cost": 300, "gold": 0,  "food": 0,  "research": 0, "on": [],     "unlocks": [],                    "defense": 0.3,  "in_town": true},
+	# Pays nothing and unlocks nothing. Its entire worth is that the next road along
+	# connects to it: a hex spent on movement instead of on income.
+	&"road":     {"cost": 60,  "gold": 0,  "food": 0,  "research": 0, "on": [0, 1, 3], "unlocks": [],                  "defense": 0.0,  "in_town": false},
 }
 const WORK_RADIUS := 2
+
+# --- towns that grow ------------------------------------------------------
+## A settlement used to be a static object worth a flat SETTLEMENT_GOLD a turn forever,
+## which made the whole economy a headcount of towns. Population is what turns holding
+## ground into developing it -- the Civ half of the loop.
+##
+## Growth is fed from the SHARED larder, not a per-town one.
+## ponytail: every town of a fed empire grows at the same rate, so a capital and a
+## village founded last turn are equally good. Per-town food is the upgrade, and it wants
+## worked_yield to attribute its output to a settlement rather than to an owner.
+const START_POP := 1
+const MAX_POP := 6
+## Food taken out of the larder to add one to a town. A surplus this size is what growth
+## costs; anything less and the empire is fed but static.
+const FOOD_PER_GROWTH := 40
+## What each point of population past the first adds to a town's own output, as a share of
+## its base. At 0.35 a maxed town is worth 2.75 of a new one -- worth developing, not so
+## much that the first player to five towns has already won.
+const POP_YIELD := 0.35
+
+# --- towns that resent you ------------------------------------------------
+## Taking a town used to be permanent, silent and free: it changed colour and started
+## paying you on the next turn. Unrest is what makes conquest cost something after the
+## battle, and what stops a blind land-grab being the only strategy.
+##
+## The empire term is the important half. Unrest decays on its own, so a captured town in
+## a SMALL empire calms down and becomes yours; past UNREST_FREE_TOWNS it gains as fast as
+## it settles and the town stays angry, which is the ceiling on how much you can hold.
+const UNREST_ON_CAPTURE := 4
+const UNREST_FREE_TOWNS := 4
+## Past this the town throws you out and goes back to being nobody's.
+const UNREST_REVOLT := 8
+
+# --- roads ----------------------------------------------------------------
+## Moving from one road hex onto another is free. A road is therefore worth nothing on its
+## own and everything as a chain, which is what a road IS -- and because it is a structure
+## like any other, laying one down is a hex you did not farm.
+const ROAD_IS_FREE := true
 ## Hexes a new town must keep from every existing one. It has to EXCEED WORK_RADIUS or
 ## two towns bank the same fields and founding becomes a way to double-count land
 ## somebody is already working; at WORK_RADIUS + 1 their worked areas touch without
@@ -457,6 +498,22 @@ const RAZE_LOOT := 0.4
 const SIGHT_RADIUS := 2
 const TURN_LIMIT := 100
 const ARMY_MOVE_POINTS := 3
+
+# --- what an army is doing between turns ----------------------------------
+## Total War's campaign stances. An army was only ever marching; these are the other
+## three things a real one does, and each costs it the movement it would rather have had.
+##
+##   MARCH    the default: walk, and be seen
+##   FORCED   more ground covered, and the men arrive spent -- read in _deploy, so the
+##            price is paid in the battle rather than on the map where it is invisible
+##   FORTIFY  stands its ground and digs in: defence in a battle fought on this hex
+##   AMBUSH   not sent to the enemy at all, even where they can see the hex
+##
+## FORTIFY and AMBUSH both cost the whole turn's movement -- they are things an army
+## does INSTEAD of marching, or they would be free riders on a move it made anyway.
+const FORCED_MARCH_BONUS := 2
+const FORCED_MARCH_STAMINA := 0.55         # what its regiments deploy with
+const FORTIFY_DEFENSE := 0.2               # stacks with walls, capped where walls are
 ## Men each regiment loses per turn when the larder is empty. Food used to floor at
 ## zero, which made upkeep a number with no teeth: you could field any army you liked
 ## as long as you did not mind the counter reading 0.

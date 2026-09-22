@@ -21,6 +21,26 @@ const PAN_SPEED := 700.0
 ## the start of a campaign when almost all of it is fogged.
 const FOG := Color(0.05, 0.05, 0.08, 0.72)
 
+## The four things an army can be doing, in the order the enum has them.
+const STANCE_NAMES := {
+	"march": Campaign.Stance.MARCH,
+	"forced": Campaign.Stance.FORCED,
+	"fortify": Campaign.Stance.FORTIFY,
+	"ambush": Campaign.Stance.AMBUSH,
+}
+## One letter above the counter, since the stance bar only shows the selected army.
+const STANCE_MARKS := {
+	Campaign.Stance.FORCED: "F",
+	Campaign.Stance.FORTIFY: "D",
+	Campaign.Stance.AMBUSH: "A",
+}
+const STANCE_HINTS := {
+	"march": "walk, and be seen",
+	"forced": "further each turn, but the men arrive spent",
+	"fortify": "stand and dig in: harder to beat on this hex. Costs the turn.",
+	"ambush": "the enemy is not told you are here. Costs the turn.",
+}
+
 var selected_army := -1
 var selected_tile := -1
 
@@ -35,6 +55,8 @@ var _build_bar: HBoxContainer
 var _build_buttons := {}
 var _raze: Button
 var _found: Button
+var _stance_bar: HBoxContainer
+var _stance_buttons := {}
 var _trees: PanelContainer
 var _tech_buttons := {}
 var _detach_bar: HBoxContainer
@@ -129,6 +151,23 @@ func _build_hud() -> void:
 		if selected_army >= 0:
 			Net.order_found(selected_army))
 	layer.add_child(_found)
+
+	# What the selected army does between turns. Digging in and lying in wait both cost
+	# the whole turn's movement, so the bar sits where you can see the move counter.
+	_stance_bar = HBoxContainer.new()
+	_stance_bar.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	_stance_bar.position = Vector2(12, -164)
+	layer.add_child(_stance_bar)
+	for label in STANCE_NAMES:
+		var stance: int = STANCE_NAMES[label]
+		var b := Button.new()
+		b.text = label
+		b.tooltip_text = STANCE_HINTS[label]
+		b.pressed.connect(func() -> void:
+			if selected_army >= 0:
+				Net.order_army_stance(selected_army, stance))
+		_stance_bar.add_child(b)
+		_stance_buttons[stance] = b
 
 	if Net.is_server():
 		var save := Button.new()
@@ -455,6 +494,16 @@ func _refresh() -> void:
 	# than reimplemented here: the button has to appear exactly when the order would be
 	# accepted, and there is one answer to that question.
 	_found.visible = selected_army >= 0 and cs.can_found(me, selected_army)
+
+	# Posting an army is only yours to do, so the bar is hidden for anybody else's.
+	var posting: bool = selected_army >= 0 and cs.armies.has(selected_army) 		and cs.armies[selected_army]["owner"] == me
+	_stance_bar.visible = posting
+	if posting:
+		var now: int = Campaign.stance_of(cs.armies[selected_army])
+		for stance: int in _stance_buttons:
+			var b: Button = _stance_buttons[stance]
+			b.disabled = stance == now
+			b.modulate = Color("9fd8a0") if stance == now else Color.WHITE
 	if mine_here:
 		var purse := int(cs.gold.get(me, 0))
 		var available: Array = cs.recruitable_at(selected_tile)
@@ -514,12 +563,24 @@ func _draw() -> void:
 			draw_circle(Hex.centre(i), Rules.HEX_SIZE * 0.24, Colors.of_structure(made))
 			draw_arc(Hex.centre(i), Rules.HEX_SIZE * 0.24, 0, TAU, 16, Color(0, 0, 0, 0.55), 1.5)
 
+	var font := ThemeDB.fallback_font
 	for s: Dictionary in cs.settlements:
 		var c := Colors.of_owner(s["owner"], seating)
 		var at := Hex.centre(s["tile"])
 		var box := Rules.HEX_SIZE * 0.62
 		draw_rect(Rect2(at - Vector2(box, box) * 0.5, Vector2(box, box)), c)
 		draw_rect(Rect2(at - Vector2(box, box) * 0.5, Vector2(box, box)), Color.BLACK, false, 2.0)
+		# How many live there, and how much they mind you. A town that is merely coloured
+		# in tells you nothing about whether it is worth anything.
+		draw_string(font, at + Vector2(-4, 5), str(Campaign.pop_of(s)),
+			HORIZONTAL_ALIGNMENT_LEFT, -1, 15, Color.BLACK)
+		var anger := Campaign.unrest_of(s)
+		if anger > 0:
+			# A ring that closes as the town boils over, so the one about to revolt is
+			# the one you can see from across the map.
+			draw_arc(at, box * 0.95, -PI * 0.5,
+				-PI * 0.5 + TAU * (float(anger) / float(Rules.UNREST_REVOLT)),
+				20, Color("d4553a"), 3.0)
 
 
 	# armies_visible_to and not sorted_army_ids: the same call the wire filter makes, so
@@ -533,9 +594,14 @@ func _draw() -> void:
 		draw_arc(centre, Rules.HEX_SIZE * 0.42, 0, TAU, 24, Color.BLACK, 2.0)
 		if a["id"] == selected_army:
 			draw_arc(centre, Rules.HEX_SIZE * 0.6, 0, TAU, 28, Color.WHITE, 2.5)
-		var font := ThemeDB.fallback_font
 		draw_string(font, centre + Vector2(-5, 5), str(a["regiments"].size()),
 			HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color.BLACK)
+		# What it is doing between turns. A dug-in or hidden army looks exactly like a
+		# marching one otherwise, and both of them gave up a turn to be that way.
+		var posted := Campaign.stance_of(a)
+		if posted != Campaign.Stance.MARCH:
+			draw_string(font, centre + Vector2(-Rules.HEX_SIZE * 0.5, -Rules.HEX_SIZE * 0.5),
+				STANCE_MARKS[posted], HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color.WHITE)
 
 	# The route the selected army would take, so marching is not guesswork.
 	if selected_army >= 0 and cs.armies.has(selected_army):

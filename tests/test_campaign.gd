@@ -88,12 +88,17 @@ func test_end_turn_restores_movement_and_pays_income(t) -> void:
 
 
 func test_upkeep_eats_food(t) -> void:
+	# The surplus now also buys population, so the larder is not simply income minus
+	# upkeep any more -- what is left over went into the town. All three terms are named
+	# here rather than folding growth into a magic number.
 	var cs = _two_player()
 	var upkeep: int = cs.upkeep_of(1)
 	t.ok(upkeep > 0, "three regiments cost something")
 	var before: int = cs.food[1]
+	var pop_before: int = Campaign.pop_of(cs.settlements[0])
 	cs.end_turn()
-	t.eq(cs.food[1], before + Rules.SETTLEMENT_FOOD - upkeep)
+	var grew: int = Campaign.pop_of(cs.settlements[0]) - pop_before
+	t.eq(cs.food[1], before + Rules.SETTLEMENT_FOOD - upkeep - grew * Rules.FOOD_PER_GROWTH)
 
 
 func test_food_floors_at_zero_rather_than_going_negative(t) -> void:

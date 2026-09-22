@@ -55,6 +55,8 @@ settlement raising them; walls cut the damage a defender takes in a battle fough
 tile. Feed the army or it deserts, and a starving army does not replenish either.
 You only see what your armies and towns can see, and only ever having seen a hex is enough
 to keep it on your map. Raise a settler and march it somewhere clear to found a new town.
+Towns grow on a food surplus and resent being conquered; hold more than you can govern and
+one of them will throw you out. An army can force its march, dig in, or lie in wait.
 A regiment that survives a battle brings its experience to the next one. The campaign ends
 when somebody is the last one standing, or on settlements at TURN_LIMIT.
 Regiments build up to a march and brake into a stop; they hold the facing you gave them
@@ -891,6 +893,82 @@ armoured keeps 92 and leaves them 76. Fifty seconds, not seventy: past about six
 sides have broken and run, and two regiments that have stopped taking casualties measure
 nothing.
 
+## Towns that grow, and towns that resent you
+
+A settlement was a static object worth a flat `SETTLEMENT_GOLD` a turn forever, and taking
+one was permanent, silent and free. Between them that made the campaign a **headcount of
+towns**: no reason to develop what you held, and no cost to taking more.
+
+**Population multiplies, unrest suppresses, and the two are independent.** A big angry town
+is worth less than a small contented one, which is the whole argument against taking every
+settlement you can reach. `settlement_income()` reads both; `contentment()` is a ramp
+rather than a branch, so there is no cliff where a town stops paying.
+
+Growth is bought with the **surplus**, not with income: an empire that eats everything it
+makes is fed and static, and the decision is another regiment or another point of
+population that pays for the rest of the campaign. An angry town does not grow either —
+`unrest` gates growth rather than merely taxing it, or a province in revolt would still be
+quietly getting bigger.
+
+`ponytail:` every town of a fed empire grows at the same rate, so a capital and a village
+founded last turn are equally good. Per-town food is the upgrade, and it wants
+`worked_yield` attributing its output to a settlement rather than to an owner.
+
+**The empire term is the important half of unrest.** Unrest decays on its own, so a
+captured town in a SMALL empire calms down and becomes yours; past `UNREST_FREE_TOWNS` it
+gains as fast as it settles and the town stays angry. That is the ceiling on conquest —
+not that you cannot take the next town, but that taking it keeps the last one angry. A
+small empire can never lose a town this way, however angry, and that is deliberate:
+governing what you can hold has to actually work or the mechanic is a timer.
+
+**A town that boils over goes back to being nobody's.** Never to another player — it
+revolted against YOU, and handing it to whoever is nearest would make unrest a weapon
+pointed at somebody else.
+
+Both fields are range-checked on decode and not merely typed: population multiplies a
+town's output and unrest divides it, so a peer that could name either could name its
+income. Both are read through `pop_of()` / `unrest_of()` defaults, so a settlement built by
+hand in a test has neither key and still works.
+
+## Roads
+
+A structure like any other, which is the point: laying one down is a hex you did not farm.
+**Free only from one road hex onto another** — a road is worth nothing alone and everything
+as a chain, so a single made-up hex in open country buys precisely nothing and building a
+route is building a route.
+
+`ponytail:` the AI does not build them. Its planner places one structure a turn on the
+first hex that will take it, so it would scatter single road hexes that connect to nothing.
+A planner that lays a ROUTE is the upgrade.
+
+## What an army is doing between turns
+
+Total War's campaign stances. An army was only ever marching.
+
+	march    walk, and be seen
+	forced   more ground, and the men arrive spent
+	fortify  stand and dig in: defence in a battle fought on this hex
+	ambush   not sent to the enemy at all, even where they can see the hex
+
+**Fortify and ambush cost the whole turn's movement, charged the moment you adopt one.**
+Next turn would be free: an army marches its three hexes, digs in on arrival and has paid
+nothing at all.
+
+**A forced march is paid for in `_deploy` and nowhere else.** The regiments arrive at
+`FORCED_MARCH_STAMINA`, so an army that covered five hexes and never fought has spent
+nothing — that is the whole of the gamble, and it is why the price cannot sit on the
+campaign map where it would be invisible. It is also the one stance that describes HOW an
+army is moving, so marching does not clear it; marching does clear the other two, because
+an army that walked is not dug in and is not hiding.
+
+**Ambush is the stance fog made possible.** `armies_visible_to` drops it for everybody but
+its owner, so seeing the hex is not seeing the army, and marching into one is the ambush.
+The order is `ARMY_STANCE` and not `STANCE` — that one has always been a BATTLE regiment's
+posture bitfield, and reusing it would have put two unrelated things behind one name.
+
+Fortification stacks with walls and goes through `siege` like walls do; `_strike` clamps
+the total at 0.9 as it always did.
+
 ## Fog of war
 
 **The campaign snapshot goes out once per player, not once.** `broadcast_campaign()` sent
@@ -1203,4 +1281,5 @@ fights.
 Marked in code with `# ponytail:` comments naming the ceiling and the upgrade path.
 Currently deferred: delta encoding, client-side prediction, reconnect/host migration,
 NAT punch-through (LAN + direct IP only), an AI that respects fog, a remembered stale
-owner for towns behind the fog, sieges, diplomacy, roads, and city growth.
+owner for towns behind the fog, per-town food, an AI that lays road ROUTES, sieges and
+diplomacy.

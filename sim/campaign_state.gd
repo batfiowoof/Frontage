@@ -15,8 +15,8 @@ const MAX_REGIMENTS_PER_ARMY := 8
 var turn := 1
 var terrain := PackedByteArray()
 var structures := PackedByteArray()     # parallel to terrain, an index into Rules.STRUCTURES
-var settlements := []              # [{tile:int, owner:int, name:String}]
-var armies := {}                   # id -> {id, owner, tile, move_left, regiments:Array}
+var settlements := []              # [{tile:int, owner:int, name:String, pop:int, unrest:int}]
+var armies := {}                   # id -> {id, owner, tile, move_left, stance:int, regiments:Array}
                                    # a regiment is [kind, strength, xp]
 var gold := {}                     # owner -> int
 var food := {}                     # owner -> int
@@ -188,10 +188,36 @@ func men_of(owner: int) -> int:
 
 
 ## What a settlement is worth per turn on its own, before the land around it. Since
-## every structure now stands on a hex, this really is just the town.
-static func settlement_income(_s: Dictionary) -> Dictionary:
-	return {"gold": Rules.SETTLEMENT_GOLD, "food": Rules.SETTLEMENT_FOOD,
-		"research": Rules.SETTLEMENT_RESEARCH}
+## every structure now stands on a hex, this really is just the town -- but the town is no
+## longer a flat number: it is how many people live there and how much they like you.
+##
+## Population multiplies, unrest suppresses, and the two are deliberately independent: a
+## big angry town is worth less than a small contented one, which is the whole argument
+## against taking every settlement you can reach.
+static func settlement_income(s: Dictionary) -> Dictionary:
+	var scale := (1.0 + float(pop_of(s) - 1) * Rules.POP_YIELD) * contentment(s)
+	return {
+		"gold": int(round(float(Rules.SETTLEMENT_GOLD) * scale)),
+		"food": int(round(float(Rules.SETTLEMENT_FOOD) * scale)),
+		"research": int(round(float(Rules.SETTLEMENT_RESEARCH) * scale)),
+	}
+
+
+## How much of its output a town is actually handing over, 1.0 down to 0.0 at revolt.
+## Read rather than branched on, so there is no cliff where a town stops paying.
+static func contentment(s: Dictionary) -> float:
+	return clampf(1.0 - float(unrest_of(s)) / float(Rules.UNREST_REVOLT), 0.0, 1.0)
+
+
+## Defaulted readers, because a settlement dictionary built by hand in a test -- or
+## decoded from a snapshot that predates either field -- has neither key. Everything that
+## asks goes through these, so there is one place that decides what a missing one means.
+static func pop_of(s: Dictionary) -> int:
+	return int(s.get("pop", Rules.START_POP))
+
+
+static func unrest_of(s: Dictionary) -> int:
+	return int(s.get("unrest", 0))
 
 
 ## Everything this player has learned.
@@ -374,6 +400,42 @@ func raze(owner: int, army_id: int) -> bool:
 	return true
 
 
+# --- what an army is doing ------------------------------------------------
+## APPEND ONLY, like the order enum: these ints go on the wire and into saves.
+enum Stance { MARCH, FORCED, FORTIFY, AMBUSH }
+
+
+static func stance_of(a: Dictionary) -> int:
+	return int(a.get("stance", Stance.MARCH))
+
+
+## How far this army may march this turn. FORCED buys ground with the state the men
+## arrive in -- the price is taken in `_deploy`, not here, because a tired army that
+## never fought should not have paid anything.
+static func move_points(a: Dictionary) -> int:
+	return Rules.ARMY_MOVE_POINTS + (Rules.FORCED_MARCH_BONUS if stance_of(a) == Stance.FORCED else 0)
+
+
+## Standing still is the price of both of the standing-still stances, and it is charged
+## the moment you adopt one rather than next turn: otherwise an army marches its three
+## hexes, digs in on arrival and has paid nothing at all.
+func set_stance(owner: int, army_id: int, stance: int) -> bool:
+	var a = armies.get(army_id)
+	if a == null or a["owner"] != owner:
+		return false
+	if stance < 0 or stance > Stance.AMBUSH:
+		return false
+	a["stance"] = stance
+	if stance == Stance.FORTIFY or stance == Stance.AMBUSH:
+		a["move_left"] = 0
+	return true
+
+
+## What a dug-in army adds to the ground it is standing on, over and above any walls.
+static func fortification(a: Dictionary) -> float:
+	return Rules.FORTIFY_DEFENSE if stance_of(a) == Stance.FORTIFY else 0.0
+
+
 # --- founding a town ------------------------------------------------------
 ## The map used to be fixed at generation, so the only way to grow was to take somebody
 ## else's town. A settler is how a player makes a new one.
@@ -421,6 +483,7 @@ func found(owner: int, army_id: int) -> bool:
 	settlements.append({
 		"tile": tile, "owner": owner,
 		"name": "Town %d" % (settlements.size() + 1),
+		"pop": Rules.START_POP, "unrest": 0,
 	})
 	a["regiments"].remove_at(settler_in(a))
 	a["move_left"] = 0
@@ -577,7 +640,11 @@ func armies_visible_to(owner: int) -> Array:
 	var out := []
 	for id in sorted_army_ids():
 		var a: Dictionary = armies[id]
-		if a["owner"] == owner or can_see(owner, int(a["tile"])):
+		if a["owner"] == owner:
+			out.append(a)
+		elif stance_of(a) == Stance.AMBUSH:
+			continue           # lying in wait: seeing the hex is not seeing the army
+		elif can_see(owner, int(a["tile"])):
 			out.append(a)
 	return out
 
@@ -624,6 +691,7 @@ func add_army(owner: int, tile: int, kinds: Array) -> Dictionary:
 		"owner": owner,
 		"tile": tile,
 		"move_left": Rules.ARMY_MOVE_POINTS,
+		"stance": Stance.MARCH,
 		"regiments": raised,
 	}
 	_next_army += 1
@@ -653,17 +721,28 @@ func move_army(army_id: int, dest: int) -> Dictionary:
 			a["move_left"] -= 1
 			result["collision"] = [army_id, blocker["id"]]
 			return result                          # stop on contact; a battle decides the tile
+		# A road is worth nothing on its own and everything as a chain: the step is free
+		# only if BOTH ends of it are made up. One road hex in open country buys nothing,
+		# which is what makes building a route a route rather than a hex.
+		var free: bool = Rules.ROAD_IS_FREE and structure_at(a["tile"]) == &"road" 			and structure_at(step) == &"road"
 		a["tile"] = step
-		a["move_left"] -= 1
+		if not free:
+			a["move_left"] -= 1
 		result["moved"] += 1
 		_capture_if_undefended(a)
+	# An army that marched is not dug in and is not hiding, whatever it was doing before.
+	if result["moved"] > 0 and stance_of(a) != Stance.FORCED:
+		a["stance"] = Stance.MARCH
 	return result
 
 
+## Taking a town is not the end of taking a town. It comes with people who did not ask
+## for you, and a big empire cannot calm them all down at once -- see `_settle_unrest`.
 func _capture_if_undefended(a: Dictionary) -> void:
 	var s = settlement_at(a["tile"])
 	if s != null and s["owner"] != a["owner"]:
 		s["owner"] = a["owner"]
+		s["unrest"] = Rules.UNREST_ON_CAPTURE
 
 
 func recruit(owner: int, tile: int, kind: StringName) -> bool:
@@ -835,10 +914,11 @@ func end_turn() -> void:
 			starving[owner] = true
 			_starve(owner)
 			larder = 0
-		food[owner] = larder
+		food[owner] = larder - _grow_towns(owner, larder)
+		_settle_unrest(owner)
 
 	for a in armies.values():
-		a["move_left"] = Rules.ARMY_MOVE_POINTS
+		a["move_left"] = move_points(a)
 		# An army that cannot be fed does not also top up its ranks. Replenishing a
 		# starving army cancels the desertion out and upkeep goes back to being a
 		# number with no consequences.
@@ -848,6 +928,48 @@ func end_turn() -> void:
 		_cull(id)
 	ready.clear()
 	turn += 1
+
+
+## Towns grow on a food SURPLUS, and the surplus is what they cost. An empire that eats
+## everything it produces feeds its army and develops nothing, which is the decision:
+## another regiment, or another point of population that pays for the rest of the game.
+##
+## Returns what was spent, so end_turn can take it out of the larder. Every town of a fed
+## empire grows together -- see the ponytail note on Rules.FOOD_PER_GROWTH.
+func _grow_towns(owner: int, larder: int) -> int:
+	var spent := 0
+	for s: Dictionary in settlements:
+		if s["owner"] != owner or pop_of(s) >= Rules.MAX_POP:
+			continue
+		# An angry town does not grow either: contentment gates it rather than merely
+		# taxing it, or a revolting province would still be quietly getting bigger.
+		if unrest_of(s) > 0:
+			continue
+		if larder - spent < Rules.FOOD_PER_GROWTH:
+			break
+		s["pop"] = pop_of(s) + 1
+		spent += Rules.FOOD_PER_GROWTH
+	return spent
+
+
+## Unrest settles on its own, and an empire past UNREST_FREE_TOWNS undoes that as fast as
+## it happens. That is the ceiling on conquest: not that you cannot take the next town,
+## but that taking it keeps the last one angry.
+##
+## A town that boils over goes back to being nobody's. It does not go to another player --
+## it revolted against YOU, and handing it to your enemy would make unrest a weapon
+## pointed at whoever happens to be nearest.
+func _settle_unrest(owner: int) -> void:
+	var over: int = maxi(0, settlements_of(owner) - Rules.UNREST_FREE_TOWNS)
+	for s: Dictionary in settlements.duplicate():
+		if s["owner"] != owner:
+			continue
+		var level: int = unrest_of(s) - 1 + over
+		if level >= Rules.UNREST_REVOLT:
+			s["owner"] = 0
+			s["unrest"] = 0
+			continue
+		s["unrest"] = maxi(0, level)
 
 
 ## An army it cannot feed melts away. Regiments that melt entirely are gone.
@@ -922,7 +1044,8 @@ static func generate(owner_ids: Array, map_seed: int):
 		for nb: int in [tile - 1, tile + 1, tile - Rules.MAP_W, tile + Rules.MAP_W]:
 			if nb >= 0 and nb < ground.size():
 				ground[nb] = Terrain.PLAINS              # never wall a capital in
-		towns.append({"tile": tile, "owner": owner, "name": "Capital %d" % (n + 1)})
+		towns.append({"tile": tile, "owner": owner, "name": "Capital %d" % (n + 1),
+			"pop": Rules.START_POP, "unrest": 0})
 		purse[owner] = Rules.START_GOLD
 		larder[owner] = Rules.START_FOOD
 
@@ -937,7 +1060,8 @@ static func generate(owner_ids: Array, map_seed: int):
 			if s["tile"] == tile:
 				taken = true
 		if not taken:
-			towns.append({"tile": tile, "owner": 0, "name": "Town %d" % (k + 1)})
+			towns.append({"tile": tile, "owner": 0, "name": "Town %d" % (k + 1),
+				"pop": Rules.START_POP, "unrest": 0})
 
 	cs.terrain = ground
 	cs.structures = PackedByteArray()

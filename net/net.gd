@@ -472,6 +472,10 @@ func order_found(army_id: int) -> void:
 	submit(Orders.found(army_id))
 
 
+func order_army_stance(army_id: int, stance: int) -> void:
+	submit(Orders.army_stance(army_id, stance))
+
+
 ## Give up the battle. Goes through submit() like every other order, so the host's own
 ## surrender travels the same path a remote one does.
 func order_forfeit() -> void:
@@ -532,6 +536,8 @@ func _receive_order(sender: int, bytes: PackedByteArray) -> void:
 			_stance(sender, order)
 		Orders.Type.FOUND:
 			_found(sender, order)
+		Orders.Type.ARMY_STANCE:
+			_army_stance(sender, order)
 
 
 func _stance(sender: int, order: Dictionary) -> void:
@@ -703,6 +709,22 @@ func _raze(sender: int, order: Dictionary) -> void:
 	campaign_updated.emit(campaign)
 
 
+## March, force the march, dig in, or lie in wait. Which of those an army may
+## actually adopt is campaign_state's business, as ownership is.
+func _army_stance(sender: int, order: Dictionary) -> void:
+	if campaign == null:
+		_reject(sender, "no campaign in progress")
+		return
+	if battle != null:
+		_reject(sender, "a battle is being fought")
+		return
+	if not campaign.set_stance(sender, order["army_id"], order["stance"]):
+		_reject(sender, "army %d is not yours to post" % order["army_id"])
+		return
+	broadcast_campaign()
+	campaign_updated.emit(campaign)
+
+
 ## Put a town down. Ownership and every rule about WHERE are campaign_state's, exactly
 ## as they are for razing: this checks only that there is a campaign to put it in.
 func _found(sender: int, order: Dictionary) -> void:
@@ -768,7 +790,8 @@ func _on_armies_met(pair: Array) -> void:
 func _autoresolve(attacker: Dictionary, defender: Dictionary) -> void:
 	var contested: int = defender["tile"]
 	var result := Autoresolve.resolve(attacker["regiments"], defender["regiments"], _rng,
-		campaign.defense_at(defender["tile"], defender["owner"]))
+		campaign.defense_at(defender["tile"], defender["owner"])
+			+ CampaignState.fortification(defender))
 	for i in result["attacker_losses"]:
 		attacker["regiments"].pop_back()
 	for i in result["defender_losses"]:
@@ -793,8 +816,11 @@ func _begin_battle(attacker: Dictionary, defender: Dictionary) -> void:
 		bs.techs[side] = campaign.techs_of(side).duplicate()
 	# Siegecraft is the attacker's answer to a wall, so it is folded in here rather than
 	# left for the battle to discover -- the defence is a property of the ground.
-	var fortified := campaign.defense_at(_battle_tile, defender["owner"]) \
-		* bs.tech(attacker["owner"], &"siege")
+	# Walls belong to the ground, digging in belongs to the army, and a defender
+	# behind both gets both -- `_strike` clamps the total at 0.9 as it always did.
+	var fortified := campaign.defense_at(_battle_tile, defender["owner"])
+	fortified += CampaignState.fortification(defender)
+	fortified *= bs.tech(attacker["owner"], &"siege")
 	_deploy(bs, attacker, -Rules.DEPLOY_SEPARATION * 0.5, 0.0, 0.0)
 	_deploy(bs, defender, Rules.DEPLOY_SEPARATION * 0.5, PI, fortified)
 	if fortified > 0.0:
@@ -812,6 +838,10 @@ func _deploy(bs: BattleState, army: Dictionary, x: float, facing: float, defense
 		r.strength = int(line[i][1])          # it arrives as battered as it left
 		r.xp = int(line[i][2])                # ...and as experienced
 		r.defense = defense
+		# A forced march is paid for here and nowhere else: an army that covered
+		# five hexes and never fought has spent nothing, which is the gamble.
+		if CampaignState.stance_of(army) == CampaignState.Stance.FORCED:
+			r.stamina = Rules.FORCED_MARCH_STAMINA
 
 
 ## The battle is over: survivors go back into their campaign army and the campaign

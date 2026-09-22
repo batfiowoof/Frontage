@@ -16,7 +16,7 @@ const BattleState := preload("res://sim/battle_state.gd")
 const CampaignState := preload("res://sim/campaign_state.gd")
 const Rules := preload("res://sim/rules.gd")
 
-const VERSION := 6
+const VERSION := 7
 
 ## Field order on the wire.  Add a field here and the round-trip test covers it.
 const REGIMENT_FIELDS := [
@@ -149,11 +149,13 @@ static func decode_battle(bytes: PackedByteArray):
 static func encode_campaign(cs, for_owner := 0) -> PackedByteArray:
 	var settlements := []
 	for s in cs.settlements:
-		settlements.append([s["tile"], s["owner"], s["name"]])
+		settlements.append([s["tile"], s["owner"], s["name"],
+			CampaignState.pop_of(s), CampaignState.unrest_of(s)])
 	var armies := []
 	var known_armies: Array = cs.armies.values() if for_owner == 0 		else cs.armies_visible_to(for_owner)
 	for a in known_armies:
-		armies.append([a["id"], a["owner"], a["tile"], a["move_left"], a["regiments"]])
+		armies.append([a["id"], a["owner"], a["tile"], a["move_left"], a["regiments"],
+			CampaignState.stance_of(a)])
 	armies.sort_custom(func(x, y): return x[0] < y[0])
 	var structures: PackedByteArray = cs.structures
 	if for_owner != 0:
@@ -200,20 +202,29 @@ static func decode_campaign(bytes: PackedByteArray):
 			return null
 
 	for row in d[4]:
-		if typeof(row) != TYPE_ARRAY or row.size() != 3:
+		if typeof(row) != TYPE_ARRAY or row.size() != 5:
 			return null
 		if typeof(row[0]) != TYPE_INT or typeof(row[1]) != TYPE_INT or typeof(row[2]) != TYPE_STRING:
 			return null
 		if not _is_tile(row[0]):
 			return null
-		cs.settlements.append({"tile": row[0], "owner": row[1], "name": row[2]})
+		# Both clamped, not merely typed: population multiplies a town's output and
+		# unrest divides it, so a peer that could name either could name its income.
+		if typeof(row[3]) != TYPE_INT or row[3] < 1 or row[3] > Rules.MAX_POP:
+			return null
+		if typeof(row[4]) != TYPE_INT or row[4] < 0 or row[4] > Rules.UNREST_REVOLT:
+			return null
+		cs.settlements.append({"tile": row[0], "owner": row[1], "name": row[2],
+			"pop": row[3], "unrest": row[4]})
 
 	for row in d[5]:
-		if typeof(row) != TYPE_ARRAY or row.size() != 5:
+		if typeof(row) != TYPE_ARRAY or row.size() != 6:
 			return null
 		for i in 4:
 			if typeof(row[i]) != TYPE_INT:
 				return null
+		if typeof(row[5]) != TYPE_INT or row[5] < 0 or row[5] > CampaignState.Stance.AMBUSH:
+			return null
 		if not _is_tile(row[2]):
 			return null
 		if typeof(row[4]) != TYPE_ARRAY or row[4].size() > CampaignState.MAX_REGIMENTS_PER_ARMY:
@@ -236,7 +247,7 @@ static func decode_campaign(bytes: PackedByteArray):
 			return null                     # duplicate ids would silently drop an army
 		cs.armies[row[0]] = {
 			"id": row[0], "owner": row[1], "tile": row[2],
-			"move_left": row[3], "regiments": row[4],
+			"move_left": row[3], "stance": row[5], "regiments": row[4],
 		}
 
 	var purse = _int_map(d[6])

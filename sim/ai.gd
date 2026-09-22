@@ -87,7 +87,16 @@ const TECH_ORDER := [&"husbandry", &"drill", &"coinage", &"armoury", &"masonry",
 
 
 ## What it wants standing on its land, in the order it wants it.
+## Roads are deliberately absent. They pay nothing, they are only worth anything as a
+## chain, and this planner places one structure a turn on the first hex that will take it
+## -- so it would scatter single road hexes that buy nothing at all.
+## ponytail: the AI does not build roads. A planner that lays a ROUTE is the upgrade.
 const BUILD_ORDER := [&"walls", &"farm", &"barracks", &"library", &"market", &"mine", &"lumber", &"pasture"]
+
+## How far away a prize has to be before the AI decides to force the march. Two hexes
+## further at the cost of arriving spent is worth it for a long approach and not for a
+## short one -- a forced march onto the tile next door pays the price for nothing.
+const FORCE_MARCH_BEYOND := 5
 
 var seat := 0
 var _acted_on_turn := -1
@@ -312,8 +321,16 @@ func _march(cs, out: Array) -> void:
 		var a = cs.armies[id]
 		if _settling.has(id):
 			continue                       # it has somewhere else to be
-		if a["owner"] == seat and a["move_left"] > 0:
-			out.append(Orders.army_move(id, target))
+		if a["owner"] != seat or a["move_left"] <= 0:
+			continue
+		# A long approach is worth arriving tired for; the tile next door is not. The
+		# stance goes out BEFORE the move, since it is what decides how far that move
+		# gets -- and it costs nothing on a turn the army was marching anyway.
+		var far: bool = Campaign.hex_distance(int(a["tile"]), target) > FORCE_MARCH_BEYOND
+		var want: int = Campaign.Stance.FORCED if far else Campaign.Stance.MARCH
+		if Campaign.stance_of(a) != want:
+			out.append(Orders.army_stance(id, want))
+		out.append(Orders.army_move(id, target))
 
 
 ## The nearest thing worth walking to: an enemy or neutral settlement.

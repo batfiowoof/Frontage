@@ -10,6 +10,7 @@ extends RefCounted
 ## This file only proves that the bytes describe a well-formed order.
 
 const Rules := preload("res://sim/rules.gd")
+const CampaignState := preload("res://sim/campaign_state.gd")
 
 const VERSION := 1
 const MAX_IDS_PER_ORDER := 64          # a box selection, not a whole army list
@@ -18,7 +19,7 @@ const TILE_COUNT := Rules.MAP_W * Rules.MAP_H
 ## APPEND ONLY. These ints go on the wire and into saved .rpl files, so renumbering
 ## them silently reinterprets every recording ever made.
 enum Type { BATTLE_MOVE, ARMY_MOVE, RECRUIT, READY, BUILD, SET_FORMATION, FOCUS, RAZE,
-	RESEARCH, MERGE, SPLIT, FORFEIT, STANCE, FOUND }
+	RESEARCH, MERGE, SPLIT, FORFEIT, STANCE, FOUND, ARMY_STANCE }
 
 
 # --- encoding -------------------------------------------------------------
@@ -53,6 +54,13 @@ static func raze(army_id: int) -> PackedByteArray:
 ## would be a second thing to validate against the first.
 static func found(army_id: int) -> PackedByteArray:
 	return var_to_bytes([VERSION, Type.FOUND, army_id])
+
+
+## What an army does between turns -- march, force the march, dig in, lie in wait. A
+## separate order from STANCE, which is a BATTLE regiment's posture and has always been
+## a bitfield of something else entirely.
+static func army_stance(army_id: int, stance: int) -> PackedByteArray:
+	return var_to_bytes([VERSION, Type.ARMY_STANCE, army_id, stance])
 
 
 ## How these regiments behave when left alone: a mask of Regiment.Stance bits.
@@ -136,6 +144,8 @@ static func decode(bytes: PackedByteArray) -> Dictionary:
 			return _decode_stance(d)
 		Type.FOUND:
 			return _decode_found(d)
+		Type.ARMY_STANCE:
+			return _decode_army_stance(d)
 	return {}
 
 
@@ -252,6 +262,16 @@ static func _decode_found(d: Array) -> Dictionary:
 	if d.size() != 3 or typeof(d[2]) != TYPE_INT:
 		return {}
 	return {"type": Type.FOUND, "army_id": d[2]}
+
+
+static func _decode_army_stance(d: Array) -> Dictionary:
+	if d.size() != 4 or typeof(d[2]) != TYPE_INT or typeof(d[3]) != TYPE_INT:
+		return {}
+	# Range-checked here as well as in the sim: an unknown stance int would be stored on
+	# the army and go straight back out on the wire to everybody.
+	if d[3] < 0 or d[3] > CampaignState.Stance.AMBUSH:
+		return {}
+	return {"type": Type.ARMY_STANCE, "army_id": d[2], "stance": d[3]}
 
 
 static func _decode_merge(d: Array) -> Dictionary:

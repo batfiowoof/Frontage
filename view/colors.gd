@@ -28,6 +28,7 @@ const STRUCTURE := {
 	&"library": Color("8a7ecf"),
 	&"barracks": Color("c25b3a"),
 	&"walls": Color("cfcabc"),
+	&"road": Color("8d8578"),
 }
 
 
