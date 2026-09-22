@@ -291,12 +291,28 @@ func _wants_a_settler(cs) -> bool:
 ## before any of this existed.
 func _pressed() -> bool:
 	var level = advice.get("threat")
-	return level != null and float(level) >= PRESSED_AT
+	return level != null and _rung(float(level), THREAT_LEVELS) >= PRESSED_AT
 
 
 ## Where on the quiet / watchful / pressed scale we start behaving as though it is real.
 ## High, because digging in is expensive: it costs the army its whole turn.
 const PRESSED_AT := 0.66
+## How many rungs each score question offers, so `_rung` can put the answer on 0..1
+## whichever way the number comes back.
+const THREAT_LEVELS := 3
+const ENVELOP_LEVELS := 3
+
+
+## A score answer as a fraction of its scale, 0 for the bottom rung and 1 for the top.
+##
+## Defensive about which convention the number arrives in: anything above 1 is read as a
+## rung INDEX and normalised, anything at or below 1 is already a fraction. The thresholds
+## in this file are all written as fractions, so getting this wrong would silently move
+## every one of them rather than failing anywhere visible.
+static func _rung(value: float, levels: int) -> float:
+	if levels < 2:
+		return clampf(value, 0.0, 1.0)
+	return clampf(value / float(levels - 1) if value > 1.0 else value, 0.0, 1.0)
 
 
 ## One ram in the field at a time, and only while somebody we might march on is behind
@@ -830,7 +846,7 @@ func _release_the_horse(locked: bool) -> bool:
 ## advice changes nothing, and the ends widen or narrow the appetite either side.
 func _envelop_appetite() -> float:
 	var much = advice.get("envelop")
-	return float(much) if much != null else 0.5
+	return _rung(float(much), ENVELOP_LEVELS) if much != null else 0.5
 
 
 ## Everybody not already dealing with somebody goes after the one Jev named.

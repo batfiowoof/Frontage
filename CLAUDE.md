@@ -1448,6 +1448,18 @@ so two of the three were handled code nothing ever reached.
 	score    rate against ordered levels; a continuous score plus a confidence
 	noul     a yes/no; the probability the statement is true, which IS the confidence
 
+**A `score` carries its levels as an ORDERED ARRAY, and a `choice` as a named dictionary.**
+That is not a style difference: a score rates against levels in order, so the shape has to
+carry the ordering. Passing a dictionary gets a 422 and the only sign is
+`no answer (http 422)` in `user://jev.log` -- the game plays on perfectly, on heuristics,
+which is exactly the failure mode the whole design is built for and therefore exactly the
+one that hides a mistake. **Running it and reading that log is the only thing that proves
+a question is well-formed**; no test can, because a test with no key never sends one.
+
+Both sides of a `noul` are named in its `criteria` as `true` and `false`. It is optional
+and costs a few tokens, and a proposition with only one side described is one the model has
+to guess the other half of.
+
 The shape follows the question rather than the other way round. "Which tech" is a choice
 because there is a list. "Is this empire overextended" is a noul because there is not, and
 because the number already carries its own confidence. "How threatened are we" is a score
@@ -1461,8 +1473,14 @@ there is exactly one of those either way. That is the whole economy of this, and
 `tests/test_jev.gd` pins it: `requests` must stay at 1 while `last_questions` grows. Both
 fields exist only to be measured -- nothing that plays the game reads them.
 
+A score comes back on 0..1, and `Ai._rung` normalises it anyway: the API's own docs do not
+pin whether it is a fraction or a rung index, and every threshold in `sim/ai.gd` is written
+as a fraction -- so guessing wrong would move all of them at once and fail nowhere visible.
+
 Two of them are asked only when they are worth asking: the charge question needs a horse on
-the field, and the peace question needs somebody actually waiting. A question nobody can
+the field, and the peace question needs somebody actually waiting. **A raiding band is
+never asked anything at all** -- it builds nothing and researches nothing, so four
+questions a turn would be a request per band per turn for answers nothing would read. A question nobody can
 act on is a question not worth the tokens.
 
 The battle questions reach three places the heuristics had nothing to say about:

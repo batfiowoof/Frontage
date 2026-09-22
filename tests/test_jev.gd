@@ -508,3 +508,44 @@ func test_a_mark_that_died_in_flight_is_ignored(t) -> void:
 	for bytes: PackedByteArray in brain.battle_orders(bs):
 		t.ok(Orders.decode(bytes).get("type") != Orders.Type.FOCUS,
 			"it names nobody who is on the field")
+
+
+func test_a_score_is_read_the_same_either_way_it_arrives(t) -> void:
+	# The API's own docs do not pin whether a score comes back as a fraction or as a rung
+	# index, and every threshold in sim/ai.gd is written as a fraction -- so guessing
+	# wrong would move all of them at once and fail nowhere visible.
+	t.near(Ai._rung(0.0, 3), 0.0)
+	t.near(Ai._rung(1.0, 3), 1.0, 0.0001, "1.0 is the top of a fraction")
+	t.near(Ai._rung(2.0, 3), 1.0, 0.0001, "...and rung 2 of 3 is also the top")
+	t.near(Ai._rung(0.5, 3), 0.5)
+	t.near(Ai._rung(99.0, 3), 1.0, 0.0001, "clamped whatever arrives")
+
+
+func test_a_raider_is_never_asked_anything(t) -> void:
+	# It builds nothing, researches nothing and marches at the nearest held town. Four
+	# questions a turn for answers nothing would read is a request per band per turn.
+	var cs = Campaign.generate([1, 2], 12345)
+	var band = Ai.new(Rules.BARBARIAN_SEAT)
+	band.raids = true
+	var jev = Jev.new()
+	t.ok(not jev.consider_turn(Rules.BARBARIAN_SEAT, cs, band))
+	t.eq(jev.requests, 0)
+
+
+func test_a_score_question_carries_its_levels_in_order(t) -> void:
+	# ORDERED ARRAY, not a dictionary: a score rates against levels in order, so the
+	# shape has to carry the ordering. The endpoint answers 422 for the wrong one, and
+	# the only sign was "no answer (http 422)" in the log.
+	var cs = Campaign.generate([1, 2], 12345)
+	var asked := Jev.new().campaign_questions(cs, 1, 0)
+	t.eq(typeof(asked["threat"]["criteria"]), TYPE_ARRAY)
+	t.eq(asked["threat"]["criteria"].size(), Ai.THREAT_LEVELS)
+
+
+func test_a_choice_question_still_carries_named_options(t) -> void:
+	var cs = Campaign.generate([1, 2], 12345)
+	cs.research[1] = 100000                # or it can afford no tech and none is asked
+	var asked := Jev.new().campaign_questions(cs, 1, 0)
+	t.ok(asked.has("tech"), "precondition: it can afford more than one")
+	t.eq(typeof(asked["tech"]["criteria"]), TYPE_DICTIONARY,
+		"a choice names its options; only a score is ordered")

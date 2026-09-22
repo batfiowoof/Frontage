@@ -234,6 +234,11 @@ func _answered(result: int, code: int, _headers: PackedStringArray, body: Packed
 func consider_turn(seat: int, cs, ai) -> bool:
 	if cs == null or bool(cs.ready.get(seat, false)):
 		return false
+	# A raiding band has nothing to decide: it builds nothing, researches nothing and
+	# marches at the nearest town somebody holds. Asking it four questions a turn was a
+	# request per barbarian per turn for answers nothing would ever read.
+	if ai.raids:
+		return false
 	if _asked_on_turn.get(seat, -1) != cs.turn:
 		_asked_on_turn[seat] = cs.turn
 		ai.advice.clear()             # a new turn invalidates everything, posture included
@@ -322,6 +327,10 @@ func campaign_questions(cs, seat: int, offer_from := 0) -> Dictionary:
 	# whether this empire can govern another one.
 	out["overextended"] = {
 		"type": "noul",
+		"criteria": {
+			"true": "it already holds more than it can keep quiet",
+			"false": "it can govern what it has, and another town would pay for itself",
+		},
 		# Parenthesised as a whole before the %: bound to the last literal alone it is one
 		# placeholder taking two arguments, which Godot reports at RUNTIME and not at
 		# parse time -- so the question went out malformed and nothing said so.
@@ -338,16 +347,24 @@ func campaign_questions(cs, seat: int, offer_from := 0) -> Dictionary:
 		"instructions": ("How much danger is this player's territory in right now? This"
 			+ " decides whether its armies dig in where they stand and whether walls go to"
 			+ " the top of the building list."),
-		"criteria": {
-			"quiet": "nothing hostile is anywhere near anything of ours",
-			"watchful": "somebody is moving toward us but nothing is upon us yet",
-			"pressed": "there are enemies on our land or at our gates right now",
-		},
+		# ORDERED ARRAY, not a dictionary. A score rates against levels in order, so the
+		# shape carries the ordering -- a choice's dictionary of named options cannot. The
+		# API returns 422 for the wrong one, which is how this was caught: the request was
+		# malformed and the only sign was `no answer (http 422)` in the log.
+		"criteria": [
+			"nothing hostile is anywhere near anything of ours",
+			"somebody is moving toward us but nothing is upon us yet",
+			"there are enemies on our land or at our gates right now",
+		],
 	}
 
 	if offer_from != 0:
 		out["peace"] = {
 			"type": "noul",
+			"criteria": {
+				"true": "we are behind, or fighting somebody else matters more",
+				"false": "we are winning this and stopping now throws it away",
+			},
 			"instructions": ("Player %d has offered this player peace. Accepting means"
 				+ " neither side's armies can attack the other or take their towns until"
 				+ " somebody declares war again. Is accepting the right move?") % offer_from,
@@ -492,6 +509,11 @@ func consider_battle(seat: int, bs, ai) -> void:
 	if _has_horse(bs, seat):
 		questions["charge"] = {
 			"type": "noul",
+			"criteria": {
+				"true": "the enemy line is committed and the horse will land on it now",
+				"false": "too early or too late: nothing for a charge to break yet, or"
+					+ " nothing left of it to break",
+			},
 			"instructions": ("Is now the moment to send the cavalry in? A charge multiplies"
 				+ " damage several times over at the instant of impact and decays to"
 				+ " nothing within a few seconds, and a braced formation takes most of it"
@@ -508,11 +530,11 @@ func consider_battle(seat: int, bs, ai) -> void:
 			+ " rather than held in the line? Going round wins a head-on tie that cannot"
 			+ " break itself, but a line that sends too much away is thinner everywhere and"
 			+ " can be broken in the middle before the wrap lands."),
-		"criteria": {
-			"none": "hold everything in the line; the front is all that matters here",
-			"some": "send whatever has nobody in front of it, and no more",
-			"most": "commit heavily to the flank and accept a thinner centre",
-		},
+		"criteria": [
+			"hold everything in the line; the front is all that matters here",
+			"send whatever has nobody in front of it, and no more",
+			"commit heavily to the flank and accept a thinner centre",
+		],
 	}
 
 	var marks := _marks(bs, seat)
