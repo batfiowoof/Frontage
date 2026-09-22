@@ -171,6 +171,8 @@ func _build_something(cs, out: Array) -> void:
 	var advised = advice.get("build")
 	if advised != null and Rules.STRUCTURES.has(advised):
 		wanted = [advised] + BUILD_ORDER    # tried first, then the old order behind it
+	elif _pressed():
+		wanted = [&"walls"] + BUILD_ORDER   # under threat, the wall comes first
 	for s: Dictionary in cs.settlements:
 		if s["owner"] != seat:
 			continue
@@ -267,12 +269,34 @@ const PEACE_RATIO := 0.8
 ## One settler in the field at a time, and only while the map has room. Two at once is
 ## two escorts it has not got, and a settler wandering alone is a gift.
 func _wants_a_settler(cs) -> bool:
+	# A NOUL: "this empire is holding more than it can govern". The heuristic below
+	# counts towns against a flat cap, where the real question is whether the unrest
+	# ceiling can absorb another one -- which is a judgement, not a count.
+	var stretched = advice.get("overextended")
+	if stretched != null and float(stretched) >= 0.5:
+		return false
 	if cs.settlements_of(seat) >= MAX_TOWNS:
 		return false
 	for a in cs.armies.values():
 		if a["owner"] == seat and cs.settler_in(a) >= 0:
 			return false
 	return _somewhere_to_settle(cs, -1) >= 0
+
+
+## Is somebody at the gates? Jev answers this as a score over ordered levels and the
+## threshold is ours, which is the doctrine everywhere else in here: the model makes the
+## fuzzy judgement and we decide what to do at what level.
+##
+## No advice means no, deliberately. Without a key the AI plays exactly the game it played
+## before any of this existed.
+func _pressed() -> bool:
+	var level = advice.get("threat")
+	return level != null and float(level) >= PRESSED_AT
+
+
+## Where on the quiet / watchful / pressed scale we start behaving as though it is real.
+## High, because digging in is expensive: it costs the army its whole turn.
+const PRESSED_AT := 0.66
 
 
 ## One ram in the field at a time, and only while somebody we might march on is behind
@@ -407,6 +431,11 @@ func _march(cs, out: Array) -> void:
 		# gets -- and it costs nothing on a turn the army was marching anyway.
 		var far: bool = Campaign.hex_distance(int(a["tile"]), target) > FORCE_MARCH_BEYOND
 		var want: int = Campaign.Stance.FORCED if far else Campaign.Stance.MARCH
+		# A SCORE, read as a threshold: under real pressure the army stops marching at
+		# the enemy and digs in where it is. A score is the right shape here because the
+		# answer is how much, not which -- and the threshold is ours, as always.
+		if _pressed() and Campaign.hex_distance(int(a["tile"]), target) > 1:
+			want = Campaign.Stance.FORTIFY
 		if Campaign.stance_of(a) != want:
 			out.append(Orders.army_stance(id, want))
 		out.append(Orders.army_move(id, target))
@@ -603,17 +632,32 @@ func battle_orders(bs) -> Array:
 			locked = true
 			break
 
+	# How many regiments may go round at once. The envelopment is otherwise limited
+	# only by geometry -- a regiment wraps if nobody is in front of it -- with
+	# nothing weighing that against a thinner centre. At the middle of the scale
+	# this is the whole line, which is what it was, so no advice changes nothing.
+	var wrap_budget: int = maxi(1, int(round(float(mine.size()) * _envelop_appetite() * 2.0)))
+	var wrapped := 0
+
 	var foot := []
 	for r: Regiment in mine:
 		if r.can_shoot():
 			continue                       # handled by _stand_off
 		if float(Rules.KINDS[r.kind]["speed"]) >= Rules.CAVALRY_SPEED:
-			_sweep(r, out, my_centre, enemy_centre, approach, across)
-		elif locked and posture == &"commit" \
+			_sweep(r, out, my_centre, enemy_centre, approach, across,
+				_release_the_horse(locked))
+		elif locked and posture == &"commit" and wrapped < wrap_budget \
 				and _wrap(r, foes, out, my_centre, enemy_centre, approach, across):
-			pass                           # going round; it must not also get a line slot
+			wrapped += 1                   # going round: no line slot as well
 		else:
 			foot.append(r)
+
+	# A CHOICE, and the only one of the four that names a thing rather than judging
+	# a situation. Breaking one regiment at the end of a line sends the panic down
+	# it, so WHICH one is worth asking about -- and the answer rides in the same
+	# request as the posture. `focus` is already the cleanest lever in this file:
+	# the sim recomputes the chase every tick with nobody re-issuing anything.
+	_concentrate(mine, foes, out)
 
 	_mind_the_cavalry(mine, foes, out)
 
@@ -742,10 +786,16 @@ static func _nearest(r: Regiment, others: Array):
 ## The waypoint is LATCHED the first time. Recomputing it each second from a moving
 ## enemy centre had the horse chasing a point that receded as fast as it rode, so it
 ## circled the battle forever and the battle never ended.
-func _sweep(r: Regiment, out: Array, my_centre: Vector2, enemy_centre: Vector2, approach: Vector2, across: Vector2) -> void:
+func _sweep(r: Regiment, out: Array, my_centre: Vector2, enemy_centre: Vector2,
+		approach: Vector2, across: Vector2, go := true) -> void:
 	if r.state == Regiment.State.FIGHTING or r.state == Regiment.State.ROUTING:
 		return
 
+	# Held on the wing until the moment is right. A charge is a multiplier on a
+	# window of CHARGE_SECONDS and there was no rule for WHEN to spend it -- the
+	# horse went in whenever the line did, which is when it is worth least.
+	if not go and _sweep_to.get(r.id) == null:
+		return                             # already round the side; wait there
 	if not _sweep_to.has(r.id):
 		var side := _side_of_the_line(r, my_centre, across)
 		_sweep_to[r.id] = enemy_centre + across * SWEEP_WIDE * side - approach * SWEEP_DEPTH * 0.2
@@ -760,6 +810,52 @@ func _sweep(r: Regiment, out: Array, my_centre: Vector2, enemy_centre: Vector2, 
 
 	var behind: Vector2 = enemy_centre + approach * SWEEP_DEPTH
 	out.append(Orders.battle_move(PackedInt32Array([r.id]), behind, (enemy_centre - behind).angle()))
+
+
+## Is it time to let the cavalry go?
+##
+## A NOUL -- the probability that "now is the moment" is true, thresholded at
+## ours. The right shape: no list to choose from, a judgement about an instant,
+## and the number the model returns already IS its confidence.
+##
+## Without advice the horse goes when the lines are locked, which is what it did
+## before any of this and is the same answer every other Jev failure produces.
+func _release_the_horse(locked: bool) -> bool:
+	var now = advice.get("charge")
+	return float(now) >= 0.5 if now != null else locked
+
+
+## How much of the line to send round, from Jev's SCORE. The middle answer is what
+## the geometry did on its own -- send whatever has nobody in front of it -- so no
+## advice changes nothing, and the ends widen or narrow the appetite either side.
+func _envelop_appetite() -> float:
+	var much = advice.get("envelop")
+	return float(much) if much != null else 0.5
+
+
+## Everybody not already dealing with somebody goes after the one Jev named.
+##
+## Only the idle: re-pointing a regiment already locked in a melee would pull it
+## out of the fight it is in, and `order_move` is not idempotent -- the lesson the
+## whole file is built round.
+func _concentrate(mine: Array, foes: Array, out: Array) -> void:
+	var named = advice.get("mark")
+	if named == null:
+		return
+	var mark := int(str(named))
+	var exists := false
+	for f: Regiment in foes:
+		if f.id == mark:
+			exists = true
+			break
+	if not exists:
+		return                         # it died while the answer was in flight
+	for r: Regiment in mine:
+		if r.state == Regiment.State.FIGHTING or r.state == Regiment.State.ROUTING:
+			continue
+		if r.can_shoot() or r.focus == mark:
+			continue               # the archers have their own rule, in _stand_off
+		out.append(Orders.focus(PackedInt32Array([r.id]), mark))
 
 
 ## Which wing of OUR OWN line this regiment stands on, +1 or -1.

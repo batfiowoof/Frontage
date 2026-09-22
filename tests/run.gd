@@ -103,7 +103,14 @@ func _initialize() -> void:
 			if not name.begins_with("test_"):
 				continue
 			t.where = "%s::%s" % [path.get_file(), name]
+			# A runtime error inside a test ABORTS that method and returns here
+			# quietly, so a test that broke on its first line looked exactly like
+			# one that passed -- three of them did, in this very session. A test
+			# that asserted nothing is a test that ran nothing.
+			var before := t.count
 			obj.call(name, t)
+			if t.count == before:
+				t.failures.append("%s: asserted nothing -- did it error?" % t.where)
 
 	if t.failures.is_empty():
 		print("PASS  %d checks, %d files" % [t.count, TESTS.size()])

@@ -331,11 +331,14 @@ func test_the_defender_does_not_assault_its_own_wall(t) -> void:
 	var inside = bs.add(2, &"spear", Vector2(Rules.WALL_STANDOFF + 120.0, 0), PI)
 	bs.add(1, &"spear", Vector2(-400, 0), 0.0)
 	inside.target = inside.pos
+	# It issues NOTHING at all, which is the actual behaviour and a stronger claim than
+	# "it was ordered somewhere sensible": standing still IS the plan, and `_siege_orders`
+	# returns an empty array to say so.
+	var moved := 0
 	for order in Ai.new(2).battle_orders(bs):
-		var d := Orders.decode(order)
-		if d.get("type") == Orders.Type.BATTLE_MOVE:
-			t.ok(d["target"].x > Rules.WALL_STANDOFF,
-				"it stayed behind the wall (x = %.0f)" % d["target"].x)
+		if Orders.decode(order).get("type") == Orders.Type.BATTLE_MOVE:
+			moved += 1
+	t.eq(moved, 0, "it stays put; coming out through its own gate gives away everything")
 
 
 func test_once_it_is_breached_the_ai_fights_the_ordinary_battle(t) -> void:

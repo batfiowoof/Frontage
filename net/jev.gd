@@ -55,6 +55,12 @@ var _asked_on_turn := {}           # seat -> the campaign turn we last asked on
 var _asked_at := {}                # seat -> ticks_msec of the last battle question
 var _last_shape := {}              # seat -> [bs.tick when taken, the shape it was]
 
+## The last set of questions built, and how many requests have been made. Not used by
+## anything that plays the game -- they exist so the economy of this can be MEASURED:
+## adding questions must not add round trips.
+var last_questions := {}
+var requests := 0
+
 
 func _init() -> void:
 	var cfg := config()
@@ -175,7 +181,15 @@ func pending(seat: int) -> bool:
 ## asked without carrying the whole state string.
 func ask(seat: int, context: String, state: String, questions: Dictionary,
 		on_answer: Callable) -> void:
-	if _key.is_empty() or _inflight.has(seat) or questions.is_empty():
+	# Recorded before the key check, because what MATTERS about this is the shape of the
+	# request and that is decided whether or not there is anybody to send it to. It is
+	# what `test_jev.gd` measures: the questions must ride in one round trip, not one
+	# each, and a test that needed a live key to check that would never run.
+	last_questions = questions
+	if questions.is_empty():
+		return
+	requests += 1
+	if _key.is_empty() or _inflight.has(seat):
 		return
 	var http := HTTPRequest.new()
 	http.timeout = TIMEOUT
@@ -303,6 +317,34 @@ func campaign_questions(cs, seat: int, offer_from := 0) -> Dictionary:
 	#
 	# Asked only when somebody is actually waiting, which is what keeps it from costing a
 	# question on every turn of every campaign.
+	# A NOUL against the unrest ceiling. The heuristic cannot see the tradeoff at all:
+	# `_wants_a_settler` counts towns against a flat cap, where the real question is
+	# whether this empire can govern another one.
+	out["overextended"] = {
+		"type": "noul",
+		# Parenthesised as a whole before the %: bound to the last literal alone it is one
+		# placeholder taking two arguments, which Godot reports at RUNTIME and not at
+		# parse time -- so the question went out malformed and nothing said so.
+		"instructions": ("Is this player holding more than it can govern? Every settlement"
+			+ " past %d adds unrest to all of them each turn, unrest suppresses what a town"
+			+ " pays and stops it growing, and a town pushed far enough throws its owner"
+			+ " out. It holds %d.") % [Rules.UNREST_FREE_TOWNS, cs.settlements_of(seat)],
+	}
+
+	# A SCORE against ordered levels, which is the shape the third question type is for:
+	# not which thing, and not yes or no, but how much.
+	out["threat"] = {
+		"type": "score",
+		"instructions": ("How much danger is this player's territory in right now? This"
+			+ " decides whether its armies dig in where they stand and whether walls go to"
+			+ " the top of the building list."),
+		"criteria": {
+			"quiet": "nothing hostile is anywhere near anything of ours",
+			"watchful": "somebody is moving toward us but nothing is upon us yet",
+			"pressed": "there are enemies on our land or at our gates right now",
+		},
+	}
+
 	if offer_from != 0:
 		out["peace"] = {
 			"type": "noul",
@@ -311,6 +353,38 @@ func campaign_questions(cs, seat: int, offer_from := 0) -> Dictionary:
 				+ " somebody declares war again. Is accepting the right move?") % offer_from,
 		}
 
+	return out
+
+
+## Is there anything worth asking the charge question about? A side with no horse has no
+## charge to time, and a question nobody can act on is a question not worth the tokens.
+static func _has_horse(bs, seat: int) -> bool:
+	for id in bs.sorted_ids():
+		var r = bs.regiments[id]
+		if r.owner_id == seat and r.is_alive() and r.is_cavalry():
+			return true
+	return false
+
+
+## The enemy regiments worth naming, described by what actually decides which one to
+## break: how close it is to going, and whether anybody is beside it.
+static func _marks(bs, seat: int) -> Dictionary:
+	var out := {}
+	for id in bs.sorted_ids():
+		var r = bs.regiments[id]
+		if r.owner_id == seat or not r.is_alive():
+			continue
+		var alone := true
+		for other_id in bs.sorted_ids():
+			var o = bs.regiments[other_id]
+			if o.owner_id == r.owner_id and o.id != r.id and o.is_alive() 					and o.pos.distance_to(r.pos) <= Rules.SHOULDER_RADIUS:
+				alone = false
+				break
+		out[str(id)] = "%s, %d of %d men, morale %d of 100%s%s" % [
+			String(r.kind), r.strength, r.max_strength, int(r.morale),
+			", already breaking" if r.state == Regiment.State.ROUTING else "",
+			", with nobody beside it" if alone else "",
+		]
 	return out
 
 
@@ -407,6 +481,50 @@ func consider_battle(seat: int, bs, ai) -> void:
 				+ " that keeping the men matters more than keeping the field."),
 		},
 	}}
+
+	# Three more, in the SAME request. Every question in one request is evaluated in
+	# parallel and costs only its own tokens, so the expensive thing is the round trip
+	# and there is exactly one of those either way.
+
+	# A NOUL: the charge is a one-off multiplier on a window of CHARGE_SECONDS, so WHEN
+	# to spend it is the decision and there was no rule for it at all -- the horse went
+	# in whenever the line did.
+	if _has_horse(bs, seat):
+		questions["charge"] = {
+			"type": "noul",
+			"instructions": ("Is now the moment to send the cavalry in? A charge multiplies"
+				+ " damage several times over at the instant of impact and decays to"
+				+ " nothing within a few seconds, and a braced formation takes most of it"
+				+ " out. Spent early it is wasted on a line that is not yet committed;"
+				+ " spent late there is nothing left to break."),
+		}
+
+	# A SCORE: how far to commit to going round, rather than whether to. The envelopment
+	# is currently self-limiting by geometry alone -- a regiment wraps only if nobody is
+	# in front of it -- with nothing weighing that against holding the line together.
+	questions["envelop"] = {
+		"type": "score",
+		"instructions": ("How much of this side's line should be sent round the enemy flank"
+			+ " rather than held in the line? Going round wins a head-on tie that cannot"
+			+ " break itself, but a line that sends too much away is thinner everywhere and"
+			+ " can be broken in the middle before the wrap lands."),
+		"criteria": {
+			"none": "hold everything in the line; the front is all that matters here",
+			"some": "send whatever has nobody in front of it, and no more",
+			"most": "commit heavily to the flank and accept a thinner centre",
+		},
+	}
+
+	var marks := _marks(bs, seat)
+	if marks.size() > 1:
+		questions["mark"] = {
+			"type": "choice",
+			"instructions": ("Which enemy regiment should this side concentrate on? Breaking"
+				+ " one regiment at the end of a line sends the panic down it, so the"
+				+ " nearly-broken and the isolated are worth more than the biggest."),
+			"criteria": marks,
+		}
+
 	ask(seat, "battle %.0fs" % (float(bs.tick) * Rules.TICK_DELTA), battle_state(bs, seat),
 		questions, func(a): ai.advice["posture"] = a.get("posture", &"commit"))
 

@@ -358,3 +358,153 @@ func test_the_think_gap_is_counted_in_ticks(t) -> void:
 	# The one that matters: battle.tick restarts at 0 every fight. Without this clause a
 	# stale counter from the last battle silences the AI for minutes into the next one.
 	t.ok(Net.due(3, 5000, 7), "a tick counter that went backwards is a new battle, not a wait")
+
+
+# --- more of Jev ----------------------------------------------------------
+# Jev answers three shapes and this file has always PARSED all three. Until now it only
+# ever asked `choice`, so `score` and `noul` were handled code nothing reached.
+#
+# The lever that makes the rest cheap: every question in one request is evaluated in
+# parallel and costs only its own tokens, so the expensive thing is the round trip and
+# there is exactly one of those either way.
+
+func test_a_battle_asks_for_more_than_a_posture_now(t) -> void:
+	var bs = _duel()
+	bs.add(1, &"cavalry", Vector2(-400, 200), 0.0)
+	var jev = Jev.new()
+	jev.consider_battle(1, bs, Ai.new(1))
+	var asked: Dictionary = jev.last_questions
+	t.ok(asked.has("posture"), "the one it always asked")
+	t.ok(asked.has("charge"), "when to release the horse")
+	t.ok(asked.has("envelop"), "how much to send round")
+	t.eq(asked["posture"]["type"], "choice")
+	t.eq(asked["charge"]["type"], "noul")
+	t.eq(asked["envelop"]["type"], "score")
+
+
+func test_all_three_shapes_are_now_asked_for(t) -> void:
+	# The point of the pass: `score` and `noul` were parsed and never requested.
+	var cs = Campaign.generate([1, 2], 12345)
+	var shapes := {}
+	for key in Jev.new().campaign_questions(cs, 1, 2):
+		shapes[str(Jev.new().campaign_questions(cs, 1, 2)[key]["type"])] = true
+	t.ok(shapes.has("choice"))
+	t.ok(shapes.has("noul"))
+	t.ok(shapes.has("score"))
+
+
+func test_the_extra_questions_ride_in_the_same_request(t) -> void:
+	# The whole economy of this. If they cost a round trip each, they would not be worth
+	# asking at all -- so the number of REQUESTS must not move, only the questions in one.
+	var bs = _duel()
+	bs.add(1, &"cavalry", Vector2(-400, 200), 0.0)
+	var jev = Jev.new()
+	jev.consider_battle(1, bs, Ai.new(1))
+	t.eq(jev.requests, 1, "one round trip")
+	t.ok(jev.last_questions.size() >= 3, "carrying %d questions" % jev.last_questions.size())
+
+
+func test_a_side_with_no_horse_is_not_asked_about_charging(t) -> void:
+	# A question nobody can act on is a question not worth the tokens.
+	var jev = Jev.new()
+	jev.consider_battle(1, _duel(), Ai.new(1))
+	t.ok(not jev.last_questions.has("charge"))
+
+
+func test_the_horse_waits_until_it_is_told(t) -> void:
+	var brain = Ai.new(1)
+	brain.advice["charge"] = 0.1
+	var held := _horse_target(brain)
+	brain = Ai.new(1)
+	brain.advice["charge"] = 0.9
+	var sent := _horse_target(brain)
+	t.ok(held != sent, "a charge held and a charge released are different orders")
+
+
+## Where the cavalry is sent on the first think of an even fight.
+func _horse_target(brain) -> Vector2:
+	var bs = BattleState.new()
+	bs.add(1, &"spear", Vector2(-200, 0), 0.0)
+	var horse = bs.add(1, &"cavalry", Vector2(-200, 200), 0.0)
+	bs.add(2, &"spear", Vector2(200, 0), PI)
+	for id in bs.sorted_ids():
+		bs.regiments[id].target = bs.regiments[id].pos
+	for i in Rules.TICK_HZ * 12:
+		bs.step()
+	for bytes: PackedByteArray in brain.battle_orders(bs):
+		var o := Orders.decode(bytes)
+		if o.get("type") == Orders.Type.BATTLE_MOVE and o["ids"][0] == horse.id:
+			return o["target"]
+	return Vector2.INF
+
+
+func test_no_advice_leaves_every_one_of_them_as_it_was(t) -> void:
+	# The bar the whole feature lives under: with no key, the AI plays exactly the game
+	# it played before any of this existed.
+	var brain = Ai.new(1)
+	t.ok(brain.advice.is_empty())
+	t.near(brain._envelop_appetite(), 0.5, 0.0001, "the middle is what the geometry did")
+	t.ok(brain._release_the_horse(true), "locked lines released the horse before, and do")
+	t.ok(not brain._release_the_horse(false))
+	t.ok(not brain._pressed(), "and nothing is on fire until somebody says it is")
+
+
+func test_being_told_the_empire_is_overextended_stops_it_expanding(t) -> void:
+	var cs = Campaign.generate([1, 2], 12345)
+	var calm = Ai.new(1)
+	var warned = Ai.new(1)
+	warned.advice["overextended"] = 0.9
+	t.ok(calm._wants_a_settler(cs), "precondition: it would otherwise expand")
+	t.ok(not warned._wants_a_settler(cs))
+
+
+func test_a_threat_score_digs_the_army_in(t) -> void:
+	var cs = Campaign.generate([1, 2], 12345)
+	var brain = Ai.new(1)
+	brain.advice["threat"] = 0.9
+	var dug := false
+	for bytes: PackedByteArray in brain.campaign_orders(cs):
+		var o := Orders.decode(bytes)
+		if o.get("type") == Orders.Type.ARMY_STANCE and o["stance"] == Campaign.Stance.FORTIFY:
+			dug = true
+	t.ok(dug, "pressed, so it stands where it is instead of marching at them")
+
+
+func test_a_quiet_score_does_not(t) -> void:
+	var cs = Campaign.generate([1, 2], 12345)
+	var brain = Ai.new(1)
+	brain.advice["threat"] = 0.1
+	for bytes: PackedByteArray in brain.campaign_orders(cs):
+		var o := Orders.decode(bytes)
+		if o.get("type") == Orders.Type.ARMY_STANCE:
+			t.ok(o["stance"] != Campaign.Stance.FORTIFY, "nothing to dig in against")
+
+
+func test_the_named_mark_becomes_a_focus_order(t) -> void:
+	var bs = BattleState.new()
+	var mine = bs.add(1, &"spear", Vector2(-300, 0), 0.0)
+	bs.add(2, &"spear", Vector2(300, 0), PI)
+	var weak = bs.add(2, &"archer", Vector2(300, 200), PI)
+	for id in bs.sorted_ids():
+		bs.regiments[id].target = bs.regiments[id].pos
+	var brain = Ai.new(1)
+	brain.advice["mark"] = str(weak.id)
+	var focused := -1
+	for bytes: PackedByteArray in brain.battle_orders(bs):
+		var o := Orders.decode(bytes)
+		if o.get("type") == Orders.Type.FOCUS and o["ids"][0] == mine.id:
+			focused = int(o["mark"])
+	t.eq(focused, weak.id)
+
+
+func test_a_mark_that_died_in_flight_is_ignored(t) -> void:
+	# The answer takes a few hundred milliseconds and a battle does not wait for it.
+	var bs = BattleState.new()
+	var mine = bs.add(1, &"spear", Vector2(-300, 0), 0.0)
+	bs.add(2, &"spear", Vector2(300, 0), PI)
+	mine.target = mine.pos
+	var brain = Ai.new(1)
+	brain.advice["mark"] = "9999"
+	for bytes: PackedByteArray in brain.battle_orders(bs):
+		t.ok(Orders.decode(bytes).get("type") != Orders.Type.FOCUS,
+			"it names nobody who is on the field")

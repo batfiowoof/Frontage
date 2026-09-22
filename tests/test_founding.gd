@@ -215,16 +215,29 @@ func test_the_ai_does_not_march_its_settlers_at_the_enemy(t) -> void:
 	# is the worst possible unit for.
 	var cs = _two_player()
 	var ai = Ai.new(1)
-	var id: int = cs.add_army(1, _far_empty_hex(cs), [Rules.SETTLER, &"spear"])["id"]
+	# Standing somewhere it CANNOT found -- right beside our own capital -- so that
+	# marching is the only thing left for it to do and where it marches is the question.
+	var home := -1
+	for s: Dictionary in cs.settlements:
+		if s["owner"] == 1:
+			home = int(s["tile"])
+	var beside: int = cs.adjacent(home)[0]
+	if cs.army_at(beside) != null:
+		cs.armies.erase(cs.army_at(beside)["id"])
+	var id: int = cs.add_army(1, beside, [Rules.SETTLER, &"spear"])["id"]
+	t.ok(not cs.can_found(1, id), "precondition: too close to our own town to settle here")
 	var prize := -1
 	for s: Dictionary in cs.settlements:
 		if s["owner"] != 1:
 			prize = int(s["tile"])
 			break
+	var sent := -1
 	for order in ai.campaign_orders(cs):
 		var d := Orders.decode(order)
 		if d.get("type") == Orders.Type.ARMY_MOVE and d.get("army_id") == id:
-			t.ok(d["dest"] != prize, "it is going somewhere to settle, not at the enemy")
+			sent = int(d["dest"])
+	t.ok(sent >= 0, "the settler party was given somewhere to be")
+	t.ok(sent != prize, "and it is somewhere to settle, not the enemy capital")
 
 
 func test_the_ai_never_raises_a_settler_as_a_soldier(t) -> void:

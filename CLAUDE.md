@@ -98,6 +98,12 @@ in a working tree under a green gate -- see **The three lists that had to agree*
 `tests/run.gd` extends `SceneTree` (Godot rejects a plain script for `--script`). Exit code 0
 means green. Add a test file to the `TESTS` list in `run.gd` to register it.
 
+**A test that asserts nothing FAILS.** A runtime error inside a test aborts that method and
+returns to the runner quietly, so a test that broke on its first line looked exactly like
+one that passed -- three did, and the guard caught two more the moment it went in. Counting
+assertions is the cheapest thing that notices, and a loop-shaped test that never entered its
+loop is the other thing it catches.
+
 ## Measured
 
 Snapshot cost with the `var_to_bytes` encoder (`tests/test_snapshot.gd` prints it):
@@ -1428,8 +1434,53 @@ thought from `_process`.
 
 What it is asked:
 
-	campaign, once a turn    which tech, which structure, which settlement to march on
-	battle, on change        commit / hold / withdraw
+	campaign, once a turn    which tech, which structure, which settlement to march on,
+	                         whether the empire is overextended, how threatened it is,
+	                         and whether to accept a peace offer
+	battle, on change        commit / hold / withdraw, whether to release the cavalry,
+	                         how much of the line to send round, and which enemy to break
+
+**All three shapes are now asked for, and for a while only one was.** `parse_answers` has
+always handled `choice`, `score` and `noul`; every question this game asked was a `choice`,
+so two of the three were handled code nothing ever reached.
+
+	choice   pick from a set; a probability per option plus a confidence
+	score    rate against ordered levels; a continuous score plus a confidence
+	noul     a yes/no; the probability the statement is true, which IS the confidence
+
+The shape follows the question rather than the other way round. "Which tech" is a choice
+because there is a list. "Is this empire overextended" is a noul because there is not, and
+because the number already carries its own confidence. "How threatened are we" is a score
+because the answer is *how much*, not *which* -- and the threshold on it stays ours, at
+`PRESSED_AT`, which is the doctrine everywhere else in here: the model makes the fuzzy
+judgement and we decide what to do at what level.
+
+**The extra questions cost no extra round trips.** Every question in one request is
+evaluated in parallel and costs only its own tokens, so the expensive thing is the trip and
+there is exactly one of those either way. That is the whole economy of this, and
+`tests/test_jev.gd` pins it: `requests` must stay at 1 while `last_questions` grows. Both
+fields exist only to be measured -- nothing that plays the game reads them.
+
+Two of them are asked only when they are worth asking: the charge question needs a horse on
+the field, and the peace question needs somebody actually waiting. A question nobody can
+act on is a question not worth the tokens.
+
+The battle questions reach three places the heuristics had nothing to say about:
+
+- **When to release the cavalry.** A charge is a multiplier on a window of
+  `CHARGE_SECONDS` and there was no rule for spending it -- the horse went in whenever the
+  line did, which is when it is worth least.
+- **How much to send round.** The envelopment was self-limiting by geometry alone (a
+  regiment wraps only if nobody is in front of it), with nothing weighing that against a
+  thinner centre.
+- **Which enemy to break.** Breaking one regiment at the end of a line sends the panic
+  down it, so which one is a real question. `focus` is the cleanest lever in `sim/ai.gd`
+  for exactly the reason it always was: the sim recomputes the chase every tick with
+  nobody re-issuing anything.
+
+Every default is what the code did before, so **with no key the AI plays precisely the game
+it played before any of this existed** -- `test_no_advice_leaves_every_one_of_them_as_it_was`
+is the guard on that, not on the features working.
 
 The campaign question is asked at the top of the turn and the AI is held back until it
 lands -- `campaign_orders` is what appends End Turn, so holding it holds the turn rather
