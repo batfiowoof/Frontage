@@ -901,6 +901,60 @@ armoured keeps 92 and leaves them 76. Fifty seconds, not seventy: past about six
 sides have broken and run, and two regiments that have stopped taking casualties measure
 nothing.
 
+## War and peace
+
+Everyone was permanently at war with everyone, which is not a state so much as the absence
+of one: two armies meeting always fought, and there was nothing a player could do about a
+second enemy except lose to both at once.
+
+`relations` is rows of `[seat_a, seat_b, state]` with **a < b, so one row per pair and no
+way to store a contradiction** -- `at_war(a, b)` and `at_war(b, a)` cannot disagree by
+construction rather than by both call sites being careful. An array and not a nested
+dictionary for the reason `settlements` is one: a row of known length and known types is
+something `decode_campaign` can actually check, and it checks the sort order too, because a
+row that arrived the other way round is the one corruption nothing else would notice.
+
+WAR is the default for any pair with no row, so a fresh campaign costs no rows to say what
+it always said. **Owner 0 is always fair game**: a peace with nobody-in-particular would
+make the neutral towns untakeable, and they exist to be taken.
+
+**Peace blocks the march as well as the fight.** Armies cannot share a hex, so an army you
+are not fighting has to stop you the way a friendly one does -- otherwise the two of them
+end up on the same tile and `army_at` cannot represent it. Walking into a friend's town is
+a visit rather than a capture, for the same reason.
+
+An offer is **not stored**: it is an order that arrives, is passed to the other seat, and is
+gone. What is stored is the answer. Breaking a peace needs no answer at all, which is the
+asymmetry that makes one worth something and also worth watching.
+
+`relations` remaps with `seen`, the treasuries and the rest -- and is re-sorted afterwards,
+because a remap can invert which of the two ids is the lower one.
+
+### The first noul
+
+The AI's answer is the first question in this game that is **not a `choice`**. Jev answers
+three shapes, and the codebase has always parsed all three -- `score` and `noul` were
+handled and never asked.
+
+	choice   pick from a set; a probability per option plus a confidence
+	score    rate against ordered levels; a continuous score plus a confidence
+	noul     a yes/no; the probability the statement is true, which IS the confidence
+
+A peace offer is exactly a noul: there is no list of options to pick from, and the number
+the model returns is its own confidence rather than carrying one alongside. At or above 0.5
+it is a yes.
+
+It rides in the **same request** as the build, tech and target questions. Every question in
+one request is evaluated in parallel, so a fourth costs almost nothing next to a second
+round trip for it -- and it is only asked when somebody is actually waiting, or it would
+cost a question on every turn of every campaign.
+
+The heuristic underneath is the shape `_beaten()` uses in a battle, one layer up: accept
+when they have more towns and more men, because a peace is worth most to whoever is losing
+and a player who is winning has no reason to stop. An offer arriving after the turn's
+question has gone out gets that heuristic, which is the same answer every other Jev failure
+gets.
+
 ## Sieges
 
 Walls were one number. `defense: 0.3` in `Rules.STRUCTURES` multiplied into an ordinary
@@ -1459,4 +1513,5 @@ Marked in code with `# ponytail:` comments naming the ceiling and the upgrade pa
 Currently deferred: delta encoding, client-side prediction, reconnect/host migration,
 NAT punch-through (LAN + direct IP only), an AI that respects fog, a remembered stale
 owner for towns behind the fog, per-town food, an AI that lays road ROUTES, a walled
-ENCLOSURE rather than one wall line, and diplomacy.
+ENCLOSURE rather than one wall line, allied armies reinforcing each other, and alliances
+beyond a plain peace.

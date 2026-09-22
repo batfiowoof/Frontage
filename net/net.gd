@@ -39,6 +39,7 @@ signal news(text)          # something happened that a player should be told abo
 signal replay_saved(path)
 signal campaign_saved(path)
 signal campaign_over(winner_id)    # somebody has won; 0 never fires
+signal peace_offered(from_seat, to_seat)
 signal connection_failed
 signal server_left
 
@@ -56,6 +57,11 @@ var last_campaign_bytes := PackedByteArray()
 ## Who won, or 0 while the campaign is still being played. Server and client alike, so
 ## the view can ask rather than having to have caught the signal.
 var winner_seat := 0
+
+## Peace offers waiting to be answered: the seat being ASKED -> the seat asking. One at a
+## time per seat, which is a limit rather than a rule -- a second offer to somebody who
+## has not answered the first simply replaces it.
+var _offers := {}
 
 ## Did the last battle recorded here replay back into the state it actually ended in?
 ##
@@ -487,6 +493,14 @@ func order_deployed() -> void:
 	submit(Orders.deployed(true))
 
 
+func order_propose(to_seat: int) -> void:
+	submit(Orders.propose(to_seat))
+
+
+func order_answer(from_seat: int, accept: bool) -> void:
+	submit(Orders.answer(from_seat, accept))
+
+
 ## Give up the battle. Goes through submit() like every other order, so the host's own
 ## surrender travels the same path a remote one does.
 func order_forfeit() -> void:
@@ -552,6 +566,10 @@ func _receive_order(sender: int, bytes: PackedByteArray) -> void:
 			_army_stance(sender, order)
 		Orders.Type.DEPLOYED:
 			_deployed(sender, order)
+		Orders.Type.PROPOSE:
+			_propose(sender, order)
+		Orders.Type.ANSWER:
+			_answer(sender, order)
 
 
 func _stance(sender: int, order: Dictionary) -> void:
@@ -719,6 +737,63 @@ func _raze(sender: int, order: Dictionary) -> void:
 		_reject(sender, "army %d has nothing to burn" % order["army_id"])
 		return
 	_announce("player %d burned a %s at tile %d" % [sender, burned, tile])
+	broadcast_campaign()
+	campaign_updated.emit(campaign)
+
+
+## Offer peace, or end one. Which seat is asking is the SENDER and never the packet.
+##
+## An offer is not stored: it is an order that arrives, is passed to the other seat, and
+## is gone. What is stored is the answer. Breaking a peace needs no answer at all, which
+## is the asymmetry that makes a peace worth something and also worth watching.
+func _propose(sender: int, order: Dictionary) -> void:
+	if campaign == null:
+		_reject(sender, "no campaign in progress")
+		return
+	var other: int = int(order["seat"])
+	if other == sender or other == 0 or not campaign.gold.has(other):
+		_reject(sender, "seat %d is not somebody you can treat with" % other)
+		return
+	if not campaign.at_war(sender, other):
+		# Already at peace, so this is the other direction: war, and immediately.
+		campaign.declare_war(sender, other)
+		_announce("player %d has declared war on player %d" % [sender, other])
+		broadcast_campaign()
+		campaign_updated.emit(campaign)
+		return
+	_offers[other] = sender
+	_announce("player %d offers peace to player %d" % [sender, other])
+	# An AI seat has no peer to send this to, so it is handed the offer directly -- the
+	# same way `advice` is written into it from outside. A human seat gets an rpc.
+	if _ais.has(other):
+		_ais[other].pending_offer = sender
+	else:
+		_peace_offer.rpc_id(other, sender)
+	peace_offered.emit(sender, other)
+
+
+@rpc("authority", "call_remote", "reliable")
+func _peace_offer(from_seat: int) -> void:
+	peace_offered.emit(from_seat, my_id())
+
+
+## Take it or leave it. Only the seat it was made TO may answer, and only the offer that
+## is actually outstanding -- `from_seat` is in the packet so a stale answer to somebody
+## else's offer cannot be mistaken for this one.
+func _answer(sender: int, order: Dictionary) -> void:
+	if campaign == null:
+		_reject(sender, "no campaign in progress")
+		return
+	var from_seat: int = int(order["seat"])
+	if int(_offers.get(sender, 0)) != from_seat or from_seat == 0:
+		_reject(sender, "there is no offer from seat %d to answer" % from_seat)
+		return
+	_offers.erase(sender)
+	if not bool(order["accept"]):
+		_announce("player %d refuses peace with player %d" % [sender, from_seat])
+		return
+	campaign.make_peace(sender, from_seat)
+	_announce("player %d and player %d are at peace" % [sender, from_seat])
 	broadcast_campaign()
 	campaign_updated.emit(campaign)
 

@@ -19,7 +19,8 @@ const TILE_COUNT := Rules.MAP_W * Rules.MAP_H
 ## APPEND ONLY. These ints go on the wire and into saved .rpl files, so renumbering
 ## them silently reinterprets every recording ever made.
 enum Type { BATTLE_MOVE, ARMY_MOVE, RECRUIT, READY, BUILD, SET_FORMATION, FOCUS, RAZE,
-	RESEARCH, MERGE, SPLIT, FORFEIT, STANCE, FOUND, ARMY_STANCE, DEPLOYED }
+	RESEARCH, MERGE, SPLIT, FORFEIT, STANCE, FOUND, ARMY_STANCE, DEPLOYED, PROPOSE,
+	ANSWER }
 
 
 ## The orders that change a BATTLE, and therefore the orders a recording has to keep.
@@ -83,6 +84,19 @@ static func army_stance(army_id: int, stance: int) -> PackedByteArray:
 ## bool only because decode() refuses anything shorter than three elements.
 static func deployed(confirm: bool) -> PackedByteArray:
 	return var_to_bytes([VERSION, Type.DEPLOYED, confirm])
+
+
+## Offer this seat peace, or -- if we are already at peace with them -- tell them it is
+## over. Which seat is OFFERING is the sender, taken from the peer id and never from the
+## packet, exactly as a forfeit is.
+static func propose(to_seat: int) -> PackedByteArray:
+	return var_to_bytes([VERSION, Type.PROPOSE, to_seat])
+
+
+## Answer an offer. `from_seat` is who made it, so a stale answer to an offer somebody
+## else made cannot be mistaken for this one.
+static func answer(from_seat: int, accept: bool) -> PackedByteArray:
+	return var_to_bytes([VERSION, Type.ANSWER, from_seat, accept])
 
 
 ## How these regiments behave when left alone: a mask of Regiment.Stance bits.
@@ -170,6 +184,10 @@ static func decode(bytes: PackedByteArray) -> Dictionary:
 			return _decode_army_stance(d)
 		Type.DEPLOYED:
 			return _decode_deployed(d)
+		Type.PROPOSE:
+			return _decode_propose(d)
+		Type.ANSWER:
+			return _decode_answer(d)
 	return {}
 
 
@@ -286,6 +304,18 @@ static func _decode_found(d: Array) -> Dictionary:
 	if d.size() != 3 or typeof(d[2]) != TYPE_INT:
 		return {}
 	return {"type": Type.FOUND, "army_id": d[2]}
+
+
+static func _decode_propose(d: Array) -> Dictionary:
+	if d.size() != 3 or typeof(d[2]) != TYPE_INT:
+		return {}
+	return {"type": Type.PROPOSE, "seat": d[2]}
+
+
+static func _decode_answer(d: Array) -> Dictionary:
+	if d.size() != 4 or typeof(d[2]) != TYPE_INT or typeof(d[3]) != TYPE_BOOL:
+		return {}
+	return {"type": Type.ANSWER, "seat": d[2], "accept": d[3]}
 
 
 static func _decode_deployed(d: Array) -> Dictionary:

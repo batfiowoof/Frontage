@@ -30,6 +30,11 @@ var ready := {}                    # owner -> bool
 ## Server state, sliced per player on the wire: a client is sent its own row and nobody
 ## else's. It is in the save too, or loading a campaign would hand back a revealed map.
 var seen := {}                     # owner -> PackedByteArray
+## Who is at war with whom, as rows [seat_a, seat_b, state] with a < b -- one row per
+## pair, so there is no way to store a contradiction. An array and not a nested dictionary
+## for the reason `settlements` is one: a row of known length and known types is something
+## `decode_campaign` can actually check. WAR is the default for any pair with no row.
+var relations := []
 var _next_army := 1
 
 
@@ -400,6 +405,59 @@ func raze(owner: int, army_id: int) -> bool:
 	return true
 
 
+# --- who is at war with whom ----------------------------------------------
+## Everyone used to be permanently at war with everyone, which is not a state so much as
+## the absence of one: two armies meeting always fought, and there was nothing a player
+## could do about a second enemy except lose to both at once.
+
+enum Relation { WAR, PEACE }
+
+
+## Sorted, so `at_war(a, b)` and `at_war(b, a)` cannot disagree by construction.
+static func _pair(a: int, b: int) -> Array:
+	return [mini(a, b), maxi(a, b)]
+
+
+func relation(a: int, b: int) -> int:
+	if a == b:
+		return Relation.PEACE                  # nobody fights themselves
+	var want := _pair(a, b)
+	for row: Array in relations:
+		if int(row[0]) == want[0] and int(row[1]) == want[1]:
+			return int(row[2])
+	return Relation.WAR                        # the default, and what it always was
+
+
+func at_war(a: int, b: int) -> bool:
+	return relation(a, b) == Relation.WAR
+
+
+## Owner 0 is the neutral towns and is at war with everybody by definition: they are
+## there to be taken, and a peace with nobody-in-particular would make them untakeable.
+func set_relation(a: int, b: int, state: int) -> bool:
+	if a == b or a == 0 or b == 0:
+		return false
+	if state < 0 or state > Relation.PEACE:
+		return false
+	var want := _pair(a, b)
+	for row: Array in relations:
+		if int(row[0]) == want[0] and int(row[1]) == want[1]:
+			row[2] = state
+			return true
+	relations.append([want[0], want[1], state])
+	return true
+
+
+## An offer outstanding from `from` to `to`? Offers are not stored -- they are an order
+## that arrives, is answered, and is gone. What IS stored is the answer.
+func make_peace(a: int, b: int) -> bool:
+	return set_relation(a, b, Relation.PEACE)
+
+
+func declare_war(a: int, b: int) -> bool:
+	return set_relation(a, b, Relation.WAR)
+
+
 # --- who is commanding ----------------------------------------------------
 ## The man at the head of the army, and the one thing the campaign remembers about a
 ## battle besides who won and who died.
@@ -701,6 +759,12 @@ func remap_owners(mapping: Dictionary) -> void:
 	known = _remapped(known, mapping)
 	ready = _remapped(ready, mapping)
 	seen = _remapped(seen, mapping)    # miss this and a player loads somebody else's map
+	# Both ends of every row, and re-sorted afterwards: the pair is stored low-id-first
+	# and a remap can invert which of the two that is.
+	for row: Array in relations:
+		var pair := _pair(int(mapping.get(row[0], row[0])), int(mapping.get(row[1], row[1])))
+		row[0] = pair[0]
+		row[1] = pair[1]
 
 
 static func _remapped(book: Dictionary, mapping: Dictionary) -> Dictionary:
@@ -753,7 +817,10 @@ func move_army(army_id: int, dest: int) -> Dictionary:
 			break
 		var blocker = army_at(step)
 		if blocker != null:
-			if blocker["owner"] == a["owner"]:
+			# Somebody we are not fighting is in the way, not a battle waiting to happen.
+			# Peace has to block the march as well as the fight, or the two armies would
+			# simply stand in the same hex -- which `army_at` cannot represent.
+			if blocker["owner"] == a["owner"] or not at_war(int(a["owner"]), int(blocker["owner"])):
 				break                              # a friendly army blocks the road
 			a["move_left"] -= 1
 			result["collision"] = [army_id, blocker["id"]]
@@ -777,6 +844,8 @@ func move_army(army_id: int, dest: int) -> Dictionary:
 ## for you, and a big empire cannot calm them all down at once -- see `_settle_unrest`.
 func _capture_if_undefended(a: Dictionary) -> void:
 	var s = settlement_at(a["tile"])
+	if s != null and not at_war(int(a["owner"]), int(s["owner"])):
+		return                             # walking into a friend's town is a visit
 	if s != null and s["owner"] != a["owner"]:
 		s["owner"] = a["owner"]
 		s["unrest"] = Rules.UNREST_ON_CAPTURE
@@ -860,7 +929,7 @@ func reinforce(army_id: int) -> int:
 	for near in adjacent(int(a["tile"])):
 		var other = army_at(near)
 		if other == null or other["owner"] != a["owner"]:
-			continue
+			continue    # ponytail: only your OWN armies reinforce, never an ally's
 		var brought: int = other["regiments"].size()
 		if merge(int(a["owner"]), int(other["id"]), army_id):
 			joined += brought - (other["regiments"].size() if armies.has(other["id"]) else 0)

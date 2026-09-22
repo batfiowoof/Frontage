@@ -60,6 +60,11 @@ var _raze: Button
 var _found: Button
 var _stance_bar: HBoxContainer
 var _stance_buttons := {}
+var _treaty_bar: HBoxContainer
+var _treaty_label: Label
+var _offer_from := 0
+var _diplo_bar: HBoxContainer
+var _diplo_buttons := {}
 var _trees: PanelContainer
 var _tech_buttons := {}
 var _detach_bar: HBoxContainer
@@ -74,6 +79,7 @@ func _ready() -> void:
 	_build_camera()
 	_build_hud()
 	Net.campaign_updated.connect(_on_campaign_updated)
+	Net.peace_offered.connect(_on_peace_offered)
 	Net.order_rejected.connect(_on_order_rejected)
 	Net.news.connect(_on_news)
 	_refresh()
@@ -157,6 +163,33 @@ func _build_hud() -> void:
 
 	# What the selected army does between turns. Digging in and lying in wait both cost
 	# the whole turn's movement, so the bar sits where you can see the move counter.
+	# Somebody wants to talk. It sits at the top middle because it is the one thing here
+	# that arrives rather than being asked for, and it has to be noticed.
+	_treaty_bar = HBoxContainer.new()
+	_treaty_bar.set_anchors_preset(Control.PRESET_CENTER_TOP)
+	_treaty_bar.position = Vector2(-160, 12)
+	_treaty_bar.visible = false
+	layer.add_child(_treaty_bar)
+	_treaty_label = Label.new()
+	_treaty_bar.add_child(_treaty_label)
+	for label in ["accept", "refuse"]:
+		var yes: bool = label == "accept"
+		var b := Button.new()
+		b.text = label
+		b.pressed.connect(func() -> void:
+			if _offer_from != 0:
+				Net.order_answer(_offer_from, yes)
+				_offer_from = 0
+				_treaty_bar.visible = false)
+		_treaty_bar.add_child(b)
+
+	# ...and a way to start one. One button a seat, showing where we stand with them, so
+	# with two players it is one button and with four it is three.
+	_diplo_bar = HBoxContainer.new()
+	_diplo_bar.set_anchors_preset(Control.PRESET_CENTER_TOP)
+	_diplo_bar.position = Vector2(-160, 40)
+	layer.add_child(_diplo_bar)
+
 	_stance_bar = HBoxContainer.new()
 	_stance_bar.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
 	_stance_bar.position = Vector2(12, -164)
@@ -318,6 +351,32 @@ func _clamp_camera() -> void:
 	_camera.position = Vector2(
 		mid.x if lo.x >= hi.x else clampf(_camera.position.x, lo.x, hi.x),
 		mid.y if lo.y >= hi.y else clampf(_camera.position.y, lo.y, hi.y))
+
+
+## Built from the seating rather than once, because who is at the table is not known
+## when the HUD goes up and an AI can be added after it.
+func _refresh_diplomacy(cs, me: int) -> void:
+	for seat: int in Net.player_ids():
+		if seat == me or seat == 0:
+			continue
+		if not _diplo_buttons.has(seat):
+			var b := Button.new()
+			b.pressed.connect(func() -> void: Net.order_propose(seat))
+			_diplo_bar.add_child(b)
+			_diplo_buttons[seat] = b
+		var button: Button = _diplo_buttons[seat]
+		var warring: bool = cs.at_war(me, seat)
+		button.text = "offer peace to %d" % seat if warring else "declare war on %d" % seat
+		button.add_theme_color_override("font_color",
+			Color("9fd8a0") if warring else Color("d4553a"))
+
+
+func _on_peace_offered(from_seat: int, to_seat: int) -> void:
+	if to_seat != Net.my_id():
+		return                             # somebody else is being asked
+	_offer_from = from_seat
+	_treaty_label.text = "player %d offers peace   " % from_seat
+	_treaty_bar.visible = true
 
 
 func _zoom(factor: float) -> void:
@@ -496,6 +555,7 @@ func _refresh() -> void:
 	# ...and put one down, if you brought somebody to do it. can_found is asked rather
 	# than reimplemented here: the button has to appear exactly when the order would be
 	# accepted, and there is one answer to that question.
+	_refresh_diplomacy(cs, me)
 	_found.visible = selected_army >= 0 and cs.can_found(me, selected_army)
 
 	# Posting an army is only yours to do, so the bar is hidden for anybody else's.

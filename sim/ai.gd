@@ -129,6 +129,16 @@ func campaign_orders(cs) -> Array:
 	if cs == null or bool(cs.ready.get(seat, false)):
 		return []
 	var out := []
+	# Answered first and outside the once-a-turn gate: an offer arrives when it arrives,
+	# and leaving somebody waiting a whole turn for an answer is how a negotiation stops
+	# feeling like one.
+	# `advice` is already filled by the time this runs: `consider_turn` holds the AI back
+	# entirely while a question is out, so there is nothing to wait for here. An offer
+	# that arrives AFTER the turn's question went out gets the heuristic, which is the
+	# same answer every other Jev failure gets.
+	if pending_offer != 0:
+		out.append(Orders.answer(pending_offer, _accepts_peace(cs, pending_offer)))
+		pending_offer = 0
 	if cs.turn != _acted_on_turn:
 		_acted_on_turn = cs.turn          # spend money once a turn, not once a frame
 		_build_something(cs, out)
@@ -216,6 +226,32 @@ func _recruit_something(cs, out: Array) -> void:
 		if best != &"":
 			out.append(Orders.recruit(s["tile"], best))
 			return
+
+
+## Take the peace, or fight on.
+##
+## Jev's answer is a **noul** -- the probability that a statement is true, which is the
+## first non-`choice` question this game asks. It suits exactly this: a yes-or-no about a
+## state, where the number IS the confidence and there is no list of options to pick from.
+## A noul at or above 0.5 is a yes; below it, or with no key at all, the heuristic has it.
+##
+## The heuristic is the shape `_beaten` uses in a battle, one layer up: accept when they
+## have more towns and more men than we do, because a peace is worth most to whoever is
+## losing and a player who is winning has no reason to stop.
+func _accepts_peace(cs, from_seat: int) -> bool:
+	var said = advice.get("peace")
+	if said != null:
+		return float(said) >= 0.5
+	var ours: int = cs.settlements_of(seat) * TOWN_WORTH + cs.men_of(seat)
+	var theirs: int = cs.settlements_of(from_seat) * TOWN_WORTH + cs.men_of(from_seat)
+	return float(ours) < float(theirs) * PEACE_RATIO
+
+
+## What a town counts for against a headcount when deciding whether we are losing. A town
+## is worth roughly a full army, or an empire that had just lost a battle would sue for
+## peace while holding the whole map.
+const TOWN_WORTH := 300
+const PEACE_RATIO := 0.8
 
 
 ## One settler in the field at a time, and only while the map has room. Two at once is
@@ -317,6 +353,11 @@ const MAX_TOWNS := 4
 ## settlers in a battle must stop being a settling party, and the AI object outlives
 ## the battle, which is exactly how the cavalry sweep's stale waypoints got in.
 var _settling := {}
+
+## A seat that has offered us peace and is waiting. Written from outside by `net.gd` --
+## the same shape `advice` has, and for the same reason: this file stays a pure
+## RefCounted that reads plain data and never reaches for a node or the network.
+var pending_offer := 0
 
 
 func _gather_up(cs, out: Array) -> void:

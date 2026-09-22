@@ -16,7 +16,7 @@ const BattleState := preload("res://sim/battle_state.gd")
 const CampaignState := preload("res://sim/campaign_state.gd")
 const Rules := preload("res://sim/rules.gd")
 
-const VERSION := 10
+const VERSION := 11
 
 ## Field order on the wire.  Add a field here and the round-trip test covers it.
 const REGIMENT_FIELDS := [
@@ -222,7 +222,7 @@ static func encode_campaign(cs, for_owner := 0) -> PackedByteArray:
 	return var_to_bytes([
 		VERSION, cs.turn, cs._next_army, cs.terrain,
 		settlements, armies, cs.gold, cs.food, cs.ready, structures,
-		cs.research, cs.known, memory,
+		cs.research, cs.known, memory, cs.relations,
 	])
 
 
@@ -230,7 +230,7 @@ static func decode_campaign(bytes: PackedByteArray):
 	if bytes.size() < 4:
 		return null
 	var d = bytes_to_var(bytes)
-	if typeof(d) != TYPE_ARRAY or d.size() != 13:
+	if typeof(d) != TYPE_ARRAY or d.size() != 14:
 		return null
 	if typeof(d[0]) != TYPE_INT or d[0] != VERSION:
 		return null
@@ -337,6 +337,23 @@ static func decode_campaign(bytes: PackedByteArray):
 		if d[12][owner].size() != cs.terrain.size():
 			return null
 	cs.seen = d[12]
+
+	# Who is at war with whom. Rows of known length and known types, checked for the one
+	# thing the sim relies on: the pair is stored low-id-first, so a row that arrived the
+	# other way round would make at_war(a, b) and at_war(b, a) disagree.
+	if typeof(d[13]) != TYPE_ARRAY or d[13].size() > 64:
+		return null
+	for row in d[13]:
+		if typeof(row) != TYPE_ARRAY or row.size() != 3:
+			return null
+		for i in 3:
+			if typeof(row[i]) != TYPE_INT:
+				return null
+		if row[0] >= row[1]:
+			return null
+		if row[2] < 0 or row[2] > CampaignState.Relation.PEACE:
+			return null
+	cs.relations = d[13]
 	cs.structures = d[9]
 	cs.research = pool
 	cs.known = d[11]

@@ -223,15 +223,19 @@ func consider_turn(seat: int, cs, ai) -> bool:
 	if _asked_on_turn.get(seat, -1) != cs.turn:
 		_asked_on_turn[seat] = cs.turn
 		ai.advice.clear()             # a new turn invalidates everything, posture included
+		# The offer rides in the SAME request as the build, tech and target questions.
+		# Every question in one request is evaluated in parallel, so a fourth costs
+		# almost nothing next to a second round trip for it.
 		ask(seat, "turn %d" % int(cs.turn), campaign_state(cs, seat),
-			campaign_questions(cs, seat), func(a): ai.advice.merge(a, true))
+			campaign_questions(cs, seat, int(ai.pending_offer)),
+			func(a): ai.advice.merge(a, true))
 	return _inflight.has(seat)
 
 
 ## A question with one option is not a question, so a list of one is left out and the
 ## heuristic takes it. When nothing is worth asking `ask` never fires, and the AI acts
 ## on the same frame it would have anyway.
-func campaign_questions(cs, seat: int) -> Dictionary:
+func campaign_questions(cs, seat: int, offer_from := 0) -> Dictionary:
 	var out := {}
 
 	var techs := {}
@@ -290,6 +294,21 @@ func campaign_questions(cs, seat: int) -> Dictionary:
 				+ " cut the damage a defender takes in a battle fought on their hex, so a"
 				+ " walled town costs more to take than a further one without them."),
 			"criteria": prizes,
+		}
+
+	# A NOUL: a yes-or-no about a state, answered as the probability the statement is
+	# true. The first question here that is not a `choice`, and it is the right shape --
+	# there is no list of options to pick from, and the number the model returns IS its
+	# confidence rather than carrying one alongside.
+	#
+	# Asked only when somebody is actually waiting, which is what keeps it from costing a
+	# question on every turn of every campaign.
+	if offer_from != 0:
+		out["peace"] = {
+			"type": "noul",
+			"instructions": ("Player %d has offered this player peace. Accepting means"
+				+ " neither side's armies can attack the other or take their towns until"
+				+ " somebody declares war again. Is accepting the right move?") % offer_from,
 		}
 
 	return out
