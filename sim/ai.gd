@@ -193,14 +193,22 @@ func _recruit_something(cs, out: Array) -> void:
 			if s["owner"] == seat:
 				out.append(Orders.recruit(s["tile"], Rules.SETTLER))
 				return
+	# A ram, once there is a walled town worth marching on and nobody carrying one. It
+	# is useless in every other fight, so buying it speculatively is a wasted regiment
+	# and buying it late is a siege you sit through.
+	if _wants_a_ram(cs) and purse >= int(Rules.KINDS[Rules.RAM]["cost"]):
+		for s: Dictionary in cs.settlements:
+			if s["owner"] == seat and cs.recruitable_at(s["tile"]).has(Rules.RAM):
+				out.append(Orders.recruit(s["tile"], Rules.RAM))
+				return
 	for s: Dictionary in cs.settlements:
 		if s["owner"] != seat:
 			continue
 		var best := &""
 		var best_cost := 0
 		for kind: StringName in cs.recruitable_at(s["tile"]):
-			if kind == Rules.SETTLER:
-				continue               # never as a soldier: it is the worst unit here
+			if kind == Rules.SETTLER or kind == Rules.RAM:
+				continue               # neither is a soldier; both are bought on purpose
 			var cost := int(Rules.KINDS[kind]["cost"])
 			if cost <= purse and cost > best_cost:
 				best = kind                # the best it can afford, not the cheapest
@@ -219,6 +227,20 @@ func _wants_a_settler(cs) -> bool:
 		if a["owner"] == seat and cs.settler_in(a) >= 0:
 			return false
 	return _somewhere_to_settle(cs, -1) >= 0
+
+
+## One ram in the field at a time, and only while somebody we might march on is behind
+## a wall. Without a wall to knock down it is thirty men who cannot fight.
+func _wants_a_ram(cs) -> bool:
+	for a in cs.armies.values():
+		if a["owner"] == seat:
+			for r: Array in a["regiments"]:
+				if r[0] == Rules.RAM:
+					return false
+	for s: Dictionary in cs.settlements:
+		if s["owner"] != seat and cs.structure_at(int(s["tile"])) == &"walls":
+			return true
+	return false
 
 
 ## The nearest hex a town could legally go on, from `from` (-1 means from anywhere, which
@@ -333,6 +355,69 @@ func _march(cs, out: Array) -> void:
 		out.append(Orders.army_move(id, target))
 
 
+## Getting through a wall, or standing behind one. A branch rather than a mode: the
+## moment the last segment is breached this returns null and the AI goes back to fighting
+## the battle it already knows how to fight.
+## Annotated Variant because it has three answers, and the difference between two of them
+## matters: `null` means there is no wall in this battle and the ordinary logic should
+## run, while an EMPTY array means hold where you are and issue nothing.
+func _siege_orders(bs, mine: Array) -> Variant:
+	var standing := []
+	for w: Array in bs.walls:
+		if bs.standing(w):
+			standing.append(w)
+	if standing.is_empty():
+		return null                        # no wall, or not any more: fight normally
+	var gate := _gate_of(standing)
+	var side := signf(float(standing[0][0]))
+	if signf(_centre(mine).x) == side:
+		# We are the ones behind it. Standing still IS the plan: coming out through our
+		# own gate hands back the whole advantage, and the attacker has to come to us.
+		return []
+
+	var out := []
+	for r: Regiment in mine:
+		if r.state == Regiment.State.FIGHTING or r.state == Regiment.State.ROUTING:
+			continue
+		var to: Vector2 = gate
+		if r.kind == Rules.RAM:
+			# Rams at the nearest segment, a little short of it so they stop against
+			# the wall rather than trying to walk into it.
+			var w: Array = _nearest_segment(standing, r.pos)
+			var mid := (Vector2(w[0], w[1]) + Vector2(w[2], w[3])) * 0.5
+			to = mid - Vector2(side * Rules.BREACH_REACH * 0.5, 0.0)
+		# Facing the wall: it stands on `side`, so an attacker coming at it from the
+		# other half looks along +x when side is positive and -x when it is not.
+		var face := 0.0 if side > 0.0 else PI
+		out.append(Orders.battle_move(PackedInt32Array([r.id]), to, face))
+	return out
+
+
+## The middle of the gap. Worked out from the two segment ends nearest the centre line
+## rather than stored, so it keeps meaning the same thing if the wall ever changes shape.
+static func _gate_of(standing: Array) -> Vector2:
+	var best := INF
+	var at := Vector2.ZERO
+	for w: Array in standing:
+		for p in [Vector2(w[0], w[1]), Vector2(w[2], w[3])]:
+			if absf(p.y) < best:
+				best = absf(p.y)
+				at = p
+	return Vector2(at.x, 0.0)
+
+
+static func _nearest_segment(standing: Array, from: Vector2) -> Array:
+	var best: Array = standing[0]
+	var best_d := INF
+	for w: Array in standing:
+		var mid := (Vector2(w[0], w[1]) + Vector2(w[2], w[3])) * 0.5
+		var d := from.distance_squared_to(mid)
+		if d < best_d:
+			best_d = d
+			best = w
+	return best
+
+
 ## The nearest thing worth walking to: an enemy or neutral settlement.
 func _nearest_prize(cs) -> int:
 	var home := -1
@@ -401,6 +486,14 @@ func battle_orders(bs) -> Array:
 	# about to walk off the field. One order, and the battle is over.
 	if _beaten(mine, foes):
 		return [Orders.forfeit(true)]
+
+	# A wall changes the question entirely: everything behind it is unreachable, so the
+	# line has no business dressing against the enemy centre. It goes for the gate, the
+	# rams go for the wall, and only once something is open does the ordinary fight
+	# resume -- at which point `walls` no longer blocks and this branch falls through.
+	var assault = _siege_orders(bs, mine)
+	if assault != null:
+		return assault
 
 	var enemy_centre := _centre(foes)
 	var my_centre := _centre(mine)

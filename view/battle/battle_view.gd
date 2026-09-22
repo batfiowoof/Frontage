@@ -28,6 +28,9 @@ const BANNER_LIFT := 6.0                   # screen px between the bars and the 
 const ABOUT_FACE := deg_to_rad(150.0)
 ## The boundary line, in SCREEN pixels, for the same reason the banner is.
 const FIELD_EDGE_W := 3.0
+## The wall, in WORLD units -- unlike the field edge and the banner, because a wall is a
+## real thing standing on the ground with a real thickness and men stand against it.
+const WALL_W := 14.0
 const EDGE_MARGIN := 24.0
 const EDGE_SPEED := 900.0
 const KEY_SPEED := 900.0
@@ -333,6 +336,7 @@ func _draw() -> void:
 	var pose := _display_state()
 	var seating: Array = Net.player_ids()
 	_draw_field()
+	_draw_walls()
 	_draw_reach(pose)
 	for id in pose:
 		var p: Dictionary = pose[id]
@@ -398,6 +402,26 @@ func _draw_field() -> void:
 	var field := Rect2(Vector2(-e, -e), Vector2(e, e) * 2.0)
 	draw_rect(field, Color(0.16, 0.15, 0.13, 0.5), true)
 	draw_rect(field, Color(0.45, 0.40, 0.32, 0.9), false, FIELD_EDGE_W / _camera.zoom.x)
+
+
+## The town's walls. A segment that is being worked on fades toward the ground as the
+## breach opens, and is gone once it is through -- which is the only cue the attacker has
+## that the ram is doing anything, and the only cue the defender has that it is time to
+## put somebody in the gap.
+##
+## Read from Net.battle rather than the interpolated pose: a wall does not move, and the
+## pose carries regiments only.
+func _draw_walls() -> void:
+	if Net.battle == null:
+		return
+	for w: Array in Net.battle.walls:
+		var open: float = clampf(float(w[4]), 0.0, 1.0)
+		if open >= 1.0:
+			continue
+		var a := Vector2(w[0], w[1])
+		var b := Vector2(w[2], w[3])
+		draw_line(a, b, Color(0.72, 0.69, 0.62).lerp(Color(0.35, 0.22, 0.16), open),
+			WALL_W, true)
 
 
 ## The flag above a regiment: what it is, how it is holding up, and something big enough

@@ -432,7 +432,7 @@ static func renown_factor(a: Dictionary) -> float:
 
 # --- what an army is doing ------------------------------------------------
 ## APPEND ONLY, like the order enum: these ints go on the wire and into saves.
-enum Stance { MARCH, FORCED, FORTIFY, AMBUSH }
+enum Stance { MARCH, FORCED, FORTIFY, AMBUSH, BESIEGE }
 
 
 static func stance_of(a: Dictionary) -> int:
@@ -453,10 +453,16 @@ func set_stance(owner: int, army_id: int, stance: int) -> bool:
 	var a = armies.get(army_id)
 	if a == null or a["owner"] != owner:
 		return false
-	if stance < 0 or stance > Stance.AMBUSH:
+	if stance < 0 or stance > Stance.BESIEGE:
 		return false
+	# Sitting down in front of a town is something you do TO a town, so there has to be
+	# one under you and it has to be somebody else's.
+	if stance == Stance.BESIEGE:
+		var town = settlement_at(int(a["tile"]))
+		if town == null or town["owner"] == owner:
+			return false
 	a["stance"] = stance
-	if stance == Stance.FORTIFY or stance == Stance.AMBUSH:
+	if stance != Stance.MARCH and stance != Stance.FORCED:
 		a["move_left"] = 0
 	return true
 
@@ -976,6 +982,9 @@ func end_turn() -> void:
 		food[owner] = larder - _grow_towns(owner, larder)
 		_settle_unrest(owner)
 
+	# After the unrest pass, so a turn of being sat on shows up on the NEXT one --
+	# the same turn would let an army arrive and take the town in a single end-turn.
+	_press_the_sieges()
 	for a in armies.values():
 		a["move_left"] = move_points(a)
 		# An army that cannot be fed does not also top up its ranks. Replenishing a
@@ -1018,6 +1027,29 @@ func _grow_towns(owner: int, larder: int) -> int:
 ## A town that boils over goes back to being nobody's. It does not go to another player --
 ## it revolted against YOU, and handing it to your enemy would make unrest a weapon
 ## pointed at whoever happens to be nearest.
+## An army sitting on a town starves it: the people leave and the rest lose patience,
+## and at UNREST_REVOLT the place throws its owner out exactly as an ungovernable one
+## does. Slow on purpose -- if starving a town out were quick nobody would ever assault
+## one, and the assault is the more interesting half.
+func _press_the_sieges() -> void:
+	for a in armies.values():
+		if stance_of(a) != Stance.BESIEGE:
+			continue
+		var town = settlement_at(int(a["tile"]))
+		if town == null or town["owner"] == a["owner"]:
+			continue
+		town["pop"] = maxi(1, pop_of(town) - Rules.BESIEGE_STARVES)
+		town["unrest"] = unrest_of(town) + Rules.BESIEGE_ANGERS
+		if unrest_of(town) < Rules.UNREST_REVOLT:
+			continue
+		# Starved out. It goes to the BESIEGER and not to nobody, which is the one place
+		# this differs from an ungovernable province throwing its owner out: somebody is
+		# sitting outside the gate waiting for exactly this, and they get it -- with the
+		# same resentment any other conquest comes with.
+		town["owner"] = a["owner"]
+		town["unrest"] = Rules.UNREST_ON_CAPTURE
+
+
 func _settle_unrest(owner: int) -> void:
 	var over: int = maxi(0, settlements_of(owner) - Rules.UNREST_FREE_TOWNS)
 	for s: Dictionary in settlements.duplicate():

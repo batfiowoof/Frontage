@@ -27,18 +27,21 @@ const STANCE_NAMES := {
 	"forced": Campaign.Stance.FORCED,
 	"fortify": Campaign.Stance.FORTIFY,
 	"ambush": Campaign.Stance.AMBUSH,
+	"besiege": Campaign.Stance.BESIEGE,
 }
 ## One letter above the counter, since the stance bar only shows the selected army.
 const STANCE_MARKS := {
 	Campaign.Stance.FORCED: "F",
 	Campaign.Stance.FORTIFY: "D",
 	Campaign.Stance.AMBUSH: "A",
+	Campaign.Stance.BESIEGE: "S",
 }
 const STANCE_HINTS := {
 	"march": "walk, and be seen",
 	"forced": "further each turn, but the men arrive spent",
 	"fortify": "stand and dig in: harder to beat on this hex. Costs the turn.",
 	"ambush": "the enemy is not told you are here. Costs the turn.",
+	"besiege": "sit on a town and starve it out. Costs the turn, and needs a town under you.",
 }
 
 var selected_army := -1

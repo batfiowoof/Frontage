@@ -56,7 +56,9 @@ tile. Feed the army or it deserts, and a starving army does not replenish either
 You only see what your armies and towns can see, and only ever having seen a hex is enough
 to keep it on your map. Raise a settler and march it somewhere clear to found a new town.
 Towns grow on a food surplus and resent being conquered; hold more than you can govern and
-one of them will throw you out. An army can force its march, dig in, or lie in wait.
+one of them will throw you out. An army can force its march, dig in, lie in wait, or sit
+down in front of a town and starve it out. A walled town is fought through its gate: bring
+a ram or come through the gap a few files at a time.
 A regiment that survives a battle brings its experience to the next one. The campaign ends
 when somebody is the last one standing, or on settlements at TURN_LIMIT.
 Regiments build up to a march and brake into a stop; they hold the facing you gave them
@@ -899,6 +901,70 @@ armoured keeps 92 and leaves them 76. Fifty seconds, not seventy: past about six
 sides have broken and run, and two regiments that have stopped taking casualties measure
 nothing.
 
+## Sieges
+
+Walls were one number. `defense: 0.3` in `Rules.STRUCTURES` multiplied into an ordinary
+open-field fight, so a siege was the same battle with a modifier on it.
+
+**A wall is now a line on the battlefield, and the gate is the whole mechanic.** Under
+frontage-limited combat, output scales with the files in contact — so a twenty-file line
+arriving at a gap fights as however many files the gap is wide, whatever it was ordered
+into. That is what makes a siege a different fight rather than a harder one, and it falls
+out of the combat model already there instead of needing a rule of its own.
+
+	lay_walls(side)     two segments and a gap, on the DEFENDER's side of the field
+	crosses_a_wall()    used for movement AND for contact
+	_work_the_rams()    a ram against a segment opens it over BREACH_SECONDS
+
+**Blocking only movement would have been useless.** Two regiments either side of a wall
+would have stood a few units apart killing each other through it, which is precisely what
+a wall exists to stop, so `_find_contacts()` refuses a pair whose centre-to-centre line
+crosses one. The same test guards `_separate()`: shoving somebody THROUGH a wall would
+undo in one tick what the wall spent the whole battle doing.
+
+**Nothing steers round it, deliberately.** A march that would cross a wall simply does not
+take the step, and the regiment stands against it. Finding the gate is the player's job and
+the AI's; a pathfinder here would quietly solve the one problem a siege is supposed to
+pose.
+
+Two segments and a gap, not an enclosure.
+`ponytail:` one wall line across the defender's front. A ring with a keep inside is the
+upgrade, and it wants a real settlement map rather than a hex's worth of open ground.
+
+- **The `ram` is the answer, and it is nothing else.** Thirty men, slow, dreadful in a
+  melee, `requires` a barracks. Taking it anywhere but a wall is a wasted regiment, which
+  is what makes buying one a decision. A routing ram does no work — men running away are
+  not working it.
+- **`siegecraft` finally does what it says.** The tech used to only divide the old flat
+  wall number; it now divides `BREACH_SECONDS`, which is the same idea applied to the
+  thing the wall actually became.
+- **The defender cannot set up in front of his own wall.** `deployable()` floors him at
+  `WALL_STANDOFF + WALL_CLEAR`. The geometry makes it the easy mistake, and it would hand
+  the attacker the open-field fight the wall exists to refuse.
+- **A wall is still cover as well as a line.** The `defense` number stays; walls are both.
+
+The AI's siege is a **branch, not a mode**: `_siege_orders` returns `null` when nothing is
+standing, so the moment the last segment is breached it goes back to fighting the battle it
+already knows how to fight. It has three answers and the difference between two of them
+matters — `null` is "no wall, carry on", an EMPTY array is "hold where you are and issue
+nothing", which is what the side BEHIND the wall does. Coming out through its own gate
+would hand back the entire advantage. It buys exactly one ram, and only once there is a
+walled town worth marching on.
+
+### Starving one out
+
+The other half of a siege, and the half that needs no battle at all. `Stance.BESIEGE` sits
+an army on a town: `BESIEGE_STARVES` population a turn and `BESIEGE_ANGERS` unrest, running
+through the same `_settle_unrest` ceiling that governs an overstretched empire.
+
+**The town goes to the BESIEGER, not to nobody.** That is the one place this differs from
+an ungovernable province throwing its owner out: somebody is sitting outside the gate
+waiting for exactly this, and they get it — with `UNREST_ON_CAPTURE` resentment like any
+other conquest.
+
+It is deliberately slow. If starving a town out were quick, nobody would ever assault one,
+and the assault is the more interesting half.
+
 ## Reinforcements
 
 **Armies cannot share a hex**, which is the constraint the whole merge/split design comes
@@ -1392,5 +1458,5 @@ fights.
 Marked in code with `# ponytail:` comments naming the ceiling and the upgrade path.
 Currently deferred: delta encoding, client-side prediction, reconnect/host migration,
 NAT punch-through (LAN + direct IP only), an AI that respects fog, a remembered stale
-owner for towns behind the fog, per-town food, an AI that lays road ROUTES, sieges and
-diplomacy.
+owner for towns behind the fog, per-town food, an AI that lays road ROUTES, a walled
+ENCLOSURE rather than one wall line, and diplomacy.

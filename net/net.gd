@@ -853,6 +853,13 @@ func _begin_battle(attacker: Dictionary, defender: Dictionary) -> void:
 	fortified *= bs.tech(attacker["owner"], &"siege")
 	_deploy(bs, attacker, -Rules.DEPLOY_SEPARATION * 0.5, 0.0, 0.0)
 	_deploy(bs, defender, Rules.DEPLOY_SEPARATION * 0.5, PI, fortified)
+	# A walled town is fought through its gate, not across a modifier. The wall goes up
+	# on the DEFENDER's side, and the fortification number above stays as well: walls are
+	# both -- they are a line you have to come through AND cover for the men behind it.
+	if campaign.structure_at(_battle_tile) == &"walls":
+		bs.lay_walls(bs.side_of_owner(int(defender["owner"])))
+		_announce("the walls of tile %d stand between them" % _battle_tile)
+
 	# The one place a battle opens with somebody there to arrange it. Everything else
 	# that builds a BattleState -- the demo, the harnesses, every test -- gets a fight.
 	bs.phase = BattleState.Phase.DEPLOY

@@ -53,6 +53,11 @@ var ready := {}                    # owner -> has said it is done arranging
 ## x of a side answers it from a snapshot that already carries the positions -- the same
 ## trick the general uses to stay off the wire.
 var sides := {}
+
+## The town's walls, as flat rows [x1, y1, x2, y2, breach] -- the same shape `features`
+## uses, and on the wire for the same reason: a replay rebuilds the fight from its opening
+## snapshot. `breach` runs 0..1 and a segment stops blocking at 1.
+var walls := []
 ## Whoever has already been mourned, so an army is shaken by losing him once.
 var _mourned := {}
 
@@ -155,6 +160,84 @@ func winner() -> int:
 	return standing.keys()[0] if standing.size() == 1 else 0
 
 
+# --- walls ----------------------------------------------------------------
+## Put a wall across the defender's front, with a gate in it.
+##
+## `side` is the half of the field the defender holds, so the wall stands between the two
+## armies and the attacker has to come through it. Two segments and a gap: the gap is the
+## mechanic, because combat here is frontage-limited and a gate is a frontage of four
+## files however wide the line arriving at it is.
+func lay_walls(side: float) -> void:
+	var x := side * Rules.WALL_STANDOFF
+	walls = [
+		[x, -Rules.WALL_HALF_SPAN, x, -Rules.WALL_GATE_HALF, 0.0],
+		[x, Rules.WALL_GATE_HALF, x, Rules.WALL_HALF_SPAN, 0.0],
+	]
+
+
+## Is this segment still standing?
+static func standing(w: Array) -> bool:
+	return float(w[4]) < 1.0
+
+
+## Does the straight line from `a` to `b` cross a wall that is still up?
+##
+## Used for movement AND for contact. Blocking only movement would let two regiments
+## either side of a wall fight through it, which is precisely the thing a wall is for.
+func crosses_a_wall(a: Vector2, b: Vector2) -> bool:
+	for w: Array in walls:
+		if not standing(w):
+			continue
+		if _segments_cross(a, b, Vector2(w[0], w[1]), Vector2(w[2], w[3])):
+			return true
+	return false
+
+
+## Standard orientation test. Two segments cross when each straddles the other.
+static func _segments_cross(p1: Vector2, p2: Vector2, p3: Vector2, p4: Vector2) -> bool:
+	var d1 := _side(p3, p4, p1)
+	var d2 := _side(p3, p4, p2)
+	var d3 := _side(p1, p2, p3)
+	var d4 := _side(p1, p2, p4)
+	return ((d1 > 0.0) != (d2 > 0.0)) and ((d3 > 0.0) != (d4 > 0.0))
+
+
+static func _side(a: Vector2, b: Vector2, p: Vector2) -> float:
+	return (b - a).cross(p - a)
+
+
+## Rams at work. A ram standing against a segment opens it over BREACH_SECONDS, divided
+## by whatever `siegecraft` its owner has -- the tech that until now only made the old
+## flat wall number smaller.
+##
+## Only from OUTSIDE: a defender cannot knock down his own wall to get out, which would
+## be a way of turning a siege back into an open field at will.
+func _work_the_rams(dt: float) -> void:
+	if walls.is_empty():
+		return
+	for id in sorted_ids():
+		var r: Regiment = regiments[id]
+		if r.kind != Rules.RAM or not r.is_alive() or r.state == Regiment.State.ROUTING:
+			continue
+		for w: Array in walls:
+			if not standing(w):
+				continue
+			if _distance_to_segment(r.pos, Vector2(w[0], w[1]), Vector2(w[2], w[3])) > Rules.BREACH_REACH:
+				continue
+			var pace := dt / (Rules.BREACH_SECONDS * maxf(0.05, tech(r.owner_id, &"siege")))
+			w[4] = minf(1.0, float(w[4]) + pace)
+			break                              # one ram works on one segment
+
+
+static func _distance_to_segment(p: Vector2, a: Vector2, b: Vector2) -> float:
+	var ab := b - a
+	var len2 := ab.length_squared()
+	if len2 < 0.0001:
+		return p.distance_to(a)
+	var t := clampf((p - a).dot(ab) / len2, 0.0, 1.0)
+	return p.distance_to(a + ab * t)
+
+
 # --- arranging the line ---------------------------------------------------
 
 ## Nothing fights, nothing tires, nothing shoots and nobody's morale moves. The tick
@@ -198,7 +281,13 @@ func deployable(r: Regiment, to: Vector2) -> Vector2:
 	var side := side_of_owner(r.owner_id)
 	var e := Rules.BATTLE_HALF_EXTENT
 	var x := clampf(to.x, -e, e)
-	x = maxf(x * side, Rules.DEPLOY_MARGIN) * side
+	var floor_x := Rules.DEPLOY_MARGIN
+	# Behind your own wall, if it is yours. Letting the defender set up in FRONT of it
+	# would hand the attacker the open-field fight the wall exists to refuse, and it is
+	# the one mistake the geometry makes easy.
+	if not walls.is_empty() and signf(float(walls[0][0])) == side:
+		floor_x = Rules.WALL_STANDOFF + Rules.WALL_CLEAR
+	x = maxf(x * side, floor_x) * side
 	return Vector2(x, clampf(to.y, -e, e))
 
 
@@ -289,6 +378,7 @@ func step() -> void:
 
 	_spread_panic(dt)
 	_separate(dt)
+	_work_the_rams(dt)
 
 
 ## Two blocks that have met stand front to front, not inside one another.
@@ -325,8 +415,13 @@ func _separate(dt: float) -> void:
 			if away.length_squared() < 1.0:
 				away = Vector2.RIGHT if a.id < b.id else Vector2.LEFT
 			var push := away.normalized() * minf(overlap, step) * 0.5
-			a.pos += push
-			b.pos -= push
+			# Shoving somebody THROUGH a wall would undo in one tick what the wall spent
+			# the whole battle doing. A pair that cannot be pushed apart stays merged,
+			# which is the lesser of the two and only reachable in a gateway anyway.
+			if not crosses_a_wall(a.pos, a.pos + push):
+				a.pos += push
+			if not crosses_a_wall(b.pos, b.pos - push):
+				b.pos -= push
 
 
 ## An effect key for one side, across everything it has learned. The same shape the
@@ -530,6 +625,11 @@ func _find_contacts() -> Dictionary:
 			if not b.is_alive() or a.owner_id == b.owner_id:
 				continue
 			if gap_between(a, b) > Rules.CONTACT_GAP:
+				continue
+			# ...and nobody fights through a wall. Blocking only movement would have two
+			# regiments either side of one killing each other across it, which is exactly
+			# what a wall exists to stop.
+			if crosses_a_wall(a.pos, b.pos):
 				continue
 			if not out.has(a.id):
 				out[a.id] = []
@@ -953,14 +1053,21 @@ func _advance(r: Regiment, dt: float) -> void:
 	# Only when it is genuinely within one step, so the last move is a shuffle rather than
 	# the up-to-ARRIVE_EPSILON teleport this used to finish on.
 	if dist <= step_len:
-		r.pos = r.target
+		if not crosses_a_wall(r.pos, r.target):
+			r.pos = r.target
 		r.pace = 0.0
 		if not routing:
 			r.state = Regiment.State.IDLE
 		_turn_toward(r, r.target_facing, dt)
 		return
 
-	r.pos += to_target / dist * step_len
+	var step := to_target / dist * step_len
+	# A wall stops a march the way an enemy does: the regiment comes up against it and
+	# stays there. Nothing steers round, deliberately -- finding the gate is the player's
+	# job and the AI's, and a pathfinder here would quietly solve the one problem a siege
+	# is supposed to pose.
+	if not crosses_a_wall(r.pos, r.pos + step):
+		r.pos += step
 	# The facing it was ORDERED, not the way it happens to be walking. This one line was
 	# the spin: a regiment turned to point at wherever it was going, so sending it
 	# anywhere behind itself swung the whole block round. Movement never needed a front --

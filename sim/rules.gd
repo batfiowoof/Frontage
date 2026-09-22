@@ -287,6 +287,31 @@ const GROUND_HILL := 1
 const GROUND_MARSH := 2
 const MAX_FEATURES := 12
 
+# --- battle: walls ------------------------------------------------------
+## A town's walls, on the battlefield instead of as one number.
+##
+## `defense` in STRUCTURES multiplied into an ordinary open-field fight, which made a
+## siege the same battle with a modifier. A wall is a LINE the attacker cannot cross and
+## cannot fight across, with one gate in it -- and under a combat model where output
+## scales with the files in contact, a gate is the whole mechanic. A twenty-file line
+## arrives at a four-file hole and fights as four files.
+##
+## Two segments and a gap, not an enclosure.
+## ponytail: one wall line across the defender's front. A ring with a keep inside is the
+## upgrade, and it wants a real settlement map rather than a hex's worth of open ground.
+const WALL_STANDOFF := 200.0               # how far in front of the defender it stands
+const WALL_HALF_SPAN := 520.0              # half its length
+const WALL_GATE_HALF := 55.0               # half the gap in the middle
+## Seconds of a ram in contact to open a segment, before `siegecraft` divides it. Long
+## enough that the attacker has to protect the thing while it works, which is what makes
+## the rest of his army's job interesting.
+const BREACH_SECONDS := 25.0
+## How close a ram must be to a segment to be working on it.
+const BREACH_REACH := 60.0
+## Room the defender must leave behind his own wall when setting up, so he does not
+## deploy in front of it and hand the attacker the fight in the open.
+const WALL_CLEAR := 45.0
+
 # --- battle: geometry ---------------------------------------------------
 const FLANK_ANGLE := deg_to_rad(60.0)      # attack within this of facing = frontal
 const REAR_ANGLE := deg_to_rad(120.0)      # beyond this = rear
@@ -329,12 +354,17 @@ const KINDS := {
 	# on a battlefield they are 40 men with farm tools who will break almost at once.
 	# Escorting them is the point -- a settler party marching alone is an invitation.
 	&"settler": {"strength": 40,  "width": 10, "cost": 200, "upkeep": 2, "speed": 0.9,  "requires": &"",         "range": 0.0,   "reload": 0.0, "volley": 0.0,  "ammo": 0},
+	# A siege ram. Also not soldiers: it is here for the same reason the settler is, and
+	# it is in the table so an army can carry one. Slow, few men, dreadful in a melee --
+	# what it is for is the wall, and taking it anywhere else is a wasted regiment.
+	&"ram":     {"strength": 30,  "width": 6,  "cost": 180, "upkeep": 3, "speed": 0.7,  "requires": &"barracks", "range": 0.0,   "reload": 0.0, "volley": 0.0,  "ammo": 0},
 }
 ## What a settler founds, and what it cannot found on top of. The map used to be dealt
 ## once at generation and never change shape again: one capital each plus four neutral
 ## towns, so the only way to grow was conquest and the whole Civ half of this game --
 ## expand, work more land, out-produce him -- did not exist.
 const SETTLER := &"settler"
+const RAM := &"ram"
 
 # --- shooting -----------------------------------------------------------
 ## A volley at the far edge of its range is worth this much of one at point blank.
@@ -543,6 +573,11 @@ const ARMY_MOVE_POINTS := 3
 const FORCED_MARCH_BONUS := 2
 const FORCED_MARCH_STAMINA := 0.55         # what its regiments deploy with
 const FORTIFY_DEFENSE := 0.2               # stacks with walls, capped where walls are
+## Besieging: what a turn of it does to the town underneath. Starving a place out is the
+## other half of a siege and the half that needs no battle at all -- but it is SLOW, or
+## nobody would ever assault anything.
+const BESIEGE_STARVES := 1                 # population a turn
+const BESIEGE_ANGERS := 2                  # unrest a turn, toward UNREST_REVOLT
 ## Men each regiment loses per turn when the larder is empty. Food used to floor at
 ## zero, which made upkeep a number with no teeth: you could field any army you liked
 ## as long as you did not mind the counter reading 0.

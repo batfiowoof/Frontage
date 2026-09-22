@@ -16,7 +16,7 @@ const BattleState := preload("res://sim/battle_state.gd")
 const CampaignState := preload("res://sim/campaign_state.gd")
 const Rules := preload("res://sim/rules.gd")
 
-const VERSION := 9
+const VERSION := 10
 
 ## Field order on the wire.  Add a field here and the round-trip test covers it.
 const REGIMENT_FIELDS := [
@@ -64,7 +64,7 @@ static func encode_battle(bs) -> PackedByteArray:
 			row.append(r.get(field[0]))
 		rows.append(row)
 	return var_to_bytes([VERSION, bs.tick, bs._next_id, rows, bs.features, bs.techs,
-		bs.renown, bs.phase, bs.ready])
+		bs.renown, bs.phase, bs.ready, bs.walls])
 
 
 ## Returns a BattleState, or null if the bytes are not a snapshot we understand.
@@ -72,7 +72,7 @@ static func decode_battle(bytes: PackedByteArray):
 	if bytes.size() < 4:
 		return null                         # too short for bytes_to_var to even look at
 	var data = bytes_to_var(bytes)          # never _with_objects: that is remote code execution
-	if typeof(data) != TYPE_ARRAY or data.size() != 9:
+	if typeof(data) != TYPE_ARRAY or data.size() != 10:
 		return null
 	if typeof(data[0]) != TYPE_INT or data[0] != VERSION:
 		return null
@@ -153,6 +153,25 @@ static func decode_battle(bytes: PackedByteArray):
 		if typeof(owner) != TYPE_INT or typeof(data[8][owner]) != TYPE_BOOL:
 			return null
 	bs.ready = data[8]
+
+	# The town's walls. On the wire beside the ground for the same reason: a replay
+	# rebuilds the fight from its opening snapshot, and a battle fought through a gate is
+	# a completely different battle from one fought in the open.
+	if typeof(data[9]) != TYPE_ARRAY or data[9].size() > Rules.MAX_FEATURES:
+		return null
+	for w in data[9]:
+		if typeof(w) != TYPE_ARRAY or w.size() != 5:
+			return null
+		for i in 4:
+			if typeof(w[i]) != TYPE_FLOAT and typeof(w[i]) != TYPE_INT:
+				return null
+			if not is_finite(float(w[i])) or absf(float(w[i])) > Rules.BATTLE_HALF_EXTENT:
+				return null
+		if typeof(w[4]) != TYPE_FLOAT and typeof(w[4]) != TYPE_INT:
+			return null
+		if not is_finite(float(w[4])) or w[4] < 0.0 or w[4] > 1.0:
+			return null
+	bs.walls = data[9]
 
 	# Derived, not decoded. Who carries the general falls out of max_strength and the
 	# ids, which are already in the rows above, so the mirror reaches the same answer
@@ -252,7 +271,7 @@ static func decode_campaign(bytes: PackedByteArray):
 		for i in 4:
 			if typeof(row[i]) != TYPE_INT:
 				return null
-		if typeof(row[5]) != TYPE_INT or row[5] < 0 or row[5] > CampaignState.Stance.AMBUSH:
+		if typeof(row[5]) != TYPE_INT or row[5] < 0 or row[5] > CampaignState.Stance.BESIEGE:
 			return null
 		if typeof(row[6]) != TYPE_INT or row[6] < 0 or row[6] > Rules.RENOWN_WINS:
 			return null

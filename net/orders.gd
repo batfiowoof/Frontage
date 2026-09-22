@@ -299,7 +299,7 @@ static func _decode_army_stance(d: Array) -> Dictionary:
 		return {}
 	# Range-checked here as well as in the sim: an unknown stance int would be stored on
 	# the army and go straight back out on the wire to everybody.
-	if d[3] < 0 or d[3] > CampaignState.Stance.AMBUSH:
+	if d[3] < 0 or d[3] > CampaignState.Stance.BESIEGE:
 		return {}
 	return {"type": Type.ARMY_STANCE, "army_id": d[2], "stance": d[3]}
 
