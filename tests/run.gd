@@ -26,6 +26,7 @@ const TESTS := [
 	"res://tests/test_command.gd",
 	"res://tests/test_siege.gd",
 	"res://tests/test_diplomacy.gd",
+	"res://tests/test_barbarians.gd",
 	"res://tests/test_armies.gd",
 	"res://tests/test_order_preview.gd",
 	"res://tests/test_morale.gd",

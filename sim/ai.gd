@@ -136,6 +136,16 @@ func campaign_orders(cs) -> Array:
 	# entirely while a question is out, so there is nothing to wait for here. An offer
 	# that arrives AFTER the turn's question went out gets the heuristic, which is the
 	# same answer every other Jev failure gets.
+	# A raider does none of the rest of it. It has no towns to build in, no
+	# research, no treasury and nothing to found -- it marches at the nearest
+	# settlement somebody HOLDS, and that is the whole of what a raid is.
+	if raids:
+		if cs.turn != _acted_on_turn:
+			_acted_on_turn = cs.turn
+			_march(cs, out)
+		out.append(Orders.ready(true))
+		return out
+
 	if pending_offer != 0:
 		out.append(Orders.answer(pending_offer, _accepts_peace(cs, pending_offer)))
 		pending_offer = 0
@@ -359,6 +369,12 @@ var _settling := {}
 ## RefCounted that reads plain data and never reaches for a node or the network.
 var pending_offer := 0
 
+## A raiding band rather than a player: it only ever marches. Set by `net.gd` for
+## the barbarian owner, which is an owner id and NOT a seat -- see
+## Rules.BARBARIAN_SEAT, and the comment there for why that distinction does all
+## the work by itself.
+var raids := false
+
 
 func _gather_up(cs, out: Array) -> void:
 	for id in cs.sorted_army_ids():
@@ -479,6 +495,10 @@ func _nearest_prize(cs) -> int:
 	var best_distance := 1 << 30
 	for s: Dictionary in cs.settlements:
 		if s["owner"] == seat:
+			continue
+		# Raiders go for what somebody HOLDS. An empty village is not a raid, and
+		# it would park every band on a neutral town for the whole campaign.
+		if raids and int(s["owner"]) == 0:
 			continue
 		var d := _tile_distance(home, s["tile"])
 		if d < best_distance:

@@ -901,6 +901,32 @@ armoured keeps 92 and leaves them 76. Fifty seconds, not seventy: past about six
 sides have broken and run, and two regiments that have stopped taking casualties measure
 nothing.
 
+## Barbarians
+
+The early game had no pressure in it: the only thing that could come for you was the other
+player, and they were across the map.
+
+**A barbarian is an owner id and not a SEAT, and that distinction does all the work.** It
+is never in `players`, so it is not in `player_ids()` -- and every rule that reads the
+seating therefore ignores it for free. Nobody waits for it to end its turn, it cannot win,
+it cannot stop anybody else winning, and `Colors.of_owner` gives it the neutral grey it
+should have. Nothing had to be added to `winner()`, `all_ready()` or the colour table.
+
+It is not in `gold` either, so it is outside the economy entirely: no income, no upkeep, no
+starvation. `upkeep_of` will happily add up what its swords would cost, because it is a sum
+over armies and knows nothing about seats -- but `end_turn` only charges owners in `gold`,
+so the number is never taken from anybody.
+
+**They appear where nobody can see**, which is the one thing fog bought that nothing else
+uses: a band materialising in the middle of somebody's territory reads as a cheat rather
+than as a raid. Deterministic from the turn, so a reloaded save plays the same campaign,
+and capped at `BARBARIAN_BANDS` or a long game silts up with bands nobody got round to.
+
+The server gives them an ordinary `Ai` with `raids = true`, which skips everything but the
+march -- no building, no research, no founding. They go for a town somebody HOLDS: an empty
+village is not a raid, and going for one would park every band on a neutral town for the
+whole campaign.
+
 ## War and peace
 
 Everyone was permanently at war with everyone, which is not a state so much as the absence

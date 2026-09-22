@@ -1053,6 +1053,7 @@ func end_turn() -> void:
 
 	# After the unrest pass, so a turn of being sat on shows up on the NEXT one --
 	# the same turn would let an army arrive and take the town in a single end-turn.
+	_raise_barbarians()
 	_press_the_sieges()
 	for a in armies.values():
 		a["move_left"] = move_points(a)
@@ -1130,6 +1131,40 @@ func _settle_unrest(owner: int) -> void:
 			s["unrest"] = 0
 			continue
 		s["unrest"] = maxi(0, level)
+
+
+## Raiders out of the empty country. They cost nothing to keep, because they are not in
+## `gold` and therefore not in the economy at all -- no income, no upkeep, no starvation.
+##
+## They appear where **nobody can see**, which is the one thing fog bought that nothing
+## else uses: a band that materialised in the middle of somebody's territory would read as
+## a cheat rather than as a raid. `can_see` already answers it.
+##
+## Deterministic from the turn, so a save reloaded plays the same campaign.
+func _raise_barbarians() -> void:
+	if turn % Rules.BARBARIAN_EVERY != 0:
+		return
+	var bands := 0
+	for a in armies.values():
+		if a["owner"] == Rules.BARBARIAN_SEAT:
+			bands += 1
+	if bands >= Rules.BARBARIAN_BANDS:
+		return
+	var hidden := PackedInt32Array()
+	for tile in terrain.size():
+		if not passable(tile) or army_at(tile) != null or settlement_at(tile) != null:
+			continue
+		var watched := false
+		for owner in gold.keys():
+			if can_see(int(owner), tile):
+				watched = true
+				break
+		if not watched:
+			hidden.append(tile)
+	if hidden.is_empty():
+		return
+	add_army(Rules.BARBARIAN_SEAT, hidden[turn % hidden.size()],
+		Rules.BARBARIAN_BAND.duplicate())
 
 
 ## An army it cannot feed melts away. Regiments that melt entirely are gone.

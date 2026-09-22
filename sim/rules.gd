@@ -555,6 +555,21 @@ const RAZE_LOOT := 0.4
 ## than WORK_RADIUS would make the land you farm a subset of the land you watch, which is
 ## the wrong way round for a game about not knowing where the enemy is.
 const SIGHT_RADIUS := 2
+# --- barbarians -----------------------------------------------------------
+## Somebody on the map who is nobody's. The early game had no pressure in it at all: the
+## only thing that could come for you was the other player, and they were across the map.
+##
+## A barbarian is an owner id and not a SEAT, which is the whole trick. It is never in
+## `players`, so it is not in `player_ids()` -- and every rule that reads the seating
+## therefore ignores it for free: nobody waits for it to end its turn, it cannot win, it
+## cannot be won against, and `Colors.of_owner` gives it the neutral grey it should have.
+## The server drives it with an ordinary `Ai` that only ever marches.
+const BARBARIAN_SEAT := -99
+const BARBARIAN_EVERY := 4                 # turns between bands
+const BARBARIAN_BAND := [&"sword", &"sword"]
+## At most this many raiding bands at once, or a long campaign silts up with them.
+const BARBARIAN_BANDS := 3
+
 const TURN_LIMIT := 100
 const ARMY_MOVE_POINTS := 3
 

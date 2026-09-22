@@ -227,6 +227,7 @@ func start_campaign(map_seed := 0) -> void:
 		map_seed = randi()
 	campaign = CampaignState.generate(player_ids(), map_seed)
 	winner_seat = 0
+	_raise_the_raiders()
 	broadcast_campaign()
 	campaign_updated.emit(campaign)
 
@@ -259,6 +260,7 @@ func load_campaign(path: String) -> bool:
 		return false
 	campaign = restored
 	winner_seat = 0                    # or a second campaign opens already won
+	_raise_the_raiders()
 	broadcast_campaign()
 	campaign_updated.emit(campaign)
 	_announce("campaign loaded from turn %d" % campaign.turn)
@@ -271,6 +273,18 @@ func load_campaign(path: String) -> bool:
 ## `observe_all` lives here rather than at each of the dozen places that move an army or
 ## take a town, because "anything that changes the world broadcasts" is an invariant this
 ## design already rests on, and a sight update hung off the same call cannot go stale.
+## The barbarians get a brain but not a chair. An owner id and not a seat: it is never in
+## `players`, so `player_ids()` ignores it and every rule that reads the seating ignores it
+## too -- nobody waits for it to end its turn, it cannot win, and it draws neutral grey
+## without anybody asking for that.
+func _raise_the_raiders() -> void:
+	if _ais.has(Rules.BARBARIAN_SEAT):
+		return
+	var brain = Ai.new(Rules.BARBARIAN_SEAT)
+	brain.raids = true
+	_ais[Rules.BARBARIAN_SEAT] = brain
+
+
 func broadcast_campaign() -> void:
 	if campaign == null or not is_server():
 		return
