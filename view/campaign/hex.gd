@@ -69,4 +69,15 @@ static func _round_axial(q: float, r: float) -> Vector2i:
 
 ## The middle of the whole map, for parking the camera.
 static func map_centre() -> Vector2:
-	return Vector2(WIDTH * float(Rules.MAP_W) * 0.5, ROW_STEP * float(Rules.MAP_H) * 0.5)
+	return map_bounds().get_center()
+
+
+## Everything the map covers, corners included. Taken from the real tile centres rather
+## than from MAP_W * WIDTH: odd rows are pushed half a hex right, so the last column of
+## an odd row sticks out further than the even rows do, and a bound that ignores it cuts
+## the corner off. The SIZE margin is the hex itself, which is drawn around its centre.
+static func map_bounds() -> Rect2:
+	var far := Vector2(
+		WIDTH * (float(Rules.MAP_W - 1) + (0.5 if Rules.MAP_H > 1 else 0.0)),
+		ROW_STEP * float(Rules.MAP_H - 1))
+	return Rect2(Vector2(-SIZE, -SIZE), far + Vector2(SIZE, SIZE) * 2.0)

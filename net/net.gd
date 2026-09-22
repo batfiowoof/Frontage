@@ -38,6 +38,7 @@ signal order_rejected(peer_id, reason)
 signal news(text)          # something happened that a player should be told about
 signal replay_saved(path)
 signal campaign_saved(path)
+signal campaign_over(winner_id)    # somebody has won; 0 never fires
 signal connection_failed
 signal server_left
 
@@ -51,6 +52,10 @@ var running := false               # is the battle sim ticking?
 ## the server's state and not merely a self-consistent decode of its own encode.
 var last_battle_bytes := PackedByteArray()
 var last_campaign_bytes := PackedByteArray()
+
+## Who won, or 0 while the campaign is still being played. Server and client alike, so
+## the view can ask rather than having to have caught the signal.
+var winner_seat := 0
 
 var _accum := 0.0
 var _since_snapshot := 0
@@ -208,6 +213,7 @@ func start_campaign(map_seed := 0) -> void:
 	if map_seed == 0:
 		map_seed = randi()
 	campaign = CampaignState.generate(player_ids(), map_seed)
+	winner_seat = 0
 	broadcast_campaign()
 	campaign_updated.emit(campaign)
 
@@ -239,15 +245,27 @@ func load_campaign(path: String) -> bool:
 			file.seats.size(), player_ids().size()])
 		return false
 	campaign = restored
+	winner_seat = 0                    # or a second campaign opens already won
 	broadcast_campaign()
 	campaign_updated.emit(campaign)
 	_announce("campaign loaded from turn %d" % campaign.turn)
 	return true
 
 
+## Every player gets its OWN snapshot now, sliced to what it can see. One blob to
+## everybody was the whole of this function; fog makes it a loop.
+##
+## `observe_all` lives here rather than at each of the dozen places that move an army or
+## take a town, because "anything that changes the world broadcasts" is an invariant this
+## design already rests on, and a sight update hung off the same call cannot go stale.
 func broadcast_campaign() -> void:
-	if campaign != null and multiplayer.has_multiplayer_peer() and is_server():
-		_campaign_snapshot.rpc(Snapshot.encode_campaign(campaign))
+	if campaign == null or not is_server():
+		return
+	campaign.observe_all()
+	if not multiplayer.has_multiplayer_peer():
+		return
+	for peer in multiplayer.get_peers():
+		_campaign_snapshot.rpc_id(peer, Snapshot.encode_campaign(campaign, peer))
 
 
 ## Watch a recorded battle. The orders are fed back in on the ticks they were given, so
@@ -450,6 +468,10 @@ func order_raze(army_id: int) -> void:
 	submit(Orders.raze(army_id))
 
 
+func order_found(army_id: int) -> void:
+	submit(Orders.found(army_id))
+
+
 ## Give up the battle. Goes through submit() like every other order, so the host's own
 ## surrender travels the same path a remote one does.
 func order_forfeit() -> void:
@@ -508,6 +530,8 @@ func _receive_order(sender: int, bytes: PackedByteArray) -> void:
 			_forfeit(sender, order)
 		Orders.Type.STANCE:
 			_stance(sender, order)
+		Orders.Type.FOUND:
+			_found(sender, order)
 
 
 func _stance(sender: int, order: Dictionary) -> void:
@@ -679,6 +703,25 @@ func _raze(sender: int, order: Dictionary) -> void:
 	campaign_updated.emit(campaign)
 
 
+## Put a town down. Ownership and every rule about WHERE are campaign_state's, exactly
+## as they are for razing: this checks only that there is a campaign to put it in.
+func _found(sender: int, order: Dictionary) -> void:
+	if campaign == null:
+		_reject(sender, "no campaign in progress")
+		return
+	if battle != null:
+		_reject(sender, "a battle is being fought")
+		return
+	var a = campaign.armies.get(order["army_id"])
+	var tile: int = int(a["tile"]) if a != null else -1
+	if not campaign.found(sender, order["army_id"]):
+		_reject(sender, "army %d cannot found a town here" % order["army_id"])
+		return
+	_announce("player %d founded a town at tile %d" % [sender, tile])
+	broadcast_campaign()
+	campaign_updated.emit(campaign)
+
+
 func _build(sender: int, order: Dictionary) -> void:
 	if campaign == null:
 		_reject(sender, "no campaign in progress")
@@ -705,6 +748,7 @@ func _set_ready(sender: int, order: Dictionary) -> void:
 		campaign.end_turn()
 	broadcast_campaign()
 	campaign_updated.emit(campaign)
+	_check_victory()
 
 
 ## Two armies have met. For now the dice decide; M7 hands this to the real battle.
@@ -766,6 +810,7 @@ func _deploy(bs: BattleState, army: Dictionary, x: float, facing: float, defense
 		var y := (float(i) - float(line.size() - 1) * 0.5) * Rules.DEPLOY_SPACING
 		var r = bs.add(army["owner"], line[i][0], Vector2(x, y), facing)
 		r.strength = int(line[i][1])          # it arrives as battered as it left
+		r.xp = int(line[i][2])                # ...and as experienced
 		r.defense = defense
 
 
@@ -781,7 +826,9 @@ func _finish_battle() -> void:
 			var owner: int = r.owner_id
 			if not survivors.has(owner):
 				survivors[owner] = []
-			survivors[owner].append([r.kind, r.strength])
+			# Men killed this battle, added to what it already knew. Taken from the
+			# regiment rather than recounted here: the sim is what did the killing.
+			survivors[owner].append([r.kind, r.strength, r.xp])
 
 	# A side that quits has lost the field whatever its regiments were still doing, so
 	# the forfeit overrides what the sim would have called it. With only two sides on a
@@ -862,6 +909,31 @@ func _settle_field(attacker: Dictionary, defender: Dictionary, contested: int, a
 			_announce("player %d has been driven from the map" % owner)
 	broadcast_campaign()
 	campaign_updated.emit(campaign)
+	_check_victory()
+
+
+## Server only. The two places a campaign can end are a turn rolling over and a battle
+## settling, so it is asked at both rather than on a clock.
+##
+## `call_remote` like _battle_over, so the host emits its own signal here instead of
+## receiving one. Announced as well as signalled: the news line is what a spectating
+## seat -- host(port, false) -- has to go on.
+func _check_victory() -> void:
+	if campaign == null or not is_server() or winner_seat != 0:
+		return
+	var won: int = campaign.winner(player_ids())
+	if won == 0:
+		return
+	winner_seat = won
+	_announce("player %d has won the campaign" % won)
+	_campaign_over.rpc(won)
+	campaign_over.emit(won)
+
+
+@rpc("authority", "call_remote", "reliable")
+func _campaign_over(winner_id: int) -> void:
+	winner_seat = winner_id
+	campaign_over.emit(winner_id)
 
 
 ## A battle that has finished is worth keeping. Verifying it here is cheap and catches

@@ -126,6 +126,7 @@ func campaign_orders(cs) -> Array:
 		_learn_something(cs, out)
 		_recruit_something(cs, out)
 		_burn_something(cs, out)
+		_settle_something(cs, out)
 		_gather_up(cs, out)
 		_march(cs, out)
 	out.append(Orders.ready(true))
@@ -174,12 +175,23 @@ func _recruit_something(cs, out: Array) -> void:
 	if int(cs.food.get(seat, 0)) < cs.upkeep_of(seat):
 		return
 	var purse := int(cs.gold.get(seat, 0))
+	# Expand first, while there is anywhere left to expand into. A settler is worth more
+	# than the regiment it displaces: a new town is income and research every turn for
+	# the rest of the campaign, and the AI that only ever recruited soldiers simply lost
+	# on production to anybody who did not.
+	if _wants_a_settler(cs) and purse >= int(Rules.KINDS[Rules.SETTLER]["cost"]):
+		for s: Dictionary in cs.settlements:
+			if s["owner"] == seat:
+				out.append(Orders.recruit(s["tile"], Rules.SETTLER))
+				return
 	for s: Dictionary in cs.settlements:
 		if s["owner"] != seat:
 			continue
 		var best := &""
 		var best_cost := 0
 		for kind: StringName in cs.recruitable_at(s["tile"]):
+			if kind == Rules.SETTLER:
+				continue               # never as a soldier: it is the worst unit here
 			var cost := int(Rules.KINDS[kind]["cost"])
 			if cost <= purse and cost > best_cost:
 				best = kind                # the best it can afford, not the cheapest
@@ -187,6 +199,62 @@ func _recruit_something(cs, out: Array) -> void:
 		if best != &"":
 			out.append(Orders.recruit(s["tile"], best))
 			return
+
+
+## One settler in the field at a time, and only while the map has room. Two at once is
+## two escorts it has not got, and a settler wandering alone is a gift.
+func _wants_a_settler(cs) -> bool:
+	if cs.settlements_of(seat) >= MAX_TOWNS:
+		return false
+	for a in cs.armies.values():
+		if a["owner"] == seat and cs.settler_in(a) >= 0:
+			return false
+	return _somewhere_to_settle(cs, -1) >= 0
+
+
+## The nearest hex a town could legally go on, from `from` (-1 means from anywhere, which
+## is how it answers "is there any room left at all"). Everything about WHERE is
+## can_found's rule; this only has to find ground that passes it.
+func _somewhere_to_settle(cs, from: int) -> int:
+	var best := -1
+	var best_distance := 1 << 30
+	for tile in cs.terrain.size():
+		if not cs.passable(tile):
+			continue
+		var clear := true
+		for s: Dictionary in cs.settlements:
+			if Campaign.hex_distance(tile, int(s["tile"])) < Rules.MIN_TOWN_DISTANCE:
+				clear = false
+				break
+		if not clear:
+			continue
+		if from < 0:
+			return tile
+		var d := Campaign.hex_distance(from, tile)
+		if d < best_distance:
+			best_distance = d
+			best = tile
+	return best
+
+
+## Put the town down if we are standing somewhere it may go; otherwise walk toward
+## somewhere it may. An army carrying settlers does not march at the enemy -- `_march`
+## skips it, which is what `_settling` is for.
+func _settle_something(cs, out: Array) -> void:
+	_settling.clear()
+	for id in cs.sorted_army_ids():
+		var a = cs.armies[id]
+		if a["owner"] != seat or cs.settler_in(a) < 0:
+			continue
+		_settling[id] = true
+		if a["move_left"] <= 0:
+			continue
+		if cs.can_found(seat, id):
+			out.append(Orders.found(id))
+			continue
+		var spot := _somewhere_to_settle(cs, int(a["tile"]))
+		if spot >= 0:
+			out.append(Orders.army_move(id, spot))
 
 
 ## Anything of theirs under our feet goes up. Razing ends the army's turn, so it is
@@ -207,6 +275,17 @@ func _burn_something(cs, out: Array) -> void:
 ## A remnant standing next to a bigger army of ours joins it, rather than wandering
 ## off alone to be picked off. One merge a turn is plenty.
 const REMNANT := 3
+
+## How many towns the AI will try to found before it stops expanding and just fights.
+## Not a cap on what it can hold -- conquest is unlimited -- only on how long it keeps
+## spending 200 gold on somebody with a shovel.
+const MAX_TOWNS := 4
+
+## Armies carrying settlers this turn, so `_march` does not send them at the enemy.
+## Rebuilt every turn from the world rather than remembered: an army that lost its
+## settlers in a battle must stop being a settling party, and the AI object outlives
+## the battle, which is exactly how the cavalry sweep's stale waypoints got in.
+var _settling := {}
 
 
 func _gather_up(cs, out: Array) -> void:
@@ -231,6 +310,8 @@ func _march(cs, out: Array) -> void:
 		return
 	for id in cs.sorted_army_ids():
 		var a = cs.armies[id]
+		if _settling.has(id):
+			continue                       # it has somewhere else to be
 		if a["owner"] == seat and a["move_left"] > 0:
 			out.append(Orders.army_move(id, target))
 

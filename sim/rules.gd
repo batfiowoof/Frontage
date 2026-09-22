@@ -206,6 +206,23 @@ const GENERAL_STEADY := 0.7                # morale drain multiplier within his 
 const GENERAL_RALLY := 2.0                 # extra morale/s for a router within it
 const GENERAL_FALLS := 25.0                # one-off shock to the whole army when he dies
 
+# --- battle: veterancy --------------------------------------------------
+## What a regiment carries out of a battle and into the next one. Read the same way the
+## four exhaustion terms above are -- lerpf(green, best, t) -- because it is the same
+## shape of idea: one number between 0 and 1 scaling what the regiment is worth.
+##
+## It is the campaign's answer to a battle costing nothing but men. Without it the only
+## thing a surviving army brings home is a smaller headcount, so a fresh regiment raised
+## at full strength is strictly better than a veteran one that has fought twice, and
+## there is no reason to pull a battered unit out rather than spend it.
+##
+## Deliberately small. A veteran that beat a fresh regiment of the same size outright
+## would decide campaigns in the first fight and make the loser's position unrecoverable;
+## it is worth about as much as one battle tech.
+const VETERAN_KILLS := 240.0               # men killed for a full bar, cumulative
+const VETERAN_ATTACK := 1.2                # damage dealt, at a full bar
+const VETERAN_RESOLVE := 0.8               # how fast its morale goes (lower is better)
+
 # --- battle: the charge -------------------------------------------------
 ## Men at a run hit harder than men already locked in a shoving match, and then it is
 ## over. Without this a horse is just fast infantry: cavalry costs more than anything
@@ -246,8 +263,17 @@ const FLANK_ANGLE := deg_to_rad(60.0)      # attack within this of facing = fron
 const REAR_ANGLE := deg_to_rad(120.0)      # beyond this = rear
 
 ## Half-size of the battlefield. Move orders are clamped to it, so a hostile or
-## buggy client cannot send a regiment to infinity.
-const BATTLE_HALF_EXTENT := 3000.0
+## buggy client cannot send a regiment to infinity, and the camera is clamped to it too.
+##
+## It was 3000 -- a 6000-unit field that a regiment crosses in 187 seconds against a
+## 420-second time limit, with the two lines deployed DEPLOY_SEPARATION (520) apart in
+## the middle of it. The fight happened in a thousand-unit box and the rest was somewhere
+## to lose an army in by accident. At 1200 the field is about 75 seconds across: room to
+## manoeuvre round a flank, not room to walk off the map.
+##
+## `battle_view.gd` draws this rectangle. A boundary that is enforced and invisible reads
+## as the regiment refusing an order for no reason.
+const BATTLE_HALF_EXTENT := 1200.0
 
 # --- formation ----------------------------------------------------------
 const FILE_SPACING := 7.0                  # sideways gap between men in a rank
@@ -269,7 +295,17 @@ const KINDS := {
 	&"archer":  {"strength": 80,  "width": 20, "cost": 140, "upkeep": 2, "speed": 1.0,  "requires": &"",         "range": 430.0, "reload": 3.0, "volley": 10.0, "ammo": 14},
 	&"pike":    {"strength": 140, "width": 20, "cost": 220, "upkeep": 4, "speed": 0.85, "requires": &"barracks", "range": 0.0,   "reload": 0.0, "volley": 0.0,  "ammo": 0},
 	&"cavalry": {"strength": 70,  "width": 14, "cost": 280, "upkeep": 5, "speed": 1.75, "requires": &"barracks", "range": 0.0,   "reload": 0.0, "volley": 0.0,  "ammo": 0},
+	# Not soldiers. They are in this table because an army is a list of regiments and
+	# there is nowhere else for them to ride; they are expensive, they walk slowly, and
+	# on a battlefield they are 40 men with farm tools who will break almost at once.
+	# Escorting them is the point -- a settler party marching alone is an invitation.
+	&"settler": {"strength": 40,  "width": 10, "cost": 200, "upkeep": 2, "speed": 0.9,  "requires": &"",         "range": 0.0,   "reload": 0.0, "volley": 0.0,  "ammo": 0},
 }
+## What a settler founds, and what it cannot found on top of. The map used to be dealt
+## once at generation and never change shape again: one capital each plus four neutral
+## towns, so the only way to grow was conquest and the whole Civ half of this game --
+## expand, work more land, out-produce him -- did not exist.
+const SETTLER := &"settler"
 
 # --- shooting -----------------------------------------------------------
 ## A volley at the far edge of its range is worth this much of one at point blank.
@@ -398,11 +434,28 @@ const STRUCTURES := {
 	&"walls":    {"cost": 300, "gold": 0,  "food": 0,  "research": 0, "on": [],     "unlocks": [],                    "defense": 0.3,  "in_town": true},
 }
 const WORK_RADIUS := 2
+## Hexes a new town must keep from every existing one. It has to EXCEED WORK_RADIUS or
+## two towns bank the same fields and founding becomes a way to double-count land
+## somebody is already working; at WORK_RADIUS + 1 their worked areas touch without
+## overlapping, which is as tight as packing can honestly get.
+const MIN_TOWN_DISTANCE := WORK_RADIUS + 1
 
 ## What a raider takes away from a burned structure, as a share of what it cost. Razing
 ## is pillage rather than salting the earth: the ground is clear again afterwards and the
 ## owner may rebuild.
 const RAZE_LOOT := 0.4
+## When the campaign is called on points. Conquest is the real win; this is what stops
+## two players who cannot finish each other off playing forever. High enough that
+## camptest.cmd, which runs a handful of turns, can never trip it.
+## How far an army or a settlement sees, in hexes. Armies and structures outside it are
+## not sent to that player at all -- see `CampaignState.seen` and `Snapshot.encode_campaign`.
+##
+## Two, not one: at one hex an army sees only the ring it is standing in, which means you
+## walk into everything and fog stops being information and becomes a blindfold. Larger
+## than WORK_RADIUS would make the land you farm a subset of the land you watch, which is
+## the wrong way round for a game about not knowing where the enemy is.
+const SIGHT_RADIUS := 2
+const TURN_LIMIT := 100
 const ARMY_MOVE_POINTS := 3
 ## Men each regiment loses per turn when the larder is empty. Food used to floor at
 ## zero, which made upkeep a number with no teeth: you could field any army you liked

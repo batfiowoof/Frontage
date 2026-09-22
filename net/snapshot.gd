@@ -16,7 +16,7 @@ const BattleState := preload("res://sim/battle_state.gd")
 const CampaignState := preload("res://sim/campaign_state.gd")
 const Rules := preload("res://sim/rules.gd")
 
-const VERSION := 5
+const VERSION := 6
 
 ## Field order on the wire.  Add a field here and the round-trip test covers it.
 const REGIMENT_FIELDS := [
@@ -48,6 +48,10 @@ const REGIMENT_FIELDS := [
 	# no banner at all, and a client cannot derive "it has run three times" from anything
 	# else it holds -- morale and state both look the same on the third rout as the first.
 	["routs", TYPE_INT],
+	# Men killed, carried in from the campaign and back out again. On the wire because a
+	# replay rebuilds the fight from the opening snapshot, so anything the sim reads to
+	# decide the outcome has to be in it.
+	["xp", TYPE_INT],
 ]
 
 
@@ -133,18 +137,42 @@ static func decode_battle(bytes: PackedByteArray):
 # interpolate. Flat rows rather than dictionaries: a row of known length and known
 # types is something decode can actually check.
 
-static func encode_campaign(cs) -> PackedByteArray:
+## `for_owner` of 0 is omniscient -- the true world, which is what a save stores and what
+## a test asks for. With a real owner the snapshot is sliced to what that player may know:
+## armies it cannot see are left out entirely, and structures it has not found are blanked.
+##
+## Left whole on purpose, and this is the ceiling rather than an oversight:
+## ponytail: terrain and settlement ownership go out unfiltered. Terrain is static and
+## identical for everyone from map generation, and settlements are landmarks the way they
+## are in Total War. The upgrade is a remembered per-owner copy carrying a STALE owner id,
+## so a town that changed hands behind the fog still reads as its old holder.
+static func encode_campaign(cs, for_owner := 0) -> PackedByteArray:
 	var settlements := []
 	for s in cs.settlements:
 		settlements.append([s["tile"], s["owner"], s["name"]])
 	var armies := []
-	for id in cs.sorted_army_ids():
-		var a = cs.armies[id]
+	var known_armies: Array = cs.armies.values() if for_owner == 0 		else cs.armies_visible_to(for_owner)
+	for a in known_armies:
 		armies.append([a["id"], a["owner"], a["tile"], a["move_left"], a["regiments"]])
+	armies.sort_custom(func(x, y): return x[0] < y[0])
+	var structures: PackedByteArray = cs.structures
+	if for_owner != 0:
+		structures = structures.duplicate()
+		for tile in structures.size():
+			if not cs.can_see(for_owner, tile):
+				structures[tile] = 0
+	# The fog memory, always as a dictionary so decode has one shape to check. A save
+	# stores the whole book; a player is sent its own single row and nobody else's, which
+	# is the whole of what fog is for.
+	var memory := {}
+	if for_owner == 0:
+		memory = cs.seen
+	elif cs.seen.has(for_owner):
+		memory[for_owner] = cs.seen[for_owner]
 	return var_to_bytes([
 		VERSION, cs.turn, cs._next_army, cs.terrain,
-		settlements, armies, cs.gold, cs.food, cs.ready, cs.structures,
-		cs.research, cs.known,
+		settlements, armies, cs.gold, cs.food, cs.ready, structures,
+		cs.research, cs.known, memory,
 	])
 
 
@@ -152,7 +180,7 @@ static func decode_campaign(bytes: PackedByteArray):
 	if bytes.size() < 4:
 		return null
 	var d = bytes_to_var(bytes)
-	if typeof(d) != TYPE_ARRAY or d.size() != 12:
+	if typeof(d) != TYPE_ARRAY or d.size() != 13:
 		return null
 	if typeof(d[0]) != TYPE_INT or d[0] != VERSION:
 		return null
@@ -191,15 +219,18 @@ static func decode_campaign(bytes: PackedByteArray):
 		if typeof(row[4]) != TYPE_ARRAY or row[4].size() > CampaignState.MAX_REGIMENTS_PER_ARMY:
 			return null
 		for entry in row[4]:
-			# [kind, strength], both checked: a regiment with a negative or absurd
-			# strength would make the next battle nonsense.
-			if typeof(entry) != TYPE_ARRAY or entry.size() != 2:
+			# [kind, strength, xp], all three checked: a regiment with a negative or
+			# absurd strength would make the next battle nonsense, and an uncapped xp
+			# would hand a peer an arbitrary damage multiplier for the asking.
+			if typeof(entry) != TYPE_ARRAY or entry.size() != 3:
 				return null
 			if typeof(entry[0]) != TYPE_STRING_NAME or not Rules.KINDS.has(entry[0]):
 				return null
-			if typeof(entry[1]) != TYPE_INT:
+			if typeof(entry[1]) != TYPE_INT or typeof(entry[2]) != TYPE_INT:
 				return null
 			if entry[1] < 0 or entry[1] > int(Rules.KINDS[entry[0]]["strength"]):
+				return null
+			if entry[2] < 0:
 				return null
 		if cs.armies.has(row[0]):
 			return null                     # duplicate ids would silently drop an army
@@ -233,6 +264,17 @@ static func decode_campaign(bytes: PackedByteArray):
 			if typeof(name) != TYPE_STRING_NAME or not Rules.TECHS.has(name) or seen.has(name):
 				return null    # learning the same thing twice would compound its effect
 			seen[name] = true
+	# The fog memory. An empty book is legitimate and means nobody has looked yet, which
+	# is what every campaign built by hand in a test looks like; `can_see` reads that as
+	# omniscient, so fog is something a campaign acquires and never a default.
+	if typeof(d[12]) != TYPE_DICTIONARY:
+		return null
+	for owner in d[12]:
+		if typeof(owner) != TYPE_INT or typeof(d[12][owner]) != TYPE_PACKED_BYTE_ARRAY:
+			return null
+		if d[12][owner].size() != cs.terrain.size():
+			return null
+	cs.seen = d[12]
 	cs.structures = d[9]
 	cs.research = pool
 	cs.known = d[11]

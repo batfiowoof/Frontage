@@ -12,6 +12,14 @@ const Hex := preload("res://view/campaign/hex.gd")
 
 const TILE := Rules.HEX_SIZE * 2.0
 const DRAG_BUTTONS := [MOUSE_BUTTON_MIDDLE, MOUSE_BUTTON_RIGHT]
+## Keyboard pan, in SCREEN pixels a second, so it feels the same at every zoom.
+## No edge scroll here, unlike the battle: the campaign HUD lives in three corners and
+## reaching for End Turn would send the map sliding out from under the cursor.
+const PAN_SPEED := 700.0
+## Ground we have never had anybody near. Dark and translucent rather than opaque: the
+## terrain underneath is worth keeping, and a solid curtain makes the map unreadable at
+## the start of a campaign when almost all of it is fogged.
+const FOG := Color(0.05, 0.05, 0.08, 0.72)
 
 var selected_army := -1
 var selected_tile := -1
@@ -26,6 +34,7 @@ var _recruit_bar: HBoxContainer
 var _build_bar: HBoxContainer
 var _build_buttons := {}
 var _raze: Button
+var _found: Button
 var _trees: PanelContainer
 var _tech_buttons := {}
 var _detach_bar: HBoxContainer
@@ -110,6 +119,16 @@ func _build_hud() -> void:
 		if selected_army >= 0:
 			Net.order_raze(selected_army))
 	layer.add_child(_raze)
+
+	_found = Button.new()
+	_found.text = "Found a town"
+	_found.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	_found.position = Vector2(12, -132)
+	_found.add_theme_color_override("font_color", Color("9fd8a0"))
+	_found.pressed.connect(func() -> void:
+		if selected_army >= 0:
+			Net.order_found(selected_army))
+	layer.add_child(_found)
 
 	if Net.is_server():
 		var save := Button.new()
@@ -223,6 +242,40 @@ func _unhandled_input(event: InputEvent) -> void:
 				selected_army = -1
 				selected_tile = -1
 			_refresh()
+
+
+func _move_camera(delta: float) -> void:
+	var drift := Vector2.ZERO
+	if Input.is_key_pressed(KEY_A) or Input.is_key_pressed(KEY_LEFT):
+		drift.x -= 1.0
+	if Input.is_key_pressed(KEY_D) or Input.is_key_pressed(KEY_RIGHT):
+		drift.x += 1.0
+	if Input.is_key_pressed(KEY_W) or Input.is_key_pressed(KEY_UP):
+		drift.y -= 1.0
+	if Input.is_key_pressed(KEY_S) or Input.is_key_pressed(KEY_DOWN):
+		drift.y += 1.0
+	if drift != Vector2.ZERO:
+		_camera.position += drift.normalized() * PAN_SPEED * delta / _camera.zoom.x
+	_clamp_camera()
+
+
+## The map is finite and the camera was not: dragging far enough left the window looking
+## at empty space with nothing to steer by and no way back but more dragging. Done here
+## every frame rather than at each of the three places that move the camera -- a drag, a
+## zoom and a key -- because a zoom out past the edge has to pull the view back in too.
+##
+## Clamped so the MAP fills the window, not so the camera centre stays on the map: at
+## 0.35 zoom half a screen is most of the map, so an axis the window already covers is
+## simply centred.
+func _clamp_camera() -> void:
+	var half := get_viewport_rect().size * 0.5 / _camera.zoom
+	var b := Hex.map_bounds()
+	var lo := b.position + half
+	var hi := b.end - half
+	var mid := b.get_center()
+	_camera.position = Vector2(
+		mid.x if lo.x >= hi.x else clampf(_camera.position.x, lo.x, hi.x),
+		mid.y if lo.y >= hi.y else clampf(_camera.position.y, lo.y, hi.y))
 
 
 func _zoom(factor: float) -> void:
@@ -397,6 +450,11 @@ func _refresh() -> void:
 			and (worked == null or worked["owner"] != me)
 		if _raze.visible:
 			_raze.text = "Burn the %s" % underfoot
+
+	# ...and put one down, if you brought somebody to do it. can_found is asked rather
+	# than reimplemented here: the button has to appear exactly when the order would be
+	# accepted, and there is one answer to that question.
+	_found.visible = selected_army >= 0 and cs.can_found(me, selected_army)
 	if mine_here:
 		var purse := int(cs.gold.get(me, 0))
 		var available: Array = cs.recruitable_at(selected_tile)
@@ -435,12 +493,20 @@ func _draw() -> void:
 	if cs == null:
 		return
 	var seating: Array = Net.player_ids()
+	var me: int = Net.my_id()
 
 	var outline := PackedColorArray()
 	for i in cs.terrain.size():
 		var shape := Hex.polygon(i)
 		draw_colored_polygon(shape, Colors.of_terrain(cs.terrain[i]))
 		draw_polyline(shape + PackedVector2Array([shape[0]]), Color(0, 0, 0, 0.14), 1.0)
+
+		# Ground nobody of ours has been near. The terrain shows through: this is fog of
+		# war and not an unexplored map -- you can see the shape of the country, you
+		# cannot see who is standing in it.
+		if not cs.can_see(me, i):
+			draw_colored_polygon(shape, FOG)
+			continue
 
 		# What stands on the land, as a mark in the middle of it.
 		var made := cs.structure_at(i)
@@ -456,8 +522,11 @@ func _draw() -> void:
 		draw_rect(Rect2(at - Vector2(box, box) * 0.5, Vector2(box, box)), Color.BLACK, false, 2.0)
 
 
-	for id in cs.sorted_army_ids():
-		var a = cs.armies[id]
+	# armies_visible_to and not sorted_army_ids: the same call the wire filter makes, so
+	# the host's window hides exactly what a joined client was never sent. A separate
+	# view-side rule here would be the listen-server bug the whole design is built to
+	# avoid -- two rules that agree today.
+	for a: Dictionary in cs.armies_visible_to(me):
 		var centre := Hex.centre(a["tile"])
 		var c := Colors.of_owner(a["owner"], seating)
 		draw_circle(centre, Rules.HEX_SIZE * 0.42, c)
@@ -483,6 +552,7 @@ func _draw() -> void:
 				prev = here
 
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
+	_move_camera(delta)
 	if selected_army >= 0:
 		queue_redraw()       # the route preview follows the mouse

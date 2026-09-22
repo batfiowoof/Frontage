@@ -49,10 +49,14 @@ case anywhere in the order pipeline. It submits encoded orders through the same
 `host(port, false)` runs the server without taking a seat, for watching AIs play.
 
 Campaign: left-click your army, click a tile to march, click your own settlement to
-recruit or build, End Turn bottom-right. The turn advances when every player has
-pressed it. Pike and cavalry need a barracks in the settlement raising them; walls
-cut the damage a defender takes in a battle fought on that tile. Feed the army or
-it deserts, and a starving army does not replenish either.
+recruit or build, End Turn bottom-right. WASD or drag to pan, wheel to zoom. The turn
+advances when every player has pressed it. Pike and cavalry need a barracks in the
+settlement raising them; walls cut the damage a defender takes in a battle fought on that
+tile. Feed the army or it deserts, and a starving army does not replenish either.
+You only see what your armies and towns can see, and only ever having seen a hex is enough
+to keep it on your map. Raise a settler and march it somewhere clear to found a new town.
+A regiment that survives a battle brings its experience to the next one. The campaign ends
+when somebody is the last one standing, or on settlements at TURN_LIMIT.
 Regiments build up to a march and brake into a stop; they hold the facing you gave them
 and walk in any direction, so ordering one backwards does not spin it round. Turning right
 round is an about-face and moves nobody. Fighting AND marching tire a regiment, and a
@@ -73,6 +77,9 @@ field. WASD or screen edges pan, wheel zooms.
                    casualties written back, campaign resumes. ~30s: the judge fights
                    for a bit and then forfeits, because a formed head-on tie now runs
                    past two minutes and this gate is about the handoff, not the grind.
+    aitest.cmd     one process, two AIs, nobody watching. The broadest smoke test there
+                   is: it plays turns, builds, researches, expands, fights a real battle
+                   and comes back from it.
 
 ## Tests
 
@@ -84,10 +91,14 @@ means green. Add a test file to the `TESTS` list in `run.gd` to register it.
 ## Measured
 
 Snapshot cost with the `var_to_bytes` encoder (`tests/test_snapshot.gd` prints it):
-**195 B/regiment**, so 100 regiments = 19.6 KB/snapshot = 191 KB/s per client at 10 Hz.
-A realistic 40-regiment battle is ~76 KB/s per client. Fine on LAN, marginal over the
-internet with several clients. Hand-roll a `PackedFloat32Array` codec (roughly halves it)
-when that number starts to hurt, delta encoding after that.
+**203 B/regiment**, so 100 regiments = 20.4 KB/snapshot = 199 KB/s per client at 10 Hz.
+A realistic 40-regiment battle is ~80 KB/s per client. It was 195 before veterancy put
+`xp` on the regiment. Fine on LAN, marginal over the internet with several clients.
+Hand-roll a `PackedFloat32Array` codec (roughly halves it) when that number starts to
+hurt, delta encoding after that.
+
+The campaign snapshot is ~2.5 KB, and it now goes out **once per player** rather than once
+-- see **Fog of war**. Turn-based, so a handful of encodes on a click is nothing.
 
 ## Combat model
 
@@ -371,8 +382,8 @@ a collapsing army bled half a point a second and never actually went.
 All of it passes through `GENERAL_STEADY`, so a commander holds a line together against
 exactly the thing that unravels it.
 
-**The head-on tie is down to 42s**, from 53. That figure has gone 125 -> 68 -> 53 -> 42
-across the frontage retune, the exhaustion work and this. `PANIC_SHOCK` and
+**The head-on tie is down to 41s**, from 53. That figure has gone 125 -> 68 -> 53 -> 42
+-> 41 across the frontage retune, the exhaustion work, panic, and veterancy. `PANIC_SHOCK` and
 `TIRED_VULNERABILITY` are the dials if it has gone too far.
 
 **The biggest regiment on each side carries the general.** No unit to recruit and nothing
@@ -880,6 +891,156 @@ armoured keeps 92 and leaves them 76. Fifty seconds, not seventy: past about six
 sides have broken and run, and two regiments that have stopped taking casualties measure
 nothing.
 
+## Fog of war
+
+**The campaign snapshot goes out once per player, not once.** `broadcast_campaign()` sent
+one blob to everybody, so anything hidden would have been a curtain drawn in the view that
+a modified client walks straight through. It now loops the peers and `rpc_id`s each one
+`Snapshot.encode_campaign(campaign, peer)`.
+
+`CampaignState.seen` is owner -> a byte per hex, and it only ever GROWS: ground you have
+walked over stays on your map when you walk away, which is the difference between fog of
+war and a blindfold. Sight is recomputed fresh each time from where the armies and towns
+actually are; `seen` is the memory.
+
+**Armies and structures are hidden. Terrain and settlements are not.** Settlements are
+landmarks, which is how Total War plays it, and terrain is static and identical for
+everyone from map generation, so hiding it buys a client-side redraw and nothing else.
+`ponytail:` the upgrade is a remembered per-owner copy carrying a STALE owner id, so a town
+that changed hands behind the fog still reads as its old holder.
+
+`armies_visible_to()` is **one function with two callers**, and that is the whole design:
+the wire filter calls it and so does the campaign map's own `_draw`. The host holds the
+real `CampaignState` and is never sent a snapshot at all, so without a shared rule the
+host's window would show everything while a joined client's showed nothing — hard
+constraint #4, and the exact shape of the bug that ate the roster.
+
+Three things that are easy to get wrong here, all tested:
+
+- **Your own armies are always sent to you.** An army you cannot see is an army you cannot
+  order, and losing your own units to your own fog is not a mechanic.
+- **A campaign with no memory at all is omniscient.** `can_see` returns true when the
+  `seen` row is missing or the wrong length, so fog is something a campaign ACQUIRES by
+  calling `observe()`, never a default. Every test and harness written before it keeps
+  working unchanged.
+- **`seen` is in the save and in `remap_owners()`.** Dropping it from the save hands back a
+  revealed map; missing it in the remap hands somebody another player's map, and nothing
+  else in the game would notice. `tests/test_save.gd` checks each book separately for
+  exactly this reason.
+
+`observe_all()` hangs off `broadcast_campaign()` rather than off each of the dozen places
+that move an army or take a town. "Anything that changes the world broadcasts" is an
+invariant the design already rests on, so a sight update on the same call cannot go stale.
+
+**The AI sees through it.** `sim/ai.gd` is handed the server's own state and reads
+`armies` directly. Marked `ponytail:` — the fix is not a filter but a memory model, since
+every scoring function in that file would then need a reason to believe an enemy is still
+where it last stood.
+
+## Founding a town
+
+The map used to be dealt once at `generate()` — one capital each plus four neutral towns —
+and never change shape again, so the only way to grow was conquest and the whole
+Civilization half of this game was missing. A **settler** is a regiment kind like any
+other: it rides in an army, it is on the wire as `[kind, strength, xp]` like everything
+else, and `found()` consumes it.
+
+It is deliberately a bad unit — 40 men with farm tools, slow, no `requires` — so a settler
+party marching alone is an invitation and escorting it is the decision.
+
+**`MIN_TOWN_DISTANCE` is `WORK_RADIUS + 1`, and that is not a free number.** Any closer and
+two towns bank the same fields, so founding becomes a way of counting land somebody is
+already working twice over. At exactly `WORK_RADIUS + 1` their worked areas touch without
+overlapping, which is as tight as packing can honestly get.
+
+Founding clears whatever stood on the hex: a town on top of a farm would be worked by
+itself and counted twice, and `can_place` guards the town hex from then on.
+
+The AI expands, and had to. `_settle_something` runs before `_march`, `_settling` keeps
+`_march` from sending a settler party at a defended capital, and the settler is excluded
+from the "best unit it can afford" pick — it is the worst regiment in the game and that
+branch would have raised it the moment the purse allowed. `_settling` is rebuilt every turn
+from the world rather than remembered: the AI object outlives the battle, which is exactly
+how the cavalry sweep's stale waypoints got in.
+
+## Veterancy
+
+A campaign regiment is `[kind, strength, xp]`. It used to be `[kind, strength]`, so the
+only thing an army brought home from a fight was a smaller headcount — a regiment raised
+fresh at full strength was strictly better than one that had survived two battles, and
+there was never a reason to pull a battered unit out of the line rather than spend it.
+
+`xp` is men killed, cumulative, and it is read like the four exhaustion terms —
+`lerpf(1.0, best, seasoning())` — but off `xp` instead of `stamina` and in the opposite
+direction: exhaustion goes from bad to 1.0 as a regiment rests, this goes from 1.0 to good
+as it learns. Two readings, `veteran_attack()` and `veteran_resolve()`.
+
+It is **on the battle wire**, +8 B on a 195 B regiment, for the same reason `defense` and
+the tech header are: a replay rebuilds the fight from its opening snapshot, so anything the
+sim reads to decide the outcome has to be in it. Per-regiment and not a per-owner header
+like the techs, because it is genuinely per regiment.
+
+Earned in whole men through a pool on the attacker, the mirror of `damage_pool` — a tick's
+worth of killing is a fraction of a man. Archers earn it too, or they would be the one unit
+whose veterancy depended on running out of arrows.
+
+Measured (`tests/test_veterancy.gd` prints it):
+
+	50s duel     green keeps 80 men and leaves the enemy 80
+	             a full veteran keeps 86 and leaves them 76
+
+Deliberately about what one battle tech is worth (drill + armoury is 92 and 76). A veteran
+that walked through a green regiment would decide a campaign in the first fight and make
+the loser's position unrecoverable, and `test_it_is_worth_about_as_much_as_a_tech` is the
+guard on that rather than on the mechanic working.
+
+## Winning
+
+The campaign had no end at all: `net.gd` announced "driven from the map" and the game
+carried on with one player clicking End Turn forever.
+
+`CampaignState.winner(seats)` is pure and on the sim side, so every machine decides it
+identically and a test can ask without a tree. Two ways: everyone else driven from the map,
+or the most settlements once `TURN_LIMIT` is up. A tie at the limit goes to the lower seat —
+arbitrary, but a decided game beats a game that never ends.
+
+- **Owner 0 never wins.** The four neutral towns are not a player.
+- **An army in the field is still in the game.** Losing every settlement is not losing, or
+  taking one town would be an instant win.
+- Asked at the two places a campaign can end — a turn rolling over and a battle settling —
+  rather than on a clock, and `winner_seat` resets when a campaign is dealt or loaded or a
+  second game opens already won.
+
+## The edge of the field, and the edge of the map
+
+**`BATTLE_HALF_EXTENT` was 3000 and invisible.** Move orders and the camera were both
+already clamped to it, but that is a 6000-unit field a regiment crosses in 187 seconds
+against a 420-second limit, with the two lines deployed 520 apart in the middle of it. The
+fight happened in a thousand-unit box and the rest was somewhere to lose an army in by
+accident — and because nothing drew the boundary, a regiment sent past it simply stopped
+short for no reason a player could see.
+
+It is 1200, about 75 seconds across, and `battle_view.gd::_draw_field` draws it first so the
+men stand on top of it. Constant thickness on SCREEN, like the banner: a hairline at the
+zoomed-out end is exactly where you most need to know which way the edge is.
+
+Anything that measures against the field has to be derived from the constant and not
+written down beside it. `tests/net_harness.gd` had a literal probe target of (1234, -567),
+which sat inside a 3000-unit half-extent and outside a 1200-unit one, so shrinking the
+field silently turned the order-delivery probe into an out-of-bounds-clamping probe and
+`nettest.cmd` failed saying the order never arrived. It had arrived; `clamp_to_field` had
+moved it.
+
+**The campaign camera had no bounds at all.** Zoom was already there (wheel, 0.35–2.5);
+dragging far enough left the window looking at empty space with nothing to steer by and no
+way back but more dragging. `_clamp_camera()` runs every frame rather than at each of the
+three places that move the camera — a drag, a zoom and a key — because zooming out past the
+edge has to pull the view back in too. It clamps so the MAP fills the window, not so the
+camera centre stays on the map: at 0.35 zoom half a screen is most of the map, so an axis
+the window already covers is simply centred. WASD/arrows pan; no edge scroll, unlike the
+battle, because the campaign HUD lives in three corners and reaching for End Turn would
+send the map sliding out from under the cursor.
+
 ## Who is playing
 
 **The roster is replicated, and it has to be.** `players` is server state, but four view
@@ -1041,4 +1202,5 @@ fights.
 
 Marked in code with `# ponytail:` comments naming the ceiling and the upgrade path.
 Currently deferred: delta encoding, client-side prediction, reconnect/host migration,
-fog of war, AI opponents, NAT punch-through (LAN + direct IP only).
+NAT punch-through (LAN + direct IP only), an AI that respects fog, a remembered stale
+owner for towns behind the fog, sieges, diplomacy, roads, and city growth.

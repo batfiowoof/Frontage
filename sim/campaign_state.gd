@@ -17,12 +17,19 @@ var terrain := PackedByteArray()
 var structures := PackedByteArray()     # parallel to terrain, an index into Rules.STRUCTURES
 var settlements := []              # [{tile:int, owner:int, name:String}]
 var armies := {}                   # id -> {id, owner, tile, move_left, regiments:Array}
-                                   # a regiment is [kind, strength]
+                                   # a regiment is [kind, strength, xp]
 var gold := {}                     # owner -> int
 var food := {}                     # owner -> int
 var research := {}                 # owner -> int, the pool both tech trees spend
 var known := {}                    # owner -> Array of tech names
 var ready := {}                    # owner -> bool
+## What each player has ever laid eyes on: owner -> PackedByteArray parallel to `terrain`,
+## 1 for seen. It only ever grows -- ground you have walked over stays on your map when
+## you walk away, which is what everyone means by fog of war as opposed to blindness.
+##
+## Server state, sliced per player on the wire: a client is sent its own row and nobody
+## else's. It is in the save too, or loading a campaign would hand back a revealed map.
+var seen := {}                     # owner -> PackedByteArray
 var _next_army := 1
 
 
@@ -152,12 +159,17 @@ func settlements_of(owner: int) -> int:
 	return n
 
 
-## A campaign regiment is [kind, strength] -- the men it has right now, not merely
-## what kind of men they are. Carrying only the kind would hand a regiment cut down
-## to five men back to the campaign at full strength, and a battle that costs nothing
-## is a battle that decides nothing.
+## A campaign regiment is [kind, strength, xp] -- the men it has right now and what they
+## have learned, not merely what kind of men they are. Carrying only the kind would hand a
+## regiment cut down to five men back to the campaign at full strength, and a battle that
+## costs nothing is a battle that decides nothing; carrying no xp means the only thing an
+## army brings home is losses, so a fresh regiment always beats a surviving one.
+##
+## Indices and not keys: everything that ages a regiment -- starvation, forfeit
+## stragglers, reinforcement -- reaches for r[1] by position, and a dictionary per
+## regiment would put a string key on the wire for every one of them.
 static func make_regiment(kind: StringName) -> Array:
-	return [kind, int(Rules.KINDS[kind]["strength"])]
+	return [kind, int(Rules.KINDS[kind]["strength"]), 0]
 
 
 static func army_men(a: Dictionary) -> int:
@@ -362,6 +374,61 @@ func raze(owner: int, army_id: int) -> bool:
 	return true
 
 
+# --- founding a town ------------------------------------------------------
+## The map used to be fixed at generation, so the only way to grow was to take somebody
+## else's town. A settler is how a player makes a new one.
+##
+## Deliberate, like razing and splitting: an army carrying a settler does not drop it on
+## the first decent hex it walks over. Where a town goes is most of the decision.
+
+## Where in this army's line the settlers are, or -1. The first one, so an army carrying
+## two founds one town now and keeps the other.
+func settler_in(a: Dictionary) -> int:
+	for i in a["regiments"].size():
+		if a["regiments"][i][0] == Rules.SETTLER:
+			return i
+	return -1
+
+
+## Can this army found a town where it is standing? Passable ground, nobody else's town
+## underfoot, far enough from every existing town, a settler in the line, and a move left
+## -- the same five-way check `raze` makes, for the same reason.
+func can_found(owner: int, army_id: int) -> bool:
+	var a = armies.get(army_id)
+	if a == null or a["owner"] != owner or a["move_left"] <= 0:
+		return false
+	if settler_in(a) < 0:
+		return false
+	var tile: int = a["tile"]
+	if not passable(tile):
+		return false
+	for s: Dictionary in settlements:
+		if hex_distance(tile, int(s["tile"])) < Rules.MIN_TOWN_DISTANCE:
+			return false
+	return true
+
+
+## Found it. The settlers become the town, which is why they leave the army: a settler
+## that founded a town and stayed in the line would be a free regiment forever.
+func found(owner: int, army_id: int) -> bool:
+	if not can_found(owner, army_id):
+		return false
+	var a: Dictionary = armies[army_id]
+	var tile: int = a["tile"]
+	# Whatever stood on this hex is built over. A town on top of a farm would be worked
+	# by itself and counted twice, and `can_place` guards the town hex from then on.
+	structures[tile] = 0
+	settlements.append({
+		"tile": tile, "owner": owner,
+		"name": "Town %d" % (settlements.size() + 1),
+	})
+	a["regiments"].remove_at(settler_in(a))
+	a["move_left"] = 0
+	disband_if_empty(army_id)
+	observe(owner)                     # a new town is a new pair of eyes
+	return true
+
+
 ## How much damage a defender shrugs off on this tile, 0..1.
 func defense_at(tile: int, owner: int) -> float:
 	var s = settlement_at(tile)
@@ -422,6 +489,99 @@ func is_alive(owner: int) -> bool:
 	return false
 
 
+## Who has won, or 0 for "nobody yet". Owner 0 is neutral, so it is never an answer.
+##
+## Two ways to win, and the second is what stops a stalemate running forever: everyone
+## else driven from the map, or the most settlements once TURN_LIMIT is up. A tie on
+## settlements at the limit goes to the lower seat -- an arbitrary rule, but a decided
+## game beats a game that never ends, and seats are stable within a session.
+##
+## Pure and on the sim side, so it is decided identically on every machine and a test
+## can ask it without a tree.
+func winner(seats: Array) -> int:
+	var standing := []
+	for owner in seats:
+		if owner != 0 and is_alive(owner):
+			standing.append(owner)
+	if standing.size() == 1:
+		return standing[0]
+	if standing.is_empty() or turn <= Rules.TURN_LIMIT:
+		return 0
+	var best: int = standing[0]
+	for owner in standing:
+		var n := settlements_of(owner)
+		if n > settlements_of(best) or (n == settlements_of(best) and owner < best):
+			best = owner
+	return best
+
+
+# --- what a player can see ------------------------------------------------
+## Fog of war. Everything here is pure and index-based, so the server, a loaded save and
+## a test all reach the same answer, and `Snapshot.encode_campaign` can slice a snapshot
+## with it without knowing anything about the map.
+
+## Fold everything this owner can currently see into what it has already seen. Sight is
+## worked out fresh each time from where its armies and towns actually are; `seen` is the
+## memory, and it only grows.
+func observe(owner: int) -> void:
+	if owner == 0:
+		return                         # nobody plays the neutral towns
+	var memory: PackedByteArray = seen.get(owner, PackedByteArray())
+	if memory.size() != terrain.size():
+		memory = PackedByteArray()
+		memory.resize(terrain.size())
+	for tile in _watchtowers(owner):
+		for i in terrain.size():
+			if hex_distance(tile, i) <= Rules.SIGHT_RADIUS:
+				memory[i] = 1
+	seen[owner] = memory
+
+
+## Everyone at once, which is what the server does after any change to the world.
+func observe_all() -> void:
+	for owner in gold.keys():
+		observe(owner)
+
+
+## The things that do the looking: every army and every settlement this owner holds.
+func _watchtowers(owner: int) -> PackedInt32Array:
+	var out := PackedInt32Array()
+	for s: Dictionary in settlements:
+		if s["owner"] == owner:
+			out.append(int(s["tile"]))
+	for a in armies.values():
+		if a["owner"] == owner:
+			out.append(int(a["tile"]))
+	return out
+
+
+## Has this owner ever seen this hex? An owner with no memory at all sees everything,
+## which is what keeps every test and every harness written before fog existed honest:
+## fog is something a campaign acquires by calling `observe`, not a default.
+func can_see(owner: int, tile: int) -> bool:
+	var memory: PackedByteArray = seen.get(owner, PackedByteArray())
+	if memory.size() != terrain.size():
+		return true
+	return tile >= 0 and tile < memory.size() and memory[tile] != 0
+
+
+## The armies this owner is allowed to know about: its own always, and anyone else's
+## only where it can see.
+##
+## ONE function, and the reason there is only one is the listen-server rule. The wire
+## filter (`Snapshot.encode_campaign`) and the campaign map's own drawing both call it,
+## so the host's window and a joined client's window hide exactly the same armies. A
+## view-side rule for the host and a wire-side rule for the client would be two rules
+## that agree today.
+func armies_visible_to(owner: int) -> Array:
+	var out := []
+	for id in sorted_army_ids():
+		var a: Dictionary = armies[id]
+		if a["owner"] == owner or can_see(owner, int(a["tile"])):
+			out.append(a)
+	return out
+
+
 ## Hand every seat to a new owner id. Peer ids are random per session, so loading a
 ## save means the empires have to be re-pointed at whoever has actually turned up; a
 ## mapping that misses anything silently gives somebody else's empire away.
@@ -437,6 +597,7 @@ func remap_owners(mapping: Dictionary) -> void:
 	research = _remapped(research, mapping)
 	known = _remapped(known, mapping)
 	ready = _remapped(ready, mapping)
+	seen = _remapped(seen, mapping)    # miss this and a player loads somebody else's map
 
 
 static func _remapped(book: Dictionary, mapping: Dictionary) -> Dictionary:
@@ -788,6 +949,7 @@ static func generate(owner_ids: Array, map_seed: int):
 		cs.research[owner_ids[n]] = Rules.START_RESEARCH
 		cs.known[owner_ids[n]] = []
 		cs.add_army(owner_ids[n], towns[n]["tile"], [&"spear", &"spear", &"archer"])
+	cs.observe_all()                   # everybody can see the ground they are standing on
 
 	# Every capital starts with a barracks standing on a hex beside it: a real place,
 	# which an enemy can march to and burn.

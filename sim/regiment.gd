@@ -39,6 +39,9 @@ var engaged_with := -1             # regiment id, or -1
 ## Fractional casualties waiting to become whole men. Server-side only: it is not on
 ## the wire, because a client never continues the simulation, only draws it.
 var damage_pool := 0.0
+## The same idea for the other side of the ledger: fractional men KILLED, waiting to
+## become a whole point of xp. Server-side for the same reason -- a client only draws.
+var xp_pool := 0.0
 ## How fast it is actually going, world units a second. Server-side, like damage_pool: it
 ## starts at zero, a replay opens from a snapshot where nothing is moving, and a client
 ## only ever draws interpolated positions. Nothing on the wire has to carry it.
@@ -78,6 +81,12 @@ var stance := 0                    # a mask of Stance bits
 ## reproduce itself. Nothing caught it because every recorded battle had been in a field.
 var defense := 0.0
 
+## Men this regiment has killed, across every battle it has fought. Carried between
+## battles in the campaign tuple and therefore on the battle wire too: a replay rebuilds
+## the fight from its opening snapshot, so anything that changes the outcome has to be in
+## it. Same reason `defense` and the tech header are already there.
+var xp := 0
+
 
 static func make(p_id: int, p_owner: int, p_kind: StringName, p_pos: Vector2, p_facing := 0.0):
 	var spec: Dictionary = Rules.KINDS.get(p_kind, Rules.KINDS[&"spear"])
@@ -115,6 +124,24 @@ func legs() -> float:
 
 func nerve() -> float:
 	return lerpf(Rules.TIRED_RESOLVE, 1.0, clampf(stamina, 0.0, 1.0))
+
+
+## What this regiment has learned, 0 green to 1 fully blooded. Cumulative men killed
+## across every battle it has fought, carried home in the campaign tuple.
+##
+## Read like the exhaustion terms, but off `xp` instead of `stamina`, and in the opposite
+## direction: exhaustion lerps from bad to 1.0 as a regiment rests, this lerps from 1.0
+## to good as it learns.
+func seasoning() -> float:
+	return clampf(float(xp) / Rules.VETERAN_KILLS, 0.0, 1.0)
+
+
+func veteran_attack() -> float:
+	return lerpf(1.0, Rules.VETERAN_ATTACK, seasoning())
+
+
+func veteran_resolve() -> float:
+	return lerpf(1.0, Rules.VETERAN_RESOLVE, seasoning())
 
 
 ## Turn right round without wheeling. A rectangle rotated 180 degrees about its centre

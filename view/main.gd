@@ -5,6 +5,7 @@ const CampaignView := preload("res://view/campaign/campaign_view.gd")
 const BattleView := preload("res://view/battle/battle_view.gd")
 const Replay := preload("res://net/replay.gd")
 const Save := preload("res://net/save.gd")
+const Colors := preload("res://view/colors.gd")
 
 var _screen: Node = null
 var _lobby: CanvasLayer
@@ -18,6 +19,7 @@ var _autostart := false
 var _demo_battle := false
 var _replay_path := ""
 var _load_path := ""
+var _over: CanvasLayer = null           # the end-of-campaign panel, once there is one
 
 
 func _ready() -> void:
@@ -26,6 +28,7 @@ func _ready() -> void:
 	Net.battle_updated.connect(_on_battle)
 	Net.connection_failed.connect(func() -> void: _say("could not reach that host"))
 	Net.server_left.connect(_on_server_left)
+	Net.campaign_over.connect(_on_campaign_over)
 	_build_lobby()
 
 	# --host / --join <ip> / --autostart so two instances can be launched without
@@ -205,6 +208,36 @@ func _show(script: GDScript, name: String) -> void:
 	_screen = script.new()
 	_screen.name = name
 	add_child(_screen)
+
+
+## The campaign is decided. It goes here rather than in campaign_view because this node
+## already owns which screen you are looking at, and the panel has to outlive the screen
+## that was showing when it landed.
+##
+## The map stays underneath: knowing HOW it ended is most of what you want at the moment
+## it does, and a full-screen curtain takes that away.
+func _on_campaign_over(winner_id: int) -> void:
+	if _over != null:
+		return
+	_over = CanvasLayer.new()
+	add_child(_over)
+	var panel := PanelContainer.new()
+	panel.set_anchors_preset(Control.PRESET_CENTER_TOP)
+	panel.position = Vector2(-150, 40)
+	panel.custom_minimum_size = Vector2(300, 0)
+	_over.add_child(panel)
+	var box := VBoxContainer.new()
+	panel.add_child(box)
+	var head := Label.new()
+	head.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	head.add_theme_font_size_override("font_size", 22)
+	head.add_theme_color_override("font_color", Colors.of_owner(winner_id, Net.player_ids()))
+	head.text = "you have won" if winner_id == Net.my_id() else "player %d has won" % winner_id
+	box.add_child(head)
+	var sub := Label.new()
+	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	sub.text = "turn %d" % (Net.campaign.turn if Net.campaign != null else 0)
+	box.add_child(sub)
 
 
 func _on_server_left() -> void:

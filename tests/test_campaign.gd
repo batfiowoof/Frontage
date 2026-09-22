@@ -403,3 +403,53 @@ func test_absurd_regiment_strengths_are_refused(t) -> void:
 	var bare = d.duplicate(true)
 	bare[5][0][4][0] = &"spear"
 	t.eq(Snapshot.decode_campaign(var_to_bytes(bare)), null, "a kind with no strength beside it")
+
+
+# --- winning --------------------------------------------------------------
+# The campaign used to have no end at all: net.gd announced "driven from the map" and
+# the game carried on with one player clicking End Turn forever.
+
+func test_nobody_has_won_at_the_start(t) -> void:
+	var cs = _two_player()
+	t.eq(cs.winner([1, 2]), 0, "two players, both alive, both holding a capital")
+
+
+func test_the_last_one_standing_wins(t) -> void:
+	var cs = _two_player()
+	for s: Dictionary in cs.settlements:
+		if s["owner"] == 2:
+			s["owner"] = 1
+	for id in cs.sorted_army_ids():
+		if cs.armies[id]["owner"] == 2:
+			cs.armies.erase(id)
+	t.ok(not cs.is_alive(2), "no towns and no armies is out of the game")
+	t.eq(cs.winner([1, 2]), 1)
+
+
+func test_an_army_in_the_field_is_still_in_the_game(t) -> void:
+	# Losing every settlement is not losing: a surviving army can still take one back,
+	# and ending the campaign under a player who still has men on the map would make
+	# capturing one town an instant win.
+	var cs = _two_player()
+	for s: Dictionary in cs.settlements:
+		if s["owner"] == 2:
+			s["owner"] = 1
+	t.eq(cs.winner([1, 2]), 0, "player 2 still has an army")
+
+
+func test_neutral_towns_never_win(t) -> void:
+	var cs = _two_player()
+	t.eq(cs.winner([0, 1, 2]), 0, "owner 0 holds four towns and is not a player")
+
+
+func test_the_turn_limit_decides_on_settlements(t) -> void:
+	var cs = _two_player()
+	cs.turn = Rules.TURN_LIMIT
+	t.eq(cs.winner([1, 2]), 0, "not yet -- the limit is the turn it is decided ON")
+	cs.turn = Rules.TURN_LIMIT + 1
+	t.eq(cs.winner([1, 2]), 1, "a dead-even tie goes to the lower seat")
+	for s: Dictionary in cs.settlements:
+		if s["owner"] == 0:
+			s["owner"] = 2
+			break
+	t.eq(cs.winner([1, 2]), 2, "and the count beats the seat order")

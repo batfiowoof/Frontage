@@ -404,7 +404,9 @@ func _land_volley(shooter: Regiment, mark: Regiment) -> void:
 	var cover := clampf(float(mark.form()["missile"]) + float(ground_at(mark.pos)["cover"]), -1.0, 0.95)
 	var kills := float(Rules.KINDS[shooter.kind]["volley"]) * shooter.fraction() * falloff
 	kills *= (1.0 - cover) * shooter.order_factor()
-	mark.take_casualties(int(round(maxf(0.0, kills))))
+	var fell := int(round(maxf(0.0, kills)))
+	mark.take_casualties(fell)
+	shooter.xp += fell             # archers learn their trade too, and in whole men
 	mark.shock(Rules.MISSILE_SHOCK * (1.0 - clampf(cover, 0.0, 0.95)))
 
 
@@ -605,7 +607,7 @@ func _accumulate_strike(attacker: Regiment, defender: Regiment, dt: float, kills
 	output *= attacker.readiness() * damage_mult * dt
 	output *= float(attacker.form()["damage"]) * attacker.order_factor() * braced
 	output *= float(ground_at(attacker.pos)["damage"])
-	output *= tech(attacker.owner_id, &"attack")
+	output *= tech(attacker.owner_id, &"attack") * attacker.veteran_attack()
 	if attacker.is_cavalry():
 		output *= tech(attacker.owner_id, &"horse_attack")
 	output *= 1.0 - clampf(tech(defender.owner_id, &"armour"), 0.0, 0.6)
@@ -613,6 +615,13 @@ func _accumulate_strike(attacker: Regiment, defender: Regiment, dt: float, kills
 	output *= defender.vulnerability()     # a spent regiment is easier to kill
 
 	kills[defender.id] = float(kills.get(defender.id, 0.0)) + output
+	# ...and the attacker learns by exactly what it cost the other side. Pooled the same
+	# way the casualties are, because a tick's worth of killing is a fraction of a man.
+	attacker.xp_pool += output
+	var learned := int(floor(attacker.xp_pool))
+	if learned > 0:
+		attacker.xp_pool -= float(learned)
+		attacker.xp += learned
 
 	# Shock scales with how hard the attacker can actually press, the same way its
 	# killing does. Damage passes through ten multipliers and morale used to pass
@@ -625,7 +634,7 @@ func _accumulate_strike(attacker: Regiment, defender: Regiment, dt: float, kills
 	# different thing from the attacker's readiness inside `pressure` -- that is how hard
 	# he can press. Tired men breaking sooner had no expression here at all.
 	var shaken := morale_drain * pressure * tech(defender.owner_id, &"resolve") * dt
-	shaken *= defender.nerve()
+	shaken *= defender.nerve() * defender.veteran_resolve()
 	if _in_reach_of_general(defender):
 		shaken *= Rules.GENERAL_STEADY
 	shocks[defender.id] = float(shocks.get(defender.id, 0.0)) + shaken

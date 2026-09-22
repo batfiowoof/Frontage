@@ -18,7 +18,7 @@ const TILE_COUNT := Rules.MAP_W * Rules.MAP_H
 ## APPEND ONLY. These ints go on the wire and into saved .rpl files, so renumbering
 ## them silently reinterprets every recording ever made.
 enum Type { BATTLE_MOVE, ARMY_MOVE, RECRUIT, READY, BUILD, SET_FORMATION, FOCUS, RAZE,
-	RESEARCH, MERGE, SPLIT, FORFEIT, STANCE }
+	RESEARCH, MERGE, SPLIT, FORFEIT, STANCE, FOUND }
 
 
 # --- encoding -------------------------------------------------------------
@@ -46,6 +46,13 @@ static func build(tile: int, structure: StringName) -> PackedByteArray:
 
 static func raze(army_id: int) -> PackedByteArray:
 	return var_to_bytes([VERSION, Type.RAZE, army_id])
+
+
+## Put a town down where this army is standing. It carries no tile for the same reason
+## RAZE does not: where the army is is the server's business, and a tile in the packet
+## would be a second thing to validate against the first.
+static func found(army_id: int) -> PackedByteArray:
+	return var_to_bytes([VERSION, Type.FOUND, army_id])
 
 
 ## How these regiments behave when left alone: a mask of Regiment.Stance bits.
@@ -127,6 +134,8 @@ static func decode(bytes: PackedByteArray) -> Dictionary:
 			return _decode_forfeit(d)
 		Type.STANCE:
 			return _decode_stance(d)
+		Type.FOUND:
+			return _decode_found(d)
 	return {}
 
 
@@ -237,6 +246,12 @@ static func _decode_raze(d: Array) -> Dictionary:
 	if d.size() != 3 or typeof(d[2]) != TYPE_INT:
 		return {}
 	return {"type": Type.RAZE, "army_id": d[2]}
+
+
+static func _decode_found(d: Array) -> Dictionary:
+	if d.size() != 3 or typeof(d[2]) != TYPE_INT:
+		return {}
+	return {"type": Type.FOUND, "army_id": d[2]}
 
 
 static func _decode_merge(d: Array) -> Dictionary:

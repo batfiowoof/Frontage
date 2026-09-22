@@ -26,6 +26,8 @@ const BANNER_LIFT := 6.0                   # screen px between the bars and the 
 ## Past this, a facing change is an about-face rather than a wheel: it is not interpolated
 ## and bodies.gd relabels the men instead of swinging them round.
 const ABOUT_FACE := deg_to_rad(150.0)
+## The boundary line, in SCREEN pixels, for the same reason the banner is.
+const FIELD_EDGE_W := 3.0
 const EDGE_MARGIN := 24.0
 const EDGE_SPEED := 900.0
 const KEY_SPEED := 900.0
@@ -318,6 +320,7 @@ func _draw_reach(pose: Dictionary) -> void:
 func _draw() -> void:
 	var pose := _display_state()
 	var seating: Array = Net.player_ids()
+	_draw_field()
 	_draw_reach(pose)
 	for id in pose:
 		var p: Dictionary = pose[id]
@@ -369,6 +372,20 @@ func _draw() -> void:
 		draw_line(_order_from, mouse, Color("9fd8a0"), 2.0)
 		for row: Dictionary in _plan_order(_order_from, mouse):
 			_draw_ghost(row)
+
+
+## The edge of the world. Orders have always been clamped to it (`Orders.clamp_to_field`)
+## and so has the camera, but nothing drew it, so a regiment sent past the boundary simply
+## stopped short for no reason a player could see and the field read as open ground going
+## on forever. Drawn first, so the men stand on top of it.
+##
+## A constant thickness on SCREEN, like the banner: a hairline at the zoomed-out end is
+## exactly where you most need to know which way the edge is.
+func _draw_field() -> void:
+	var e := Rules.BATTLE_HALF_EXTENT
+	var field := Rect2(Vector2(-e, -e), Vector2(e, e) * 2.0)
+	draw_rect(field, Color(0.16, 0.15, 0.13, 0.5), true)
+	draw_rect(field, Color(0.45, 0.40, 0.32, 0.9), false, FIELD_EDGE_W / _camera.zoom.x)
 
 
 ## The flag above a regiment: what it is, how it is holding up, and something big enough

@@ -17,7 +17,12 @@ const Orders := preload("res://net/orders.gd")
 
 const TICKS_BEFORE_FREEZE := 40           # two seconds of marching
 const TIMEOUT := 25.0
-const PROBE_TARGET := Vector2(1234.0, -567.0)
+## Somewhere on the field, derived from the field rather than picked. A literal here
+## was (1234, -567), which sat inside a 3000-unit half-extent and outside a 1200-unit
+## one, so shrinking the battlefield silently turned the order-delivery probe into an
+## out-of-bounds-clamping probe and this harness failed saying the order never arrived.
+## It had arrived; `Orders.clamp_to_field` had moved it.
+const PROBE_TARGET := Vector2(Rules.BATTLE_HALF_EXTENT * 0.5, -Rules.BATTLE_HALF_EXTENT * 0.25)
 
 var net: Node
 var role := ""
