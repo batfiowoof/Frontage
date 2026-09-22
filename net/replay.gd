@@ -81,15 +81,24 @@ static func apply_order(bs, sender: int, bytes: PackedByteArray) -> void:
 	if order.is_empty():
 		return
 	var kind: int = order["type"]
-	if kind != Orders.Type.BATTLE_MOVE and kind != Orders.Type.SET_FORMATION \
-			and kind != Orders.Type.FOCUS and kind != Orders.Type.STANCE:
+	# Saying the line is arranged carries no regiment ids at all, so it is answered
+	# here, before the loop below reaches for them. Leaving it out of this list was a
+	# replay that never left the deployment phase: it sat there for every recorded
+	# tick while the real battle fought them, and verify() compared two battles.
+	if kind == Orders.Type.DEPLOYED:
+		bs.say_ready(sender)
+		return
+	if not Orders.CHANGES_A_BATTLE.has(kind):
 		return
 	for id in order["ids"]:
 		var r = bs.get_regiment(id)
 		if r == null or r.owner_id != sender:
 			continue
 		if kind == Orders.Type.BATTLE_MOVE:
-			r.order_move(order["target"], order["facing"])
+			# `steer` and not `order_move`: before the fight starts the same order
+			# PLACES the regiment, and the server applied it that way when it
+			# recorded. One branch, in the sim, for the live path and this one.
+			bs.steer(r, order["target"], order["facing"])
 		elif kind == Orders.Type.FOCUS:
 			r.focus = int(order["mark"])
 		elif kind == Orders.Type.STANCE:

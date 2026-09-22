@@ -57,6 +57,13 @@ var last_campaign_bytes := PackedByteArray()
 ## the view can ask rather than having to have caught the signal.
 var winner_seat := 0
 
+## Did the last battle recorded here replay back into the state it actually ended in?
+##
+## `_keep_the_recording()` has always checked, and has always only WARNED -- which is how
+## a determinism regression sat in a working tree while camptest.cmd printed PASS. The
+## harness reads this and fails the gate, because a canary nothing listens to is not one.
+var recording_reproduced := true
+
 var _accum := 0.0
 var _since_snapshot := 0
 var _rng := RandomNumberGenerator.new()
@@ -476,6 +483,10 @@ func order_army_stance(army_id: int, stance: int) -> void:
 	submit(Orders.army_stance(army_id, stance))
 
 
+func order_deployed() -> void:
+	submit(Orders.deployed(true))
+
+
 ## Give up the battle. Goes through submit() like every other order, so the host's own
 ## surrender travels the same path a remote one does.
 func order_forfeit() -> void:
@@ -503,9 +514,10 @@ func _receive_order(sender: int, bytes: PackedByteArray) -> void:
 	if order.is_empty():
 		_reject(sender, "malformed order")
 		return
-	if battle != null and _recorder != null and (order["type"] == Orders.Type.BATTLE_MOVE
-			or order["type"] == Orders.Type.SET_FORMATION or order["type"] == Orders.Type.FOCUS
-			or order["type"] == Orders.Type.STANCE):
+	# One list, in Orders, shared with replay.gd. Two copies of it is a recording
+	# that silently stops reproducing the battle it came from.
+	var in_battle: bool = battle != null and _recorder != null
+	if in_battle and Orders.CHANGES_A_BATTLE.has(order["type"]):
 		_recorder.note(battle.tick, sender, bytes)
 	match order["type"]:
 		Orders.Type.BATTLE_MOVE:
@@ -538,6 +550,8 @@ func _receive_order(sender: int, bytes: PackedByteArray) -> void:
 			_found(sender, order)
 		Orders.Type.ARMY_STANCE:
 			_army_stance(sender, order)
+		Orders.Type.DEPLOYED:
+			_deployed(sender, order)
 
 
 func _stance(sender: int, order: Dictionary) -> void:
@@ -780,6 +794,15 @@ func _on_armies_met(pair: Array) -> void:
 	var defender = campaign.armies.get(pair[1])
 	if attacker == null or defender == null:
 		return
+	# Everything either side has standing next to the field walks in, whichever way the
+	# fight is then resolved. Before the branch so an autoresolved battle counts them
+	# too, and before anything latches an army id: reinforcing can disband the army it
+	# came from, and we must not be holding an id that is about to vanish.
+	var came := [campaign.reinforce(int(attacker["id"])),
+		campaign.reinforce(int(defender["id"]))]
+	if came[0] > 0 or came[1] > 0:
+		_announce("reinforcements reach the field: %d regiments and %d" % came)
+
 	# Two humans fight it out. Anything else is not worth making a player watch.
 	if players.has(attacker["owner"]) and players.has(defender["owner"]):
 		_begin_battle(attacker, defender)
@@ -814,6 +837,13 @@ func _begin_battle(attacker: Dictionary, defender: Dictionary) -> void:
 	bs.lay_ground(int(campaign.terrain[_battle_tile]), _battle_tile * 7919 + campaign.turn)
 	for side in [attacker["owner"], defender["owner"]]:
 		bs.techs[side] = campaign.techs_of(side).duplicate()
+	# Each side's commander, carried in the same way the techs are and for the same
+	# reason: the battle has to be reproducible from its opening snapshot alone.
+	bs.renown[int(attacker["owner"])] = CampaignState.renown_factor(attacker)
+	bs.renown[int(defender["owner"])] = CampaignState.renown_factor(defender)
+	_announce("%s leads the attack; %s holds the field" % [
+		CampaignState.general_name(int(attacker["id"])),
+		CampaignState.general_name(int(defender["id"]))])
 	# Siegecraft is the attacker's answer to a wall, so it is folded in here rather than
 	# left for the battle to discover -- the defence is a property of the ground.
 	# Walls belong to the ground, digging in belongs to the army, and a defender
@@ -823,6 +853,9 @@ func _begin_battle(attacker: Dictionary, defender: Dictionary) -> void:
 	fortified *= bs.tech(attacker["owner"], &"siege")
 	_deploy(bs, attacker, -Rules.DEPLOY_SEPARATION * 0.5, 0.0, 0.0)
 	_deploy(bs, defender, Rules.DEPLOY_SEPARATION * 0.5, PI, fortified)
+	# The one place a battle opens with somebody there to arrange it. Everything else
+	# that builds a BattleState -- the demo, the harnesses, every test -- gets a fight.
+	bs.phase = BattleState.Phase.DEPLOY
 	if fortified > 0.0:
 		_announce("the defenders are behind walls at tile %d" % _battle_tile)
 	_announce("battle at tile %d: %d men against %d" % [
@@ -863,6 +896,10 @@ func _finish_battle() -> void:
 	# A side that quits has lost the field whatever its regiments were still doing, so
 	# the forfeit overrides what the sim would have called it. With only two sides on a
 	# field, the winner is simply the other one.
+	# Whose commander was killed. Read from the sim's own record rather than re-derived
+	# from the finished battle: by the end his regiment is one of many that died and
+	# there is nothing left to tell it apart. Taken before `battle` is dropped below.
+	var _fallen: Dictionary = battle._mourned.duplicate()
 	var winner_id: int = battle.winner()
 	if _battle_forfeit != 0:
 		winner_id = 0
@@ -900,6 +937,18 @@ func _finish_battle() -> void:
 				if left >= 0 else "player %d is cornered and cannot fall back" % _battle_forfeit)
 
 	_announce("the field at tile %d goes to player %d" % [_battle_tile, winner_id])
+	# A commander is made by winning, and unmade by dying: the army whose general was
+	# killed starts again with a new man on nothing, whichever way the battle went.
+	for army in [attacker, defender]:
+		if army == null:
+			continue
+		var who := CampaignState.general_name(int(army["id"]))
+		if bool(_fallen.get(int(army["owner"]), false)):
+			army["renown"] = 0
+			_announce("%s is dead" % who)
+		elif int(army["owner"]) == winner_id:
+			army["renown"] = mini(Rules.RENOWN_WINS, CampaignState.renown_of(army) + 1)
+			_announce("%s has won his %d battle(s)" % [who, army["renown"]])
 	if attacker != null and defender != null:
 		_settle_field(attacker, defender, _battle_tile, winner_id == _battle_attacker)
 	_battle_armies.clear()
@@ -973,8 +1022,10 @@ func _keep_the_recording() -> void:
 	if _recorder == null or battle == null:
 		return
 	_recorder.finish(Snapshot.encode_battle(battle), battle.tick)
-	if not _recorder.verify():
+	recording_reproduced = _recorder.verify()
+	if not recording_reproduced:
 		push_warning("[replay] a battle did not reproduce itself -- something in the sim is not deterministic")
+		_announce("[replay] that battle did not reproduce itself")
 	var path: String = _recorder.save()
 	_recorder = null
 	if not path.is_empty():
@@ -1007,7 +1058,25 @@ func _battle_move(sender: int, order: Dictionary) -> void:
 		if r.owner_id != sender:
 			_reject(sender, "regiment %d belongs to %d" % [id, r.owner_id])
 			continue
-		r.order_move(order["target"], order["facing"])
+		# The same order does a different thing before the fight starts: deploying sets
+		# the men out where you want them rather than marching them there. Deliberately
+		# the same order, so the whole drag-to-draw-a-line pipeline -- preview, frontage,
+		# facing -- works while arranging the line without knowing this phase exists.
+		# The branch itself lives in the sim, because a replay applies these same bytes.
+		battle.steer(r, order["target"], order["facing"])
+
+
+## This side is done arranging. The fight begins when everybody has said so, or when
+## DEPLOY_SECONDS runs out -- decided in the sim's own tick, never here, for the same
+## reason a forfeit only FLAGS the battle: ending it from the order handler would leave
+## this tick's orders in the closing snapshot and the recording would not reproduce.
+func _deployed(sender: int, order: Dictionary) -> void:
+	if battle == null:
+		_reject(sender, "no battle in progress")
+		return
+	if not order["confirm"]:
+		return
+	battle.say_ready(sender)
 
 
 func _reject(peer_id: int, reason: String) -> void:

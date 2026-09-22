@@ -400,6 +400,36 @@ func raze(owner: int, army_id: int) -> bool:
 	return true
 
 
+# --- who is commanding ----------------------------------------------------
+## The man at the head of the army, and the one thing the campaign remembers about a
+## battle besides who won and who died.
+##
+## `sim/battle_state.gd` has always commissioned a general -- the biggest regiment carries
+## him -- but he was anonymous, identical in every battle and forgotten the moment it
+## ended. The flag is the same flag; what this adds is that it is somebody's, that he gets
+## better at it, and that he can be killed.
+##
+## His NAME is derived from the army id and never sent: every machine reaches the same
+## answer from something the snapshot already carries, which is exactly how the battle
+## general falls out of `max_strength` and the ids.
+static func general_name(army_id: int) -> String:
+	return Rules.GENERAL_NAMES[absi(army_id) % Rules.GENERAL_NAMES.size()]
+
+
+## Battles he has won. Defaulted, because an army decoded from a snapshot that predates
+## him -- or built by hand in a test -- has no such key.
+static func renown_of(a: Dictionary) -> int:
+	return int(a.get("renown", 0))
+
+
+## What he is worth to the men around him, 1.0 for a commander in his first battle. It
+## SCALES the general's existing effects rather than adding a fourth number, because he
+## is the same man doing the same job and only better at it.
+static func renown_factor(a: Dictionary) -> float:
+	var t := clampf(float(renown_of(a)) / float(Rules.RENOWN_WINS), 0.0, 1.0)
+	return lerpf(1.0, Rules.RENOWN_BEST, t)
+
+
 # --- what an army is doing ------------------------------------------------
 ## APPEND ONLY, like the order enum: these ints go on the wire and into saves.
 enum Stance { MARCH, FORCED, FORTIFY, AMBUSH }
@@ -692,6 +722,7 @@ func add_army(owner: int, tile: int, kinds: Array) -> Dictionary:
 		"tile": tile,
 		"move_left": Rules.ARMY_MOVE_POINTS,
 		"stance": Stance.MARCH,
+		"renown": 0,
 		"regiments": raised,
 	}
 	_next_army += 1
@@ -800,6 +831,34 @@ func merge(owner: int, army_id: int, into_id: int) -> bool:
 	a["move_left"] = 0
 	disband_if_empty(army_id)
 	return true
+
+
+## A battle is about to be fought on this army's hex, so everything of ours standing
+## next to it walks in. Total War's reinforcements, and the reason they matter is that
+## armies cannot share a hex: without this, two of your stacks a hex apart fight the
+## enemy one at a time and lose to a single force neither could beat alone.
+##
+## It is `merge`, deliberately. Merging already handles the regiment cap, leaves the
+## remainder behind as a smaller army, and spends the movement -- writing a second path
+## into a battle would be a second set of those rules to keep in step. One army a side
+## goes into `_begin_battle` afterwards exactly as one always did, so nothing downstream
+## of the deployment knows this happened.
+##
+## Only those with movement left: an army that has already marched and fought this turn
+## is not also available to turn up somewhere else.
+func reinforce(army_id: int) -> int:
+	var a = armies.get(army_id)
+	if a == null:
+		return 0
+	var joined := 0
+	for near in adjacent(int(a["tile"])):
+		var other = army_at(near)
+		if other == null or other["owner"] != a["owner"]:
+			continue
+		var brought: int = other["regiments"].size()
+		if merge(int(a["owner"]), int(other["id"]), army_id):
+			joined += brought - (other["regiments"].size() if armies.has(other["id"]) else 0)
+	return joined
 
 
 ## Peel regiments off into a new army on an adjacent hex.

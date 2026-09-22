@@ -16,7 +16,7 @@ const BattleState := preload("res://sim/battle_state.gd")
 const CampaignState := preload("res://sim/campaign_state.gd")
 const Rules := preload("res://sim/rules.gd")
 
-const VERSION := 7
+const VERSION := 9
 
 ## Field order on the wire.  Add a field here and the round-trip test covers it.
 const REGIMENT_FIELDS := [
@@ -63,7 +63,8 @@ static func encode_battle(bs) -> PackedByteArray:
 		for field in REGIMENT_FIELDS:
 			row.append(r.get(field[0]))
 		rows.append(row)
-	return var_to_bytes([VERSION, bs.tick, bs._next_id, rows, bs.features, bs.techs])
+	return var_to_bytes([VERSION, bs.tick, bs._next_id, rows, bs.features, bs.techs,
+		bs.renown, bs.phase, bs.ready])
 
 
 ## Returns a BattleState, or null if the bytes are not a snapshot we understand.
@@ -71,7 +72,7 @@ static func decode_battle(bytes: PackedByteArray):
 	if bytes.size() < 4:
 		return null                         # too short for bytes_to_var to even look at
 	var data = bytes_to_var(bytes)          # never _with_objects: that is remote code execution
-	if typeof(data) != TYPE_ARRAY or data.size() != 6:
+	if typeof(data) != TYPE_ARRAY or data.size() != 9:
 		return null
 	if typeof(data[0]) != TYPE_INT or data[0] != VERSION:
 		return null
@@ -125,6 +126,34 @@ static func decode_battle(bytes: PackedByteArray):
 			if typeof(name) != TYPE_STRING_NAME or not Rules.TECHS.has(name):
 				return null
 	bs.techs = data[5]
+
+	# What each side's commander is worth. Clamped, not merely typed: it divides a morale
+	# drain, so a peer that could name it could make its army unbreakable.
+	if typeof(data[6]) != TYPE_DICTIONARY:
+		return null
+	for owner in data[6]:
+		if typeof(owner) != TYPE_INT:
+			return null
+		var worth = data[6][owner]
+		if typeof(worth) != TYPE_FLOAT and typeof(worth) != TYPE_INT:
+			return null
+		if not is_finite(float(worth)) or worth < 1.0 or worth > Rules.RENOWN_BEST:
+			return null
+	bs.renown = data[6]
+
+	# Whether the line is still being arranged, and who has said they are done. On the
+	# wire and not derived: a client has to know not to draw a fight that is not
+	# happening yet, and a replay has to reopen in the phase it was recorded in.
+	if typeof(data[7]) != TYPE_INT or data[7] < 0 or data[7] > BattleState.Phase.FIGHT:
+		return null
+	bs.phase = data[7]
+	if typeof(data[8]) != TYPE_DICTIONARY:
+		return null
+	for owner in data[8]:
+		if typeof(owner) != TYPE_INT or typeof(data[8][owner]) != TYPE_BOOL:
+			return null
+	bs.ready = data[8]
+
 	# Derived, not decoded. Who carries the general falls out of max_strength and the
 	# ids, which are already in the rows above, so the mirror reaches the same answer
 	# the server did without a byte on the wire for it.
@@ -155,7 +184,7 @@ static func encode_campaign(cs, for_owner := 0) -> PackedByteArray:
 	var known_armies: Array = cs.armies.values() if for_owner == 0 		else cs.armies_visible_to(for_owner)
 	for a in known_armies:
 		armies.append([a["id"], a["owner"], a["tile"], a["move_left"], a["regiments"],
-			CampaignState.stance_of(a)])
+			CampaignState.stance_of(a), CampaignState.renown_of(a)])
 	armies.sort_custom(func(x, y): return x[0] < y[0])
 	var structures: PackedByteArray = cs.structures
 	if for_owner != 0:
@@ -218,12 +247,14 @@ static func decode_campaign(bytes: PackedByteArray):
 			"pop": row[3], "unrest": row[4]})
 
 	for row in d[5]:
-		if typeof(row) != TYPE_ARRAY or row.size() != 6:
+		if typeof(row) != TYPE_ARRAY or row.size() != 7:
 			return null
 		for i in 4:
 			if typeof(row[i]) != TYPE_INT:
 				return null
 		if typeof(row[5]) != TYPE_INT or row[5] < 0 or row[5] > CampaignState.Stance.AMBUSH:
+			return null
+		if typeof(row[6]) != TYPE_INT or row[6] < 0 or row[6] > Rules.RENOWN_WINS:
 			return null
 		if not _is_tile(row[2]):
 			return null
@@ -247,7 +278,8 @@ static func decode_campaign(bytes: PackedByteArray):
 			return null                     # duplicate ids would silently drop an army
 		cs.armies[row[0]] = {
 			"id": row[0], "owner": row[1], "tile": row[2],
-			"move_left": row[3], "stance": row[5], "regiments": row[4],
+			"move_left": row[3], "stance": row[5], "renown": row[6],
+			"regiments": row[4],
 		}
 
 	var purse = _int_map(d[6])

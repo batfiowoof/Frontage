@@ -36,6 +36,23 @@ var techs := {}
 ## and a replay all derive the same answer from the same bytes. Sending it would be
 ## paying for something everyone can work out.
 var generals := {}
+## owner -> what its commander is worth, 1.0 for a man in his first battle. Carried in
+## from the campaign and on the wire beside `techs`, for the same reason: a replay
+## rebuilds the fight from its opening snapshot and has to reach the same answer.
+var renown := {}
+
+## Arranging the line, or fighting. DEFAULT IS FIGHTING, deliberately: every test and
+## harness in the tree builds a BattleState and calls step() expecting a battle, and a
+## phase that had to be dismissed would silently stop all of them. Only `_begin_battle`
+## opens in DEPLOY, which is the one place a player is actually there to deploy.
+enum Phase { DEPLOY, FIGHT }
+var phase := Phase.FIGHT
+var ready := {}                    # owner -> has said it is done arranging
+## Which half of the field each side sets up in, -1 or +1. DERIVED, not decoded: the
+## armies are laid out either side of x = 0 and cannot cross while deploying, so the mean
+## x of a side answers it from a snapshot that already carries the positions -- the same
+## trick the general uses to stay off the wire.
+var sides := {}
 ## Whoever has already been mourned, so an army is shaken by losing him once.
 var _mourned := {}
 
@@ -60,6 +77,11 @@ func commission_generals() -> void:
 
 ## Is this regiment close enough to its own general to be steadied by him? The general
 ## steadies himself too, which is why a commander in the line is worth something.
+## What this owner's commander is worth. A side with no entry has an ordinary one.
+func renown_of(owner: int) -> float:
+	return float(renown.get(owner, 1.0))
+
+
 func _in_reach_of_general(r: Regiment) -> bool:
 	var id: int = int(generals.get(r.owner_id, -1))
 	if id < 0:
@@ -133,6 +155,87 @@ func winner() -> int:
 	return standing.keys()[0] if standing.size() == 1 else 0
 
 
+# --- arranging the line ---------------------------------------------------
+
+## Nothing fights, nothing tires, nothing shoots and nobody's morale moves. The tick
+## still advances, because a replay is a tick count and a list of orders: a deployment
+## that did not consume ticks would replay the fight starting at the wrong moment.
+func _step_deployment() -> void:
+	if tick >= int(Rules.DEPLOY_SECONDS * float(Rules.TICK_HZ)) or _all_ready():
+		phase = Phase.FIGHT
+
+
+## Every side that still has somebody standing has said it is done. A side with nothing
+## left on the field cannot be waited for -- it has no one to press the button.
+func _all_ready() -> bool:
+	var owners := _standing_owners()
+	if owners.is_empty():
+		return false
+	for owner in owners:
+		if not bool(ready.get(owner, false)):
+			return false
+	return true
+
+
+## Which half of the field this side sets up in. Worked out once from where its regiments
+## actually are, so it survives a decode and a replay without going on the wire.
+func side_of_owner(owner: int) -> float:
+	if not sides.has(owner):
+		var total := 0.0
+		var n := 0
+		for id in sorted_ids():
+			if regiments[id].owner_id == owner:
+				total += regiments[id].pos.x
+				n += 1
+		sides[owner] = signf(total / float(n)) if n > 0 else 1.0
+	return float(sides[owner])
+
+
+## Where this regiment may actually be put while deploying: its own half of the field,
+## kept DEPLOY_MARGIN clear of the middle. Setting up inside the enemy would make the
+## phase a free first move rather than a chance to arrange the one you are about to make.
+func deployable(r: Regiment, to: Vector2) -> Vector2:
+	var side := side_of_owner(r.owner_id)
+	var e := Rules.BATTLE_HALF_EXTENT
+	var x := clampf(to.x, -e, e)
+	x = maxf(x * side, Rules.DEPLOY_MARGIN) * side
+	return Vector2(x, clampf(to.y, -e, e))
+
+
+## Put it there. Deploying is not marching: the men are set out where you want them
+## rather than walking, so this moves the regiment outright and leaves it IDLE.
+func place(r: Regiment, to: Vector2, face: float) -> void:
+	if phase != Phase.DEPLOY or not r.is_alive():
+		return
+	r.pos = deployable(r, to)
+	r.target = r.pos
+	r.facing = face
+	r.target_facing = face
+	r.state = Regiment.State.IDLE
+
+
+## A move order, which means a different thing depending on the phase: before the fight
+## it sets the men out where you want them, during it they march.
+##
+## ONE function, because `net.gd` applies orders live and `replay.gd` applies the same
+## recorded bytes back. A branch in only the first of those is a recorded deployment that
+## replays as a march -- two rules that agree today, which is the trap this file warns
+## about everywhere else.
+func steer(r: Regiment, to: Vector2, face: float) -> void:
+	if phase == Phase.DEPLOY:
+		place(r, to, face)
+	else:
+		r.order_move(to, face)
+
+
+## A side is done arranging. Irreversible on purpose -- unreadying would let one player
+## hold a lobby open forever, and the clock is already the answer to somebody who does
+## not press it.
+func say_ready(owner: int) -> void:
+	if phase == Phase.DEPLOY:
+		ready[owner] = true
+
+
 # --- the tick -------------------------------------------------------------
 
 ## One fixed tick. Server-side only.
@@ -146,6 +249,9 @@ func step() -> void:
 	if generals.is_empty():
 		commission_generals()      # first tick: the field is laid out, so it is decidable
 	tick += 1
+	if phase == Phase.DEPLOY:
+		_step_deployment()
+		return
 	var dt := Rules.TICK_DELTA
 	var contacts := _find_contacts()
 
@@ -636,7 +742,9 @@ func _accumulate_strike(attacker: Regiment, defender: Regiment, dt: float, kills
 	var shaken := morale_drain * pressure * tech(defender.owner_id, &"resolve") * dt
 	shaken *= defender.nerve() * defender.veteran_resolve()
 	if _in_reach_of_general(defender):
-		shaken *= Rules.GENERAL_STEADY
+		# A better commander steadies them harder: the drain multiplier is pushed further
+		# below 1, never past 0, so renown cannot make a regiment immune to morale.
+		shaken *= maxf(0.0, 1.0 - (1.0 - Rules.GENERAL_STEADY) * renown_of(defender.owner_id))
 	shocks[defender.id] = float(shocks.get(defender.id, 0.0)) + shaken
 
 
@@ -754,7 +862,7 @@ func _hearten(r: Regiment, dt: float) -> void:
 		return
 	var rate := Rules.MORALE_RECOVERY
 	if r.state == Regiment.State.ROUTING and _in_reach_of_general(r):
-		rate += Rules.GENERAL_RALLY
+		rate += Rules.GENERAL_RALLY * renown_of(r.owner_id)
 	r.recover(rate * dt)
 
 

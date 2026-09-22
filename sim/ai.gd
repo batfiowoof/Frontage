@@ -373,6 +373,13 @@ static func _tile_distance(a: int, b: int) -> int:
 func battle_orders(bs) -> Array:
 	if bs == null:
 		return []
+	# It takes the line it was dealt. Saying so at once rather than sitting out the
+	# clock is what keeps an AI battle from opening with a minute of nothing -- and an
+	# AI that never said it was ready would do exactly that, every time.
+	# ponytail: it does not arrange anything first. A planner that sets its own frontage
+	# and puts the horse on a wing before the fight is the upgrade.
+	if bs.phase == bs.Phase.DEPLOY:
+		return [] if bool(bs.ready.get(seat, false)) else [Orders.deployed(true)]
 	var mine := []
 	var foes := []
 	for id in bs.sorted_ids():

@@ -19,7 +19,22 @@ const TILE_COUNT := Rules.MAP_W * Rules.MAP_H
 ## APPEND ONLY. These ints go on the wire and into saved .rpl files, so renumbering
 ## them silently reinterprets every recording ever made.
 enum Type { BATTLE_MOVE, ARMY_MOVE, RECRUIT, READY, BUILD, SET_FORMATION, FOCUS, RAZE,
-	RESEARCH, MERGE, SPLIT, FORFEIT, STANCE, FOUND, ARMY_STANCE }
+	RESEARCH, MERGE, SPLIT, FORFEIT, STANCE, FOUND, ARMY_STANCE, DEPLOYED }
+
+
+## The orders that change a BATTLE, and therefore the orders a recording has to keep.
+##
+## ONE list, because it was three: `net.gd` filtered what to record, `replay.gd` filtered
+## what to apply on playback, and the two had to agree with each other and with reality.
+## Adding DEPLOYED to the game and to neither of them produced a recording that replayed a
+## battle which never left its deployment phase -- and `_keep_the_recording()` only warned,
+## so it sat in a working tree while the gate printed PASS.
+##
+## FORFEIT is deliberately absent. It only FLAGS the battle and `net.gd::_process` ends it
+## inside the tick loop; recording it would put that tick's orders in the closing snapshot
+## while playback stops before applying them.
+const CHANGES_A_BATTLE := [Type.BATTLE_MOVE, Type.SET_FORMATION, Type.FOCUS, Type.STANCE,
+	Type.DEPLOYED]
 
 
 # --- encoding -------------------------------------------------------------
@@ -61,6 +76,13 @@ static func found(army_id: int) -> PackedByteArray:
 ## a bitfield of something else entirely.
 static func army_stance(army_id: int, stance: int) -> PackedByteArray:
 	return var_to_bytes([VERSION, Type.ARMY_STANCE, army_id, stance])
+
+
+## Done arranging the line; start the battle. Carries no seat -- which side said it is
+## the sender, which the server takes from the peer id and never from the packet -- and a
+## bool only because decode() refuses anything shorter than three elements.
+static func deployed(confirm: bool) -> PackedByteArray:
+	return var_to_bytes([VERSION, Type.DEPLOYED, confirm])
 
 
 ## How these regiments behave when left alone: a mask of Regiment.Stance bits.
@@ -146,6 +168,8 @@ static func decode(bytes: PackedByteArray) -> Dictionary:
 			return _decode_found(d)
 		Type.ARMY_STANCE:
 			return _decode_army_stance(d)
+		Type.DEPLOYED:
+			return _decode_deployed(d)
 	return {}
 
 
@@ -262,6 +286,12 @@ static func _decode_found(d: Array) -> Dictionary:
 	if d.size() != 3 or typeof(d[2]) != TYPE_INT:
 		return {}
 	return {"type": Type.FOUND, "army_id": d[2]}
+
+
+static func _decode_deployed(d: Array) -> Dictionary:
+	if d.size() != 3 or typeof(d[2]) != TYPE_BOOL:
+		return {}
+	return {"type": Type.DEPLOYED, "confirm": d[2]}
 
 
 static func _decode_army_stance(d: Array) -> Dictionary:

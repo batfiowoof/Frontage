@@ -602,6 +602,13 @@ func _draw() -> void:
 		if posted != Campaign.Stance.MARCH:
 			draw_string(font, centre + Vector2(-Rules.HEX_SIZE * 0.5, -Rules.HEX_SIZE * 0.5),
 				STANCE_MARKS[posted], HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color.WHITE)
+		# Who is in command, and how many battles he has won. The name is derived from
+		# the army id, so it costs nothing on the wire and every machine agrees.
+		if a["id"] == selected_army:
+			var renown := Campaign.renown_of(a)
+			draw_string(font, centre + Vector2(-Rules.HEX_SIZE, Rules.HEX_SIZE * 0.95),
+				"%s%s" % [Campaign.general_name(int(a["id"])), " *".repeat(renown)],
+				HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color.WHITE)
 
 	# The route the selected army would take, so marching is not guesswork.
 	if selected_army >= 0 and cs.armies.has(selected_army):

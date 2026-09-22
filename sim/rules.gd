@@ -81,6 +81,19 @@ const DEPLOY_SPACING := 150.0
 ## A battle nobody can win still has to end, or the campaign never resumes.
 const BATTLE_TIME_LIMIT := 420.0
 
+## Time to arrange the line before anybody moves. Total War's deployment phase, and the
+## reason it matters here is frontage: width buys output, depth buys endurance, and both
+## of those are decisions you can only really make while looking at what you are facing.
+## Without it the two lines are dealt out by `_deploy` and the fight starts with the one
+## choice that decides it already made for you.
+##
+## It ends early the moment every side says it is ready, so the clock is the ceiling and
+## not the wait.
+const DEPLOY_SECONDS := 60.0
+## How close to the middle of the field you may set up. Each side keeps to its own half:
+## deploying INTO the enemy would make the phase a free first move.
+const DEPLOY_MARGIN := 120.0
+
 # --- battle: attrition --------------------------------------------------
 ## Combat is frontage-limited: only the men who can physically reach the enemy
 ## fight. Output scales with the number of FILES in contact, never with how many men
@@ -201,6 +214,22 @@ const CHARGE_HEART := 4.0                  # per second of morale back while cha
 ## is nothing to recruit and nothing new on the campaign map.
 ## ponytail: biggest-regiment-is-the-general. A real commander unit is the upgrade,
 ## and it would only change who gets the flag.
+## What a commander who has won before is worth over one who has not. He is the same man
+## doing the same job -- steadying the men around him -- only better at it, so this scales
+## the three numbers below rather than adding a fourth.
+##
+## Capped at RENOWN_BEST after RENOWN_WINS victories: a general who kept winning forever
+## would make the first battle of a campaign decide the rest of it, which is the failure
+## veterancy is also guarded against.
+const RENOWN_WINS := 4
+const RENOWN_BEST := 1.6
+## Names drawn from here by army id, so the same commander is the same commander on every
+## machine without a byte on the wire for it -- the same trick the general himself uses.
+const GENERAL_NAMES := ["Aldric", "Berengar", "Corvin", "Dietrich", "Eadric", "Falco",
+	"Gisbert", "Hadrian", "Ivo", "Jorund", "Konrad", "Lothar", "Magnus", "Norbert",
+	"Osric", "Pelagius", "Quintus", "Rainald", "Sigurd", "Theobald", "Ulric", "Valen",
+	"Wulfstan", "Xanthos", "Yorick", "Zeno"]
+
 const GENERAL_RADIUS := 260.0
 const GENERAL_STEADY := 0.7                # morale drain multiplier within his reach
 const GENERAL_RALLY := 2.0                 # extra morale/s for a router within it

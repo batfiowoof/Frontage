@@ -47,6 +47,7 @@ var _panning := false
 var _formation_bar: HBoxContainer
 var _quit: Button
 var _quit_armed := false
+var _begin: Button
 var _groups := {}                        # slot -> PackedInt32Array, view-side only
 
 
@@ -134,6 +135,17 @@ func _build_hud() -> void:
 	_quit.position = Vector2(-160, -34)
 	_quit.pressed.connect(_on_give_up)
 	layer.add_child(_quit)
+
+	# Arranging the line. It sits where the give-up button does because they are never
+	# both useful at once: you cannot give up a battle that has not started.
+	_begin = Button.new()
+	_begin.text = "begin the battle"
+	_begin.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
+	_begin.position = Vector2(-160, -34)
+	_begin.pressed.connect(func() -> void:
+		Net.order_deployed()
+		_begin.disabled = true)
+	layer.add_child(_begin)
 
 
 # --- what we are drawing --------------------------------------------------
@@ -461,10 +473,25 @@ func _update_hud(pose: Dictionary) -> void:
 			theirs += int(pose[id]["strength"])
 	_status.text = "your men %d      theirs %d      %d selected" % [mine, theirs, selected.size()]
 
+	# Before the fight, the whole HUD is about arranging the line rather than driving it.
+	var arranging: bool = Net.battle != null and Net.battle.phase == BattleState.Phase.DEPLOY
+	_begin.visible = arranging
+	_quit.visible = not arranging
+	if arranging:
+		var left := maxf(0.0, Rules.DEPLOY_SECONDS - float(Net.battle.tick) * Rules.TICK_DELTA)
+		var waiting: bool = bool(Net.battle.ready.get(Net.my_id(), false))
+		_begin.disabled = waiting
+		_status.text = "arranging the line -- %ds%s" % [
+			int(left), "      waiting for the other side" if waiting else ""]
+
 	_formation_bar.visible = not selected.is_empty()
 	if selected.is_empty() or not pose.has(selected[0]):
-		_hint.text = ("drag to select, right-click to move, right-DRAG to draw the line"
-			+ "      ctrl+1-9 remembers a group, 1-9 recalls it")
+		if arranging:
+			_hint.text = ("set out your line: right-DRAG to place and shape a regiment,"
+				+ " your own half of the field only")
+		else:
+			_hint.text = ("drag to select, right-click to move, right-DRAG to draw the line"
+				+ "      ctrl+1-9 remembers a group, 1-9 recalls it")
 		return
 	var lead: Dictionary = pose[selected[0]]
 	var busy: float = lead["reforming"]

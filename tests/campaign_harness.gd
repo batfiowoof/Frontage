@@ -78,6 +78,12 @@ func _start() -> void:
 		return
 	net.news.connect(func(text: String) -> void:
 		battles += 1
+		# The recorder lives on the server and only the CLIENT's exit code decides this
+		# gate, so the judge hears about a broken recording the same way it hears about
+		# everything else. It used to be a push_warning nobody read, which is how a
+		# determinism regression sat in a working tree under a green gate.
+		if text.contains("did not reproduce"):
+			_fail("a battle did not reproduce itself -- the sim is not deterministic")
 		print("[%s] news: %s" % [role, text]))
 	print("[%s] up" % role)
 
@@ -99,13 +105,21 @@ func _process(delta: float) -> bool:
 
 	if net.battle != null:
 		was_fighting = true
-		battle_seconds += delta
+		# Only while the fight is actually running. FIGHT_SECONDS means "fights for a
+		# bit", and counting the deployment into it spent most of the budget arranging
+		# the line -- the judge then forfeited having barely made contact, and the
+		# casualties it reported were nearly all forfeit stragglers.
+		if net.battle.phase == net.battle.Phase.FIGHT:
+			battle_seconds += delta
 		_fight()
 		# Somebody has to end this. A head-on charge between formed regiments now runs
 		# past four minutes, and what this gate needs to prove is the handoff, not the
 		# grind -- so the judge fights for a bit and then quits the field, which is a
 		# real ending and exercises the forfeit order across two processes as well.
-		if role == "join" and battle_seconds > FIGHT_SECONDS and not gave_up:
+		# Only once the fight is actually running: giving up while the lines are still
+		# being arranged would end the battle without one.
+		var fighting: bool = net.battle.phase == net.battle.Phase.FIGHT
+		if role == "join" and fighting and battle_seconds > FIGHT_SECONDS and not gave_up:
 			gave_up = true
 			print("[join] battle: giving up the field after %.0fs" % battle_seconds)
 			net.order_forfeit()
@@ -117,6 +131,9 @@ func _process(delta: float) -> bool:
 		battle_seconds = 0.0
 		acted_this_turn = false
 		fought += 1
+		# ...and the host, which holds the recorder, checks it directly.
+		if role == "host" and not net.recording_reproduced:
+			_fail("a battle did not reproduce itself -- the sim is not deterministic")
 		men_after_battle = _my_men()
 		# One closed loop is the whole point of this gate, and battles run in real
 		# time, so the judge stops here rather than playing the campaign out. The
@@ -176,6 +193,14 @@ func _process(delta: float) -> bool:
 ## it proves the same seam faster, and proves the forfeit order across two processes
 ## while it is at it.
 func _fight() -> void:
+	# A battle now opens with a deployment phase, and this harness is a client like any
+	# other: somebody has to press begin. Without it the judge spent the whole of
+	# FIGHT_SECONDS arranging its line and then forfeited, so the gate passed having
+	# never fought -- the casualties it reported were forfeit stragglers.
+	if net.battle.phase == net.battle.Phase.DEPLOY:
+		if not bool(net.battle.ready.get(net.my_id(), false)):
+			net.order_deployed()
+		return
 	if charged:
 		return
 	charged = true

@@ -63,7 +63,9 @@ Regiments build up to a march and brake into a stop; they hold the facing you ga
 and walk in any direction, so ordering one backwards does not spin it round. Turning right
 round is an about-face and moves nobody. Fighting AND marching tire a regiment, and a
 spent one hits softer, dies faster, falls behind and breaks sooner.
-Battle: left-click or box-drag to select, right-click to move, right-DRAG to draw the
+Battle: it opens with a deployment phase -- set your line out in your own half, then
+press begin; it starts when both sides have, or when the clock runs out.
+Left-click or box-drag to select, right-click to move, right-DRAG to draw the
 line itself -- press and release are the two ends of the formation, the facing is square
 to it, and the LENGTH is the frontage: drag long for a thin wide line, short for a deep
 block. Right-click an enemy to attack that one. G guards, H skirmishes,
@@ -82,6 +84,10 @@ field. WASD or screen edges pan, wheel zooms.
     aitest.cmd     one process, two AIs, nobody watching. The broadest smoke test there
                    is: it plays turns, builds, researches, expands, fights a real battle
                    and comes back from it.
+
+`camptest.cmd` also FAILS if a battle recording does not reproduce itself. That check has
+always been made and used to only `push_warning`, which is how a determinism regression sat
+in a working tree under a green gate -- see **The three lists that had to agree**.
 
 ## Tests
 
@@ -892,6 +898,111 @@ Measured: over a 50s duel, untrained keeps 81 men and leaves the enemy 81; drill
 armoured keeps 92 and leaves them 76. Fifty seconds, not seventy: past about sixty both
 sides have broken and run, and two regiments that have stopped taking casualties measure
 nothing.
+
+## Reinforcements
+
+**Armies cannot share a hex**, which is the constraint the whole merge/split design comes
+from — and without reinforcements it meant two of your stacks a hex apart fought the enemy
+one at a time and lost to a force neither could beat alone.
+
+Everything either side has standing next to the field walks in when the armies meet.
+It is `merge()`, deliberately: merging already handles the regiment cap, leaves the
+remainder behind as a smaller army and spends the movement, so a second path into a battle
+would be a second set of those rules to keep in step. One army a side reaches
+`_begin_battle` afterwards exactly as one always did, and nothing downstream of the
+deployment knows this happened.
+
+It runs in `_on_armies_met`, **before** the autoresolve branch so a resolved battle counts
+them too, and before anything latches an army id — reinforcing can disband the army it came
+from, and holding an id that is about to vanish is the bug that shape of code invites.
+
+Only armies with movement left: one that has already marched and fought this turn is not
+also available to turn up somewhere else.
+
+## The man in command
+
+`BattleState` has always commissioned a general — the biggest regiment carries him — but he
+was anonymous, identical in every battle and forgotten the moment it ended.
+
+His **name is derived from the army id and never sent**, the same trick the battle general
+uses to stay off the wire: every machine reaches the same answer from something the
+snapshot already carries.
+
+**Renown scales his existing effects rather than adding a fourth number**, because he is
+the same man doing the same job and only better at it. It reaches `GENERAL_STEADY` and
+`GENERAL_RALLY` through `BattleState.renown_of()`, carried in beside `techs` and for the
+same reason: the battle has to be reproducible from its opening snapshot alone.
+
+Two guards, both tested:
+
+- **It can never make a regiment unbreakable.** The morale drain multiplier is pushed
+  further below 1 and clamped at 0, so no amount of renown deletes morale as a mechanic.
+- **It is capped at `RENOWN_WINS` victories.** A general who kept improving forever would
+  make the first battle of a campaign decide the rest of it — the same failure veterancy is
+  guarded against, for the same reason.
+
+A commander is made by winning and unmade by dying: the army whose general was killed
+starts again with a new man on nothing, whichever way the battle went. Whose general fell
+is read from the sim's own `_mourned`, not re-derived at the end — by then his regiment is
+one of many that died and there is nothing left to tell it apart.
+
+## Arranging the line
+
+Total War's deployment phase. It matters here because of frontage: width buys output,
+depth buys endurance, and both are decisions you can only really make while looking at what
+you are facing. Without it the two lines are dealt out by `_deploy` and the fight starts
+with the one choice that decides it already made for you.
+
+**The default is FIGHTING.** Every test and harness in this tree builds a `BattleState` and
+calls `step()` expecting a battle, so a phase that had to be dismissed would silently stop
+all of them. Only `_begin_battle` opens in DEPLOY — the one place a player is there to
+deploy. The same reason `can_see` defaults to omniscient.
+
+While deploying nothing fights, tires, shoots or loses its nerve, but **the tick still
+advances**: a replay is a tick count and a list of orders, so a deployment that consumed no
+ticks would replay the fight starting at the wrong moment.
+
+It ends when every side says so, or when `DEPLOY_SECONDS` runs out — so somebody who never
+presses the button cannot stall the game, and saying you are ready is irreversible because
+unreadying could hold it open forever.
+
+**Deploying is a `BATTLE_MOVE`, deliberately.** The whole drag-to-draw-a-line pipeline —
+preview, frontage, facing — then works while arranging the line without knowing this phase
+exists. Each side is clamped to its own half (`DEPLOY_MARGIN` clear of the middle);
+deploying into the enemy would make the phase a free first move.
+
+Which half is **derived, not decoded**: the armies are laid out either side of x = 0 and
+cannot cross while deploying, so the mean x of a side answers it from a snapshot that
+already carries the positions.
+
+### The three lists that had to agree
+
+Adding one order type broke replay determinism, and the interesting part is why. There were
+**three** copies of "which orders change a battle":
+
+	net.gd::_receive_order    what gets written into the recording
+	replay.gd::apply_order    what gets applied on playback
+	...and reality
+
+`DEPLOYED` went into the game and into neither of them. A recording therefore held no
+DEPLOYED orders at all, so playback never left the deployment phase: it sat there for all
+503 recorded ticks while the real battle fought them, and `verify()` compared two entirely
+different battles. Measured, the replayed regiments were all still sitting on the
+`DEPLOY_MARGIN` clamp at ±120 with full strength and morale.
+
+They are now one list, `Orders.CHANGES_A_BATTLE`. `FORFEIT` is deliberately absent from it
+for the reason already documented under **Giving up**.
+
+The second half of the same trap was quieter: `_battle_move` branched on the phase to call
+`place()` instead of `order_move()`, and `replay.gd` did not. That divergence was latent
+only because the camptest harness does not drag while deploying — the moment a player did,
+their recorded deployment would replay as a march. The branch now lives in one place,
+`BattleState.steer()`, which both the live path and playback call.
+
+**And the gate did not fail.** `_keep_the_recording()` has always checked and has always
+only `push_warning`ed, so this sat in a working tree while `camptest.cmd` printed PASS. The
+judge now listens for it on the news and fails — verified by putting the regression back and
+watching the gate go red. A canary nothing listens to is not one.
 
 ## Towns that grow, and towns that resent you
 
