@@ -91,6 +91,29 @@ func adjacent(i: int) -> PackedInt32Array:
 	return out
 
 
+## The six neighbours' terrain, in `directions()` order -- what a battle fought on this hex
+## has around it. Off the map counts as more of the same.
+func ring_of(i: int) -> Array:
+	var out := []
+	var x := tile_x(i)
+	var y := tile_y(i)
+	for d: Vector2i in directions(y):
+		out.append(int(terrain[idx(x + d.x, y + d.y)]) if in_bounds(x + d.x, y + d.y) else int(terrain[i]))
+	return out
+
+
+## Which of the six ways out of `from` leads to `to`, or 3 (west) if they are not
+## neighbours.
+func direction_to(from: int, to: int) -> int:
+	var x := tile_x(from)
+	var y := tile_y(from)
+	var dirs := directions(y)
+	for k in dirs.size():
+		if idx(x + dirs[k].x, y + dirs[k].y) == to and in_bounds(x + dirs[k].x, y + dirs[k].y):
+			return k
+	return 3
+
+
 func neighbours(i: int) -> PackedInt32Array:
 	var out := PackedInt32Array()
 	for n in adjacent(i):

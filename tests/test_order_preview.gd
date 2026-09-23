@@ -333,3 +333,34 @@ func _assert_nobody_overlaps(t, plan: Array) -> void:
 			t.ok(apart >= want - 0.01,
 				"%.0f apart, needs %.0f -- they are ordered to stand inside each other" % [
 					apart, want])
+
+
+# --- the path arrow -----------------------------------------------------------
+
+func _marcher(owner: int, state := Regiment.State.MOVING, path := PackedVector2Array([Vector2(100, 0)])) -> Dictionary:
+	return {"owner": owner, "state": state, "path": path, "pos": Vector2.ZERO}
+
+
+func test_a_selected_marching_regiment_shows_its_path(t) -> void:
+	var pose := {1: _marcher(7), 2: _marcher(7)}
+	t.eq(BattleView.paths_to_draw(pose, PackedInt32Array([1]), 7, false), [1],
+		"the selected one, and not its unselected neighbour")
+
+
+func test_space_shows_every_one_of_yours(t) -> void:
+	var pose := {1: _marcher(7), 2: _marcher(7), 3: _marcher(8)}
+	t.eq(BattleView.paths_to_draw(pose, PackedInt32Array(), 7, true), [1, 2])
+
+
+func test_an_enemy_path_is_never_drawn(t) -> void:
+	# The wire never sends one; the rule does not rely on that.
+	var pose := {3: _marcher(8)}
+	t.eq(BattleView.paths_to_draw(pose, PackedInt32Array([3]), 7, true), [],
+		"not selected, not with Space held")
+
+
+func test_only_a_march_with_a_plan_is_drawn(t) -> void:
+	var pose := {1: _marcher(7, Regiment.State.IDLE), 2: _marcher(7, Regiment.State.MOVING, PackedVector2Array()),
+		3: _marcher(7, Regiment.State.FIGHTING)}
+	t.eq(BattleView.paths_to_draw(pose, PackedInt32Array([1, 2, 3]), 7, true), [],
+		"standing, planless and fighting regiments show nothing")

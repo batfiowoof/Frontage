@@ -70,7 +70,8 @@ press begin; it starts when both sides have, or when the clock runs out.
 Left-click or box-drag to select, right-click to move, right-DRAG to draw the
 line itself -- press and release are the two ends of the formation, the facing is square
 to it, and the LENGTH is the frontage: drag long for a thin wide line, short for a deep
-block. Right-click an enemy to attack that one. G guards, H skirmishes,
+block. A selected regiment on the march shows the route it is taking; hold Space to see
+the routes of all of yours. Right-click an enemy to attack that one. G guards, H skirmishes,
 ctrl+1-9 remembers a group and 1-9 recalls it, and there is a button to give up the
 field. WASD or screen edges pan, wheel zooms.
 
@@ -109,7 +110,10 @@ loop is the other thing it catches.
 Snapshot cost with the `var_to_bytes` encoder (`tests/test_snapshot.gd` prints it):
 **203 B/regiment**, so 100 regiments = 20.4 KB/snapshot = 199 KB/s per client at 10 Hz.
 A realistic 40-regiment battle is ~80 KB/s per client. It was 195 before veterancy put
-`xp` on the regiment. Fine on LAN, marginal over the internet with several clients.
+`xp` on the regiment. `path` adds about 8 B for a regiment with none -- every enemy's, in
+a player's snapshot -- and 8 more per waypoint of your own; the randomised test battle, with
+0-3 waypoints each, now prints 225. The battle fog made it one encode per peer rather than one for all;
+the bytes each client receives went DOWN, by whatever it cannot see. Fine on LAN, marginal over the internet with several clients.
 Hand-roll a `PackedFloat32Array` codec (roughly halves it) when that number starts to
 hurt, delta encoding after that.
 
@@ -136,9 +140,10 @@ interleaved. Measured over a whole AI battle before `_separate` existed:
 	a third of all contact-ticks had a NEGATIVE gap, the worst of them 113 units
 
 That is most of a frontage. It is 3% of them now, and nearly all of what is left is a
-ROUTING regiment running through, which is what a fleeing mob does. Enemies only: two of
-your own regiments overlapping read as one mass of one colour, which is untidy rather
-than confusing, and the fix for that is the spacing they were ordered into.
+ROUTING regiment running through, which is what a fleeing mob does. Friends are eased
+apart too, but only once both have STOPPED: two of your own blocks standing in one another
+read as one mass, while two passing on the move is passing -- and the planner (see
+**Pathfinding**) already keeps a march clear of whoever is standing.
 
 This is why it did not look like the men were in contact. They were not in contact, they
 were merged, and two armies drawn on top of one another have no seam to read. It also
@@ -233,6 +238,99 @@ through 209 units in a second: **200 u/s against a 70 u/s march, three times fas
 the men could walk.** 0.9 was still 60 against 45. It is 0.6, and
 `test_a_wheel_never_outruns_the_men` pins it.
 
+## Pathfinding
+
+A regiment used to walk straight at its target, and everything in the way was a separate
+patch: a slide along a shore, a turn toward the nearest bridge, a wall that stopped it dead,
+and other regiments not avoided at all. `sim/pathing.gd` is one rule for all of them.
+
+**It is the engine's `AStarGrid2D`, and that is what makes it safe here.** It is
+`RefCounted`, so the sim stays pure; the search runs in C++; and the same inputs give the
+same path, so a replay walks exactly the recorded march -- `camptest.cmd`'s self-check is
+the proof. The path is server-side like `pace`: not on the wire, empty in any snapshot, and
+rebuilt from the orders.
+
+	static   water plus WATER_CLEAR (by the sim's own `wet`, bridges open) and standing
+	         walls; built once, and again only when a segment is breached
+	stamped  standing regiments, for one search and then cleared
+
+**Standing regiments, friend and foe, are gone round; moving ones are not.** Two marching
+blocks pass, and a plan against somebody walking away is stale before it is walked. Not the
+enemy it was told to deal with, or an attack order would walk round the man it names; and
+not one whose footprint the target lies in, or you could never order a regiment into the
+slot beside its neighbour. Each is grown by the mover's half-FRONTAGE plus `CONTACT_GAP`:
+the frontage so the block clears whichever way it faces, the gap so a march past an enemy
+does not graze into a fight it was not sent to.
+
+**A straight line first, a search only when it is blocked.** An open field costs no search
+at all (`searches` counts them, for tests only); round a standing block, one a
+`REPLAN_SECONDS`. A plan is checked again that often while marching, and at once if the
+target moves `REPLAN_DISTANCE`; in between, a plan that reaches its target follows it, so a
+chase costs nothing until something is actually in the way.
+
+**Every river crossing is put on its bridge's centreline**, with the entry and exit standing
+`column_reach()` beyond the ends of the planks -- half the length of the column it crosses
+in -- so the whole column is on the line before its front reaches the water and until its
+rear has left it. A* alone crossed anywhere on the planks, and a column off the middle hung
+its outer files over the river. Three things about it that were each a bug first:
+
+- **A re-plan on the planks goes ON, not back.** It inserted the entry behind the regiment,
+  which walked back to it and paced there for the rest of the battle.
+- **A straight line that crosses the river is never taken as clear.** The planks are dry,
+  so a line over them diagonally passed the test and the column walked off the side.
+- **The line is sampled every quarter cell.** At half a cell it cut the corner where the
+  planks meet the bank, and the regiment wedged in the margin.
+
+Routers do not plan: they run straight away from what broke them, as they always did, and
+the shore and the walls still stop them.
+
+**The plan is drawn, so it is on the wire -- to its owner only.** A selected marching
+regiment shows its route as an arrow, and holding Space shows all of yours
+(`BattleView.paths_to_draw`, tested headless). Re-planning it on the client would draw a
+guess: the real plan is stateful, re-made every second with waypoints dropped as they are
+reached. So `path` is in `REGIMENT_FIELDS`, whole for the recorder and for its own side,
+and EMPTY in anybody else's snapshot -- an enemy's path would say where he is going. It is
+clamped onto the field on the way out, because one point a skirmisher planned just off the
+edge used to be enough to have the whole snapshot refused.
+
+**And the planner respects the fog** (`_blocks` takes only what its side can see). With
+the path on the owner's screen, a bend round nothing would give away the men in the wood;
+and the men marching do not know they are there either. They walk into them, which is what
+an ambush is.
+
+**Friends on the move give way to each other: a queue and a detour, not a dodge.**
+`_blocker` looks `AVOID_LOOKAHEAD` along the march, never past the end of the route, for a
+friend it would run into:
+
+	a friend marching across in front of you     you WAIT (`waiting`) for him
+	a friend standing, or waiting himself        you re-plan round him
+
+A waiting regiment is standing to the planner, so whoever it waits for walks round it. Two
+meeting head-on would each wait for the other, so the lower id does not. Friends in a
+MELEE are never in the way, because coming up beside one to hit the same enemy's flank IS
+the flank attack. Enemies are never avoided, since meeting one is contact; nor routers,
+which go through their own lines. And a march blocked by a friend already standing on its
+destination stops there rather than queueing for the rest of the battle.
+
+Every version that got this wrong, because each is the obvious thing to try:
+
+- **Steering round each other** was measured with `gap_between`, whose reach flips from
+  front to flank as a block moves sideways, so every sidestep out of a head-on meeting read
+  as worse and the two merged by a hundred units. Avoidance measures the real footprints,
+  `separation()`, the separating-axis test.
+- **Right of way to the lower id** let it plough straight on, and a 133-unit block cannot
+  step out of the way of one walking into it.
+- **A 40-unit look-ahead** stopped the waiting regiment INSIDE the other's planning margin,
+  so the detour round it was too tight to be one. At 100 it is outside.
+- **Looking past the end of the route** had a flanker closing on an enemy's flank see the
+  friend fighting that enemy's front -- and blocking on friends in a melee kept it a stride
+  short. Flank contact over a whole AI battle fell from 17% to 7%; with both fixed it is 24%.
+- **"Somebody's on my spot"** measured as any friend near the destination had the AI's
+  spears give up and stand for half a battle as the sword beside them marched past their
+  slot. It is a STOPPED friend whose footprint would overlap at the destination.
+
+Barricades will be one more stamp in the static grid.
+
 ## Exhaustion
 
 One idea read four ways, each `lerpf(worst, 1.0, stamina)`:
@@ -303,7 +401,7 @@ while the men walk anyway, and ramping it too would have contact distance wobbli
 every re-dress for no gain.
 
 The ramp and the walk take the same time by construction, not by two constants that agree
-today -- both are `|frontage(new) - frontage(old)|` over `DRESS_SPEED`. The HUD counts down
+today -- both are `|frontage(new) - frontage(old)|` over `REFORM_SPEED`. The HUD counts down
 the walk you are watching, where it used to assert a flat three seconds while the men
 finished in under one.
 
@@ -535,7 +633,9 @@ Measured (`tests/test_encircle.gd` prints it), over a whole four-a-side AI battl
 	coherent line   73% front, 27% round the side -- flattered too, by regiments
 	                standing INSIDE one another, which leaves exposure_of an
 	                arbitrary angle to report
-	now             83% front, 17% round the side, with the blocks separated
+	separated       83% front, 17% round the side, with the blocks separated
+	now             76% front, 24% round the side, with friends giving way to
+	                each other on the march (see **Pathfinding**)
 
 That outcome test is the only one here that measures the RESULT rather than the orders, and
 the only one that would still fail if every piece of the geometry were right and the
@@ -557,6 +657,11 @@ means anything quoted without the ones above it.
 - **Guard** holds the ground and suppresses the chase. **Skirmish** backs a missile unit
   away from whatever closes inside `SKIRMISH_TRIGGER` of its own reach, and stops once
   the quiver is empty because there is nothing left to protect. One bitfield, one order.
+- **Space**, held, shows the route of every one of your marching regiments; a selected
+  one always shows its own. Space is caught in `_input`, BEFORE the GUI, and swallowed:
+  a Godot button with keyboard focus is pressed by `ui_accept`, which includes Space, and
+  the HUD's buttons take focus when clicked -- holding Space to look at your routes after
+  pressing "Give up" would have pressed it again.
 - **Ctrl+1-9** remembers a selection and **1-9** recalls it. View only -- a control group
   is a note about what you are looking at, not a fact about the world.
 
@@ -568,9 +673,61 @@ and seeded from the tile and the turn, so the same meeting always produces the s
 field and a replay of it still lines up. Circles rather than a grid: a few of them say
 everything a prototype needs, cost nothing to send, and are trivial to test against.
 
-Woods slow men and hide them from arrows; hills make the men on them hit harder and shoot
-further; marsh is miserable to fight in. Overlapping patches take the worst of each, so a
-wood on a hillside is slow *and* gives cover instead of cancelling into open field.
+Woods slow men and hide them from arrows; marsh is miserable to fight in. Overlapping
+patches take the worst of each, so a wood on a hillside is slow *and* gives cover instead
+of cancelling into open field.
+
+**The field is laid from the hex AND its six neighbours.** It used to read the one hex the
+armies met on and scatter one kind of circle. `lay_ground(here, seed, ring, toward)` takes
+`CampaignState.ring_of()` and lays each neighbour out toward its own edge of the field --
+forest gives woods, hills a hill, a mountain a BIG hill, water a lake -- turned by
+`direction_to()` so the hex the attacker marched in from is behind him. The seed is the
+tile and the turn, **hashed**: Godot's generator seeded raw started neighbouring seeds in
+nearly the same place, so the same hex a turn later laid the same kinds of ground in the
+same order.
+
+**Height is a difference between two men, not a property of a spot.** A hill is a dome
+whose peak is its radius times `HILL_RISE`, so a bigger hill is a higher one and height
+costs nothing on the wire. `slope(a, b)` runs -1..1 across `HEIGHT_SPAN` and is read in
+three places: melee output AND shock (`HIGH_GROUND` -- the man above hits harder, the man
+below softer, so "easier to hold" and "harder to take" are one number), missile reach, and
+sight (`HEIGHT_RANGE`). The hill row's flat `damage 1.18` and `range 1.2` are gone; they
+said a hill helped whoever stood on it whatever he was fighting.
+
+	20s head-on, one up a hill    the high side loses 18, the low side 25; 22 each flat
+
+**Water, and the one way over it.** A lake is a circle and a river is **one row**,
+`[RIVER, x0, phase, half_width]`, its centreline a sine down the whole field -- a chain of
+circles would have cost ~1.6 KB a snapshot. The river is always inside `DEPLOY_MARGIN`, so
+it is no-man's-land, and always has a bridge. Nobody stands in water (`wet()`): a step that
+would end in it slides along the shore instead, and a march ordered INTO it halts at the
+edge rather than circling it looking for a way in. The slide's tangent is taken at the DRY
+point: taken inside the circle it leans in, and the first version stalled on the rim.
+
+**A regiment is a block, not a point, and water is kept `WATER_CLEAR` off its centre.**
+Tested at the centre alone, its front ranks stood in the river whenever it walked along
+the bank. A bridge is a STRIP straight across the river (`bridge_at`), and the planks
+drawn are exactly that strip.
+
+**Over a bridge, it goes in a column** (`crossing()`): `BRIDGE_FILES` wide, pointed at the
+far bank, closing up `BRIDGE_APPROACH` short of the planks and opening out once over. The
+sim holds a regiment's ordered facing and frontage whatever it walks through, so without
+this a twenty-file line facing north walked over with its files strung up and down the
+water. It is not only a look: `_accumulate_strike` caps the files at `BRIDGE_FILES` when
+either side stands on the planks, so a bridge is held the way a gate is.
+
+**Land keeps out of the water.** Woods, hills and marsh are laid from the hexes round the
+field with no regard to the river running through it, and a lake can land after a wood, so
+trees grew out of the middle of the river. `_keep_the_land_dry()` runs last and shrinks
+each land patch until it clears every lake and the river bank by `LAND_CLEAR`, dropping
+it below `LAND_MIN_RADIUS`.
+
+**A march across a river goes over a bridge on its own** -- the planner's job, see
+**Pathfinding**, and down the bridge's centreline. A lake is never laid on a deployment
+line (`_covers_a_deployment`), because an army dealt into the water cannot move.
+
+`ponytail:` the river always runs across the field between the armies, never along a
+flank, and there are no fords. A second orientation in the row is the upgrade.
 
 ## Shooting
 
@@ -587,7 +744,15 @@ Out of arrows they are simply bad infantry, which is what stops a missile duel b
 Formation matters more here than anywhere: over 16 seconds under the same archers, a line
 loses 48 men, loose order 18, and a square 59.
 
-Selecting archers draws their reach as a ring, and rings the enemies inside it: gold for
+**A bow shoots into an ARC, not a circle.** `BattleState.in_arc` is a fan off each end of
+the front rank, splayed by `ARC_SPREAD` and rounded off at the reach from the nearest point
+of the line -- so a wider line covers a wider arc, and nothing behind or beside it can be
+hit. A bow with nothing in its arc but something in reach **turns to face it**, the named
+focus first; without that, an AI that never set its facing would never shoot. Reach is
+`reach_of()`: the bow lengthened by standing above the target and shortened by standing
+below it.
+
+Selecting archers draws their reach as that arc (`reach_outline`, the same shape), and tints the enemies inside it: gold for
 the ones they can actually hit, red with a line back to the shooter for the ones a friend
 is standing in front of. **The ring alone would lie** -- nobody shoots through their own
 line, so half of what falls inside the circle may be unshootable, and which is which is
@@ -789,7 +954,11 @@ looked instant however drastic it was, and why a wheel read as a rigid spin -- t
 files, which should lag, simply teleported round.
 
 The ceiling is **his own regiment's current speed plus `DRESS_SPEED`**, measured from the
-pose rather than looked up, so cavalry, a column, marsh and an exhausted regiment's
+pose rather than looked up -- over the time between the regiment's actual MOVES, not frame
+to frame. The host draws the sim as it stands, which only moves on a 20 Hz tick, so frame
+to frame it read zero two frames in three and the men trailed their places by 124 units
+rms after ten seconds of marching (11 now, the same as a client's). It never showed on a
+client, which interpolates -- `test_the_hosts_men_keep_up_on_the_march`. Measured that way, so cavalry, a column, marsh and an exhausted regiment's
 `legs()` all come out right without the view knowing that any of them exist. He can always
 keep station, and has a dressing pace in hand on top. The exponential still sets the SHAPE
 of the approach -- it is what stops him jittering on his slot -- but no longer how fast he
@@ -809,9 +978,26 @@ the FRONT of the next. Measured, worst man on a 12-to-14 change:
 
 A small change has to be a small walk. It now is:
 
-	12 -> 14 files    0.8s
-	12 -> 40 files    5.9s
-	fastest man       23 u/s, against a 45 u/s march -- it was 521
+	12 -> 14 files    1.3s    (0.8s at DRESS_SPEED)
+	12 -> 40 files    13.2s   (5.9s at DRESS_SPEED)
+	fastest man       9 u/s re-forming, 23 u/s wheeling -- it was 521
+
+**Keeping your place and taking a new one are different paces.** `DRESS_SPEED` (20) is the
+pace a man has in hand to keep station -- on the march, through a wheel, catching up.
+`REFORM_SPEED` (8) is a deliberate sidestep into a new frontage, and the sim's `dressed`
+ramp runs on it too. Sharing the one constant had a regiment re-dressed in a second, which
+read as a snap. Two exceptions:
+
+- **A change of SHAPE takes the sim's own clock.** It costs `FORMATION_CHANGE_SECONDS` at
+  `REFORM_PENALTY`, so each man walks at whatever pace lands him as `reforming` runs out,
+  and the whole shape finishes together with the penalty. Before, the men were on their
+  own pace and the look and the cost drifted apart. Measured, line to square: at 2s the men
+  are 38 units from their places (27 at a dressing pace), formed at 5.7s of 6.
+  `FORMATION_CHANGE_SECONDS` is now the one dial for how long a re-form LOOKS as well as
+  what it costs.
+- **Closing into a column for a bridge is quick** (`troop.hurry`, keyed on the pose's
+  `crossing` flag flipping). It happens on the march and has to be done by the time the
+  planks are underfoot; at `REFORM_SPEED` a 20 -> 10 squeeze would take nine seconds.
 
 `tests/test_bodies.gd` measures that from where the men actually ARE, one frame to the
 next, never from what the code believes their speed to be. The first version of that test
@@ -1083,10 +1269,17 @@ a wall exists to stop, so `_find_contacts()` refuses a pair whose centre-to-cent
 crosses one. The same test guards `_separate()`: shoving somebody THROUGH a wall would
 undo in one tick what the wall spent the whole battle doing.
 
-**Nothing steers round it, deliberately.** A march that would cross a wall simply does not
-take the step, and the regiment stands against it. Finding the gate is the player's job and
-the AI's; a pathfinder here would quietly solve the one problem a siege is supposed to
-pose.
+**The planner goes round it, through the gate.** This used to be the opposite, on purpose:
+nothing steered round a wall, and finding the gate was the player's job. It changed with
+**Pathfinding**, because one rule for every obstacle -- water, walls, barricades to come --
+beats a special case per obstacle, and because the siege was never really the search for a
+gap: it is that a twenty-file line arriving at one fights as four files. That still holds.
+No step ever crosses a standing wall whatever any plan says (`crosses_a_wall` in
+`_advance` is the backstop, and a router has no plan at all).
+
+The wall is ONE line `WALL_HALF_SPAN` long, so from far enough along it the honest way in
+is round the end rather than through the gate -- and the planner takes it. That is the
+enclosure below, not a pathfinding bug.
 
 Two segments and a gap, not an enclosure.
 `ponytail:` one wall line across the defender's front. A ring with a keep inside is the
@@ -1201,6 +1394,39 @@ deploying into the enemy would make the phase a free first move.
 Which half is **derived, not decoded**: the armies are laid out either side of x = 0 and
 cannot cross while deploying, so the mean x of a side answers it from a snapshot that
 already carries the positions.
+
+It is a **zone**, not a half: `deploy_zone()` runs from `DEPLOY_MARGIN` back to
+`DEPLOY_DEPTH` and `DEPLOY_HALF_WIDTH` either way, and it is the one rectangle both the
+clamp and the view's drawing of it read. Deploying into a lake leaves the regiment where
+it was. A wood inside each zone whenever there are trees nearby, so there is somewhere to
+set an ambush.
+
+## The battle fog
+
+A regiment in a wood is hidden, and hiding means nothing unless the other side genuinely
+does not know. `BattleState.visible_to(owner, r)` is **one rule with three callers**:
+
+	wire     Snapshot.encode_battle(bs, peer) leaves the row out entirely
+	host     battle_view._pose_of skips it -- the host is never sent a snapshot
+	sim      nobody shoots at, chases, or may AIM at what their side cannot see
+
+Sight is `BATTLE_SIGHT`, further from higher ground. A regiment in a wood is seen only
+from `WOOD_SPOT`, unless it gives itself away: in contact, or reloading from a volley.
+Your own are always visible; owner 0 sees everything (the replay, the save, every test);
+and so does anybody with no regiment on the field at all, which is a spectator or a replay
+of somebody else's battle.
+
+- **`broadcast_battle` goes out once per peer**, like the campaign. The replay records at
+  owner 0, so determinism is untouched, and nettest's mirror check still holds: a filtered
+  mirror re-encodes to exactly the filtered bytes it was sent.
+- **A client does not re-filter.** Its mirror came filtered, and `reload`, which the rule
+  reads, is not on the wire.
+- **`aim()` is in the sim**, beside `steer()`, and for the same reason: the live path and
+  `replay.gd` both call it, so an attack order refused for naming a hidden regiment is
+  refused on playback too.
+- **The AI is bound by it**, and so is what Jev is told. An AI that sees nobody used to
+  return no orders; facing an army in a wood it stood still until `BATTLE_TIME_LIMIT`. It
+  now scouts: across to the enemy's side, then into the nearest wood.
 
 ### The three lists that had to agree
 

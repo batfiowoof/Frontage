@@ -341,7 +341,9 @@ func start_demo_battle() -> void:
 	# and a line with nothing that can outrun it cannot produce one.
 	var line := [&"cavalry", &"spear", &"pike", &"sword", &"archer"]
 	var bs = BattleState.new()
-	bs.lay_ground(1, 20260921)          # a wooded field, so the demo has ground to use
+	# Water, hills, woods and a mountain round it, and a seed that lays a river with two
+	# bridges -- so the demo has every kind of ground to drive over.
+	bs.lay_ground(0, 20260930, [4, 3, 1, 0, 1, 2], 3)
 	for i in line.size():
 		var y := (float(i) - float(line.size() - 1) * 0.5) * Rules.DEPLOY_SPACING
 		bs.add(left, line[i], Vector2(-Rules.DEPLOY_SEPARATION * 0.5, y), 0.0)
@@ -450,8 +452,10 @@ func _think_for_ais() -> void:
 
 
 func broadcast_battle() -> void:
+	# Once per peer, like the campaign: each is sent only what its regiments can see.
 	if battle != null and multiplayer.has_multiplayer_peer() and is_server():
-		_battle_snapshot.rpc(battle_epoch, Snapshot.encode_battle(battle))
+		for peer in multiplayer.get_peers():
+			_battle_snapshot.rpc_id(peer, battle_epoch, Snapshot.encode_battle(battle, peer))
 
 
 # --- orders ---------------------------------------------------------------
@@ -698,7 +702,8 @@ func _focus(sender: int, order: Dictionary) -> void:
 		if r == null or r.owner_id != sender:
 			_reject(sender, "regiment %d is not yours to aim" % id)
 			continue
-		r.focus = int(order["mark"])
+		if not battle.aim(r, int(order["mark"])):
+			_reject(sender, "regiment %d cannot see what it was aimed at" % id)
 
 
 func _set_formation(sender: int, order: Dictionary) -> void:
@@ -953,7 +958,10 @@ func _begin_battle(attacker: Dictionary, defender: Dictionary) -> void:
 	_battle_forfeit = 0
 
 	var bs = BattleState.new()
-	bs.lay_ground(int(campaign.terrain[_battle_tile]), _battle_tile * 7919 + campaign.turn)
+	# The hex AND the six around it, turned so the ground the attacker marched in from is
+	# behind him.
+	bs.lay_ground(int(campaign.terrain[_battle_tile]), _battle_tile * 7919 + campaign.turn,
+		campaign.ring_of(_battle_tile), campaign.direction_to(_battle_tile, int(attacker["tile"])))
 	for side in [attacker["owner"], defender["owner"]]:
 		bs.techs[side] = campaign.techs_of(side).duplicate()
 	# Each side's commander, carried in the same way the techs are and for the same

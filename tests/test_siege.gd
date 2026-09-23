@@ -52,17 +52,30 @@ func test_the_wall_is_on_the_defenders_side(t) -> void:
 	t.near(float(bs.walls[0][0]), -Rules.WALL_STANDOFF)
 
 
-func test_you_cannot_walk_through_a_wall(t) -> void:
+func test_you_cannot_walk_through_a_wall_but_you_find_the_gate(t) -> void:
+	# It used to walk straight at the wall and stand against it -- "finding the gate is the
+	# player's job". The planner finds it now; what it must never do is step THROUGH.
 	var trio: Array = _besieged()
 	var bs = trio[0]
 	var attacker = trio[1]
-	# Straight at the defender, well off the centre line so the gate is not the answer.
-	attacker.pos = Vector2(-400, 300)
-	attacker.order_move(Vector2(600, 300), 0.0)
-	for i in Rules.TICK_HZ * 30:
+	trio[2].pos = Vector2(Rules.WALL_STANDOFF + 400.0, -600)     # out of the gateway
+	trio[2].target = trio[2].pos
+	# Nearer the gate than the end of the wall: the wall is one line WALL_HALF_SPAN long,
+	# and from further out the honest way in is round the end of it.
+	attacker.pos = Vector2(-400, 150)
+	attacker.order_move(Vector2(600, 150), 0.0)
+	var through := 0
+	var came_in_at := INF
+	for i in Rules.TICK_HZ * 60:
+		var was: Vector2 = attacker.pos
 		bs.step()
-	t.ok(attacker.pos.x < Rules.WALL_STANDOFF,
-		"it is still outside (x = %.0f, wall at %.0f)" % [attacker.pos.x, Rules.WALL_STANDOFF])
+		if bs.crosses_a_wall(was, attacker.pos):
+			through += 1
+		if was.x < Rules.WALL_STANDOFF and attacker.pos.x >= Rules.WALL_STANDOFF:
+			came_in_at = attacker.pos.y
+	t.eq(through, 0, "not one step through a standing wall")
+	t.ok(absf(came_in_at) < Rules.WALL_GATE_HALF, "in by the gate (y = %.0f)" % came_in_at)
+	t.ok(attacker.pos.distance_to(Vector2(600, 150)) < 5.0, "and on to where it was sent (%s)" % attacker.pos)
 
 
 func test_you_can_walk_through_the_gate(t) -> void:

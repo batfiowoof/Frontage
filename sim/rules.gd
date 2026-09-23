@@ -33,7 +33,14 @@ const ARRIVE_CRAWL := 8.0
 ## all: at 100 units from his slot he moved at 349 u/s against a 45 u/s march, and because
 ## the ease was exponential, 95% of ANY gap closed in 0.83s -- a one-file shuffle and a
 ## total reshape took exactly as long as each other.
+##
+## That is now its only job: keeping station. A deliberate re-form is REFORM_SPEED.
 const DRESS_SPEED := 20.0
+## How fast men sidestep into a NEW frontage: an orderly quarter of a march. Sharing
+## DRESS_SPEED had a whole regiment re-dressed in a second, which read as a snap rather
+## than as men finding their files. The sim's frontage ramps at it too (`dressed`), so the
+## fighting and the walking still finish together.
+const REFORM_SPEED := 8.0
 ## Radians a second, for a WHEEL: a change to the ground the block stands on. Turning
 ## right round is not a wheel at all, it is an about-face, and it costs no rotation
 ## whatever -- see Regiment.about_face and bodies.gd.
@@ -93,6 +100,10 @@ const DEPLOY_SECONDS := 60.0
 ## How close to the middle of the field you may set up. Each side keeps to its own half:
 ## deploying INTO the enemy would make the phase a free first move.
 const DEPLOY_MARGIN := 120.0
+## ...and how far back and out to the sides. The whole half-field used to be yours, which
+## is a place to lose an army rather than a zone to arrange one in.
+const DEPLOY_DEPTH := 650.0
+const DEPLOY_HALF_WIDTH := 700.0
 
 # --- battle: attrition --------------------------------------------------
 ## Combat is frontage-limited: only the men who can physically reach the enemy
@@ -277,15 +288,82 @@ const SKIRMISH_STEP := 160.0
 ##
 ## Circles rather than a grid: a handful of them says everything a prototype needs about
 ## a wood or a hill, and costs nothing to send or to test against.
+##
+## A hill does nothing on its own row: what it does comes from HEIGHT, which is a
+## difference between two regiments, not a property of one spot. Lake and river are
+## water -- nobody stands in them -- and a bridge is the one way over a river.
 const GROUND := {
-	0: {"speed": 0.72, "damage": 0.9,  "cover": 0.5,  "range": 1.0},    # wood
-	1: {"speed": 0.9,  "damage": 1.18, "cover": 0.0,  "range": 1.2},    # hill
-	2: {"speed": 0.45, "damage": 0.65, "cover": 0.0,  "range": 0.9},    # marsh or ford
+	0: {"speed": 0.72, "damage": 0.9,  "cover": 0.5},    # wood
+	1: {"speed": 0.9,  "damage": 1.0,  "cover": 0.0},    # hill
+	2: {"speed": 0.45, "damage": 0.65, "cover": 0.0},    # marsh
+	3: {},                                               # lake   [kind, x, y, r]
+	4: {},                                               # river  [kind, x0, phase, half_width]
+	5: {"speed": 0.8,  "damage": 1.0,  "cover": 0.0},    # bridge [kind, x, y, r]
 }
 const GROUND_WOOD := 0
 const GROUND_HILL := 1
 const GROUND_MARSH := 2
-const MAX_FEATURES := 12
+const GROUND_LAKE := 3
+const GROUND_RIVER := 4
+const GROUND_BRIDGE := 5
+const MAX_FEATURES := 20
+
+## A hill's peak is its radius times this, so a bigger hill is a higher one and height
+## costs nothing on the wire. Mountains lay the big ones.
+const HILL_RISE := 0.4
+## The height difference that counts as a full slope.
+const HEIGHT_SPAN := 60.0
+## Melee at a full slope: the man above hits this much harder, the man below this much
+## softer. One term, so "easier to defend" and "harder to attack" are the same number.
+const HIGH_GROUND := 0.3
+## Range and sight at a full slope, clamped to HEIGHT_REACH_MIN..MAX.
+const HEIGHT_RANGE := 0.35
+const HEIGHT_REACH_MIN := 0.75
+const HEIGHT_REACH_MAX := 1.5
+
+## A river crosses the whole field between the armies, as ONE row: its centreline is
+## x = x0 + RIVER_BEND * sin(y * RIVER_WAVE + phase). Kept inside DEPLOY_MARGIN so it is
+## always no-man's-land.
+const RIVER_HALF_WIDTH := 28.0
+const RIVER_BEND := 30.0
+const RIVER_WAVE := 0.007
+const RIVER_CHANCE := 0.25
+const RIVER_CHANCE_NEAR_WATER := 0.6
+## Woods, hills and marsh keep this clear of any water, and are dropped if that leaves one
+## smaller than LAND_MIN_RADIUS.
+const LAND_CLEAR := 15.0
+const LAND_MIN_RADIUS := 50.0
+## A bridge is a strip straight across its river: BRIDGE_REACH times the river's half-width
+## either side of its middle, and far enough out along it to land a regiment clear of the
+## water on both banks.
+const BRIDGE_REACH := 1.6
+## How far a regiment's centre keeps from the water. It is a block, not a point: at zero
+## its front ranks stood in the river whenever it walked along the bank.
+const WATER_CLEAR := 25.0
+const BRIDGE_HALF_LENGTH := RIVER_HALF_WIDTH + WATER_CLEAR + 20.0
+## A regiment on a bridge, or stepping onto one, goes over it as a column this many files
+## wide -- and fights at it, so a bridge is held the way a gate is.
+const BRIDGE_FILES := 10
+## How far short of the planks it starts closing into that column.
+const BRIDGE_APPROACH := 80.0
+
+# --- battle: pathfinding --------------------------------------------------
+## A plan is checked again this often while marching -- somebody may have stopped in the
+## way since -- and at once if the target moves further than this from where it was
+## planned to. A waypoint this close counts as reached.
+const REPLAN_SECONDS := 1.0
+const REPLAN_DISTANCE := 30.0
+const WAYPOINT_REACHED := 4.0
+## A friend this far ahead of a march is in its way: far enough to wait or plan round him
+## before the blocks touch -- and far enough that the one who waits is outside the other's
+## planning margin, or the detour round him is too tight to be one. A march keeps
+## AVOID_CLEAR of a friend. And blocked by one standing, it plans again this soon.
+const AVOID_LOOKAHEAD := 100.0
+const AVOID_CLEAR := 2.0
+const BLOCKED_REPLAN := 0.25
+## The most waypoints a path may carry on the wire. A string-pulled plan is a handful; this
+## is the bound a peer's snapshot is checked against, not a limit anything reaches.
+const MAX_PATH_POINTS := 64
 
 # --- battle: walls ------------------------------------------------------
 ## A town's walls, on the battlefield instead of as one number.
@@ -416,6 +494,18 @@ const MISSILE_FALLOFF := 0.55
 const MISSILE_SHOCK := 6.0
 ## How wide a friendly regiment counts as when it is standing in the line of fire.
 const LINE_OF_FIRE_MARGIN := 18.0
+## A bow looses into an arc in front of the line, not a circle round it: a fan off each
+## end of the front rank, so a wider line covers a wider arc. This is how far each edge
+## splays out from straight ahead.
+const ARC_SPREAD := deg_to_rad(35.0)
+
+# --- battle: sight --------------------------------------------------------
+## How far a regiment sees across open ground. Most of the field: the two opening lines
+## see each other comfortably, and what the fog is really for is the wood.
+const BATTLE_SIGHT := 1000.0
+## A regiment in a wood is seen only by somebody this close -- unless it gives itself away
+## by fighting or by loosing a volley.
+const WOOD_SPOT := 90.0
 
 # --- formations ---------------------------------------------------------
 ## What a regiment can be told to do with its shape. Under frontage-limited combat

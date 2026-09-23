@@ -57,6 +57,9 @@ const MAN_ACCEL := 45.0
 ## ceiling as well had the slowest man walking at 11 u/s against the quickest at 29, so a
 ## reshape took as long as its most dawdling member and every one of them looked ill.
 const PACE_SPREAD := 0.15
+## Unmoved for this long and a regiment has stopped, rather than waiting on its next tick.
+## Comfortably over the 50 ms between two of them.
+const STOPPED_AFTER := 0.2
 ## How long a regiment reads as busy after its frontage changes is not a constant any
 ## more: it is the distance the end man has to walk over the pace he walks it, worked out
 ## at Rules.DRESS_SPEED where the change happens. A flat 3.0 was a guess that happened to
@@ -127,7 +130,11 @@ class Troop extends RefCounted:
 	var centre := Vector2.ZERO
 	var dress := 0.0                     # seconds left visibly re-dressing
 	var mount := 0.0                     # the facing the slots were last laid out at
-	var was_at := Vector2.INF            # where his regiment stood last frame
+	var was_at := Vector2.INF            # where his regiment stood when it last moved
+	var still := 0.0                     # seconds since it last moved
+	var carried := 0.0                   # how fast it is going, measured
+	var crossing := false                # closed into a column on a bridge, last frame
+	var hurry := false                   # this re-dress is that column, not a re-form
 	var spacing := 1.0
 	var formation: StringName = &"line"   # the shape his slots are laid out in
 
@@ -176,6 +183,7 @@ func _advance(id: int, p: Dictionary, delta: float) -> int:
 		troop.mount = float(p["facing"])
 		troop.spacing = float(p.get("spacing", 1.0))
 		troop.formation = StringName(p.get("formation", &"line"))
+		troop.crossing = bool(p.get("crossing", false))
 		_troops[id] = troop
 		for i in troop.world.size():
 			troop.world[i] = _place_of(troop, p, i)          # arrive already formed
@@ -189,15 +197,25 @@ func _advance(id: int, p: Dictionary, delta: float) -> int:
 	if absf(angle_difference(float(p["facing"]), troop.mount)) > ABOUT_FACE:
 		_turn_about(troop)
 	troop.mount = float(p["facing"])
+	var crossing := bool(p.get("crossing", false))
+	var reforming := float(p.get("reforming", 0.0))
 	if troop.width != int(p["width"]):
 		# How far the end man has to go, at the pace he goes it -- the same arithmetic the
 		# sim ramps its frontage on, so the HUD counts down the walk you are watching. A
 		# flat three seconds was a guess that happened to be generous: the men were
 		# finishing in under one.
+		#
+		# At REFORM_SPEED, an orderly sidestep -- except closing into a column to go over a
+		# bridge, or opening out of one, which happens on the march and has to be done by
+		# the time the planks are underfoot. A change of SHAPE takes the sim's own clock.
+		troop.hurry = crossing != troop.crossing
 		var was_wide := Formation.frontage(troop.max_strength, troop.width, troop.spacing)
 		_reform(troop, int(p["width"]))                      # walk into the new shape
 		var now_wide := Formation.frontage(troop.max_strength, troop.width, troop.spacing)
-		troop.dress = absf(now_wide - was_wide) / Rules.DRESS_SPEED
+		troop.dress = absf(now_wide - was_wide) / (Rules.DRESS_SPEED if troop.hurry else Rules.REFORM_SPEED)
+		if reforming > 0.0:
+			troop.dress = reforming
+	troop.crossing = crossing
 
 	var hits: Array = p.get("hits", [])
 	while troop.world.size() > strength:
@@ -217,11 +235,28 @@ func _advance(id: int, p: Dictionary, delta: float) -> int:
 	var ease := 1.0 - exp(-CATCH_UP * delta)
 	# What his regiment is doing, measured rather than looked up. A man may always match
 	# it, whatever it is, and has DRESS_SPEED in hand on top for getting into his file.
+	#
+	# Over the time between the regiment's actual MOVES, not frame to frame. The host draws
+	# the sim as it stands, which only moves on a 20 Hz tick, so frame to frame it read
+	# zero two frames in three: the ceiling fell to DRESS_SPEED against a 32 u/s march and
+	# after ten seconds the men were 124 units behind their places, rms. A client
+	# interpolates and never saw it, which is how it hid.
 	var at: Vector2 = p["pos"]
-	var carried: float = 0.0 if troop.was_at == Vector2.INF or delta <= 0.0 \
-		else troop.was_at.distance_to(at) / delta
-	troop.was_at = at
-	var ceiling: float = carried + Rules.DRESS_SPEED
+	if troop.was_at == Vector2.INF:
+		troop.was_at = at
+	troop.still += delta
+	var moved: float = troop.was_at.distance_to(at)
+	if moved > 0.0:
+		troop.carried = moved / maxf(troop.still, 0.0001)
+		troop.still = 0.0
+		troop.was_at = at
+	elif troop.still > STOPPED_AFTER:
+		troop.carried = 0.0
+	# ...and the pace he has in hand on top of that depends on what he is doing. Keeping his
+	# place, wheeling, catching up: DRESS_SPEED. Sidestepping into a new frontage:
+	# REFORM_SPEED. Changing SHAPE: whatever gets him there as the sim's clock runs out --
+	# see below, per man.
+	var pace := Rules.REFORM_SPEED if troop.dress > 0.0 and not troop.hurry else Rules.DRESS_SPEED
 	var sum := Vector2.ZERO
 	for i in troop.world.size():
 		var here: Vector2 = troop.world[i]
@@ -271,6 +306,15 @@ func _advance(id: int, p: Dictionary, delta: float) -> int:
 			# man jittering on his slot -- but it no longer sets how fast he gets there.
 			var rate := ease * (1.0 + CATCH_UP_SPREAD * _wobble(troop.man_id[i]))
 			var step := here.lerp(target, clampf(rate, 0.0, 1.0)) - here
+			# A change of shape costs FORMATION_CHANGE_SECONDS in the sim and used to be
+			# walked at DRESS_SPEED, so the men looked formed in a second or two while the
+			# regiment went on fighting as a half-formed one for the rest. Each man now walks
+			# at the pace that lands him as the clock runs out: far to go, quicker; nearly
+			# there, slower; the whole shape finishing together, and nobody running.
+			var own := pace
+			if reforming > 0.0:
+				own = minf(Rules.DRESS_SPEED, here.distance_to(target) / maxf(reforming, 0.1))
+			var ceiling: float = troop.carried + own
 			var wants: float = minf(step.length() / maxf(delta, 0.0001),
 				ceiling * (1.0 + PACE_SPREAD * _wobble(troop.man_id[i])))
 			troop.speed[i] = move_toward(troop.speed[i], wants, MAN_ACCEL * delta)

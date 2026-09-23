@@ -128,11 +128,13 @@ func test_width_buys_output_and_depth_buys_endurance(t) -> void:
 
 func test_a_column_moves_faster_than_a_line(t) -> void:
 	var bs = BattleState.new()
+	# Side by side, not on one spot: friends on the move now give way to each other, and
+	# two stood on top of one another would be measuring that instead.
 	var line = bs.add(1, &"spear", Vector2.ZERO, 0.0)
-	var column = bs.add(1, &"spear", Vector2.ZERO, 0.0)
+	var column = bs.add(1, &"spear", Vector2(0, 400), 0.0)
 	column.formation = &"column"
 	line.order_move(Vector2(100000, 0), 0.0)
-	column.order_move(Vector2(100000, 0), 0.0)
+	column.order_move(Vector2(100000, 400), 0.0)
 	_run(bs, 1.0)
 	t.ok(column.pos.x > line.pos.x * 1.15,
 		"a column is on the road, not in a fight (%.0f vs %.0f)" % [column.pos.x, line.pos.x])

@@ -579,14 +579,20 @@ func battle_orders(bs) -> Array:
 			continue
 		if r.owner_id == seat:
 			mine.append(r)
-		elif r.state != Regiment.State.ROUTING:
+		elif r.state != Regiment.State.ROUTING and bs.visible_to(seat, r):
+			# ...and only what it can SEE. The battle fog binds the AI as it binds a
+			# player, or a wood hides nobody from the one opponent always on the field.
 			# Broken regiments are not targets and must not count toward the enemy
 			# centre. Routers flee a thousand units in any direction, so averaging
 			# them in sent the whole line marching to an empty patch of field, where
 			# it arrived, stopped, and stood there while the battle never ended.
 			foes.append(r)
-	if mine.is_empty() or foes.is_empty():
+	if mine.is_empty():
 		return []
+	if foes.is_empty():
+		# A wall is a plan that needs no enemy in sight; scouting is the fallback.
+		var blind = _siege_orders(bs, mine)
+		return blind if blind != null else _scout(bs, mine)
 
 	# Checked before anything else is ordered: there is no point dressing a line that is
 	# about to walk off the field. One order, and the battle is over.
@@ -728,6 +734,48 @@ func battle_orders(bs) -> Array:
 		if r.pos.distance_to(target) > 20.0:
 			out.append(Orders.battle_move(PackedInt32Array([r.id]), target, face))
 	return out
+
+
+## Nobody in sight, but somebody still out there: go and look. Across to the enemy's side
+## of the field, and once there, into the nearest wood -- which is where anybody who is
+## still standing and cannot be seen has to be. Returning nothing instead had an AI facing
+## a hidden army stand still until BATTLE_TIME_LIMIT. Only IDLE regiments are ordered, so
+## nothing is re-ordered on the way.
+func _scout(bs, mine: Array) -> Array:
+	var anybody := false
+	for id in bs.sorted_ids():
+		var e: Regiment = bs.regiments[id]
+		if e.owner_id != seat and e.is_alive() and e.state != Regiment.State.ROUTING:
+			anybody = true
+	if not anybody:
+		return []
+	var side: float = bs.side_of_owner(seat)
+	var out := []
+	for r: Regiment in mine:
+		if r.state != Regiment.State.IDLE:
+			continue
+		var goal := Vector2(-side * Rules.DEPLOY_SEPARATION * 0.5, r.pos.y)
+		if r.pos.distance_to(goal) < 60.0:
+			var wood = _nearest_wood(bs, r.pos)
+			if wood == null:
+				continue
+			goal = wood
+		if r.pos.distance_to(goal) > 40.0:
+			out.append(Orders.battle_move(PackedInt32Array([r.id]), goal, (goal - r.pos).angle()))
+	return out
+
+
+func _nearest_wood(bs, from: Vector2) -> Variant:
+	var best = null
+	var best_distance := INF
+	for f: Array in bs.features:
+		if int(f[0]) != Rules.GROUND_WOOD:
+			continue
+		var at := Vector2(f[1], f[2])
+		if from.distance_to(at) < best_distance:
+			best_distance = from.distance_to(at)
+			best = at
+	return best
 
 
 ## Archers hold back inside their own range and stop, because a bow needs a moment and

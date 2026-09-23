@@ -416,6 +416,37 @@ func test_a_frontal_attack_changes_who_is_standing_in_the_line(t) -> void:
 ##
 ## This is the guard on that deletion: a man's place changes when somebody in front of
 ## him dies, and at no other time.
+## Ten seconds of marching, drawn at 60 fps, with the regiment either sliding smoothly (a
+## client, interpolating) or only moving on each 20 Hz sim tick (the host, which draws the
+## sim as it stands). Returns the rms distance of the men from their places.
+func _march_drift(stepped: bool) -> float:
+	var men := Bodies.new()
+	var frame := 1.0 / 60.0
+	var t := 0.0
+	var p := {}
+	for f in 600:
+		t += frame
+		var shown := floorf(t * Rules.TICK_HZ) / Rules.TICK_HZ if stepped else t
+		p = _pose(120, Vector2(Rules.MOVE_SPEED * shown, 0), 0.0, [], Regiment.State.MOVING, 20)
+		men.build(p, [1], frame)
+	var troop = men._troops[ID]
+	var sum := 0.0
+	for i in troop.world.size():
+		sum += troop.world[i].distance_squared_to(men._place_of(troop, p[ID], i))
+	return sqrt(sum / troop.world.size())
+
+
+func test_the_hosts_men_keep_up_on_the_march(t) -> void:
+	# The host's pose moves only on a sim tick, so measured frame to frame the regiment was
+	# standing still two frames in three: each man's ceiling fell to DRESS_SPEED against a
+	# 32 u/s march, and after ten seconds they trailed their places by 124 units, rms. It
+	# only ever showed in the host's window, which is the one you play `solo` and `fight` in.
+	var smooth := _march_drift(false)
+	var stepped := _march_drift(true)
+	t.ok(stepped < smooth * 1.5, "a stepped march keeps formation (rms %.1f, smooth %.1f)" % [stepped, smooth])
+	t.ok(stepped < 20.0, "within a couple of files of their places (%.1f)" % stepped)
+
+
 func test_nobody_swaps_places_while_fighting(t) -> void:
 	var men = Bodies.new()
 	men.build(_pose(120), [1], 0.016)
@@ -448,7 +479,7 @@ func test_a_frontage_change_starts_a_re_dress_clock(t) -> void:
 	# goes it. Twelve files to twenty moves him 28 units, so it is 1.4s, and a bigger
 	# reshape is a longer clock. It used to be a flat 3.0 whatever you asked for.
 	var walk := absf(Formation.frontage(120, 20, 1.0) - Formation.frontage(120, 12, 1.0))
-	var expect := walk / Rules.DRESS_SPEED
+	var expect := walk / Rules.REFORM_SPEED
 	men.build(_pose(120, Vector2.ZERO, 0.0, [], Regiment.State.IDLE, 20), [1], 1.0 / 60.0)
 	t.near(men.dressing(ID), expect, 0.05, "a new frontage starts a clock the size of the walk")
 	t.eq(men.living(ID), 120, "and it is only a clock -- it loses nobody")
@@ -836,6 +867,73 @@ func test_a_bigger_reshape_takes_longer(t) -> void:
 		"twelve files to forty takes far longer than twelve to fourteen (%.1fs against %.1fs)" % [
 			large, small])
 	print("  [feel] reshape: 12->14 files %.1fs, 12->40 files %.1fs" % [small, large])
+
+
+## A line told to form square, with the sim's `reforming` clock counting down beside it --
+## or, `clocked` false, with no clock at all, which is how the men used to walk it. Returns
+## [rms drift from their places at the start, at a third of the clock, seconds to settle].
+func _into_square(clocked: bool) -> Array:
+	var men = Bodies.new()
+	_settle(men, 120)
+	var total := Rules.FORMATION_CHANGE_SECONDS
+	var frame := 1.0 / 60.0
+	var at := 0.0
+	var out := [0.0, 0.0, -1.0]
+	for f in int((total + 4.0) * 60.0):
+		var p := _pose(120)
+		p[ID]["formation"] = &"square"
+		p[ID]["reforming"] = maxf(0.0, total - at) if clocked else 0.0
+		men.build(p, [1], frame)
+		at += frame
+		var where: Dictionary = men.positions(ID)
+		var slots: Dictionary = men.slots(ID)
+		var sum := 0.0
+		for man in where:
+			sum += where[man].distance_squared_to(slots[man])
+		var drift := sqrt(sum / maxf(1.0, where.size()))
+		if f == 0:
+			out[0] = drift
+		if out[1] == 0.0 and at >= total / 3.0:
+			out[1] = drift
+		if out[2] < 0.0 and drift < 3.0:
+			out[2] = at
+	return out
+
+
+func test_a_change_of_shape_takes_the_sims_whole_clock(t) -> void:
+	# The sim charges FORMATION_CHANGE_SECONDS at REFORM_PENALTY for a new shape. The men
+	# walked it at DRESS_SPEED and looked formed in a second or two, while the regiment
+	# fought on as a half-formed one for the rest.
+	var paced := _into_square(true)
+	var free := _into_square(false)
+	t.ok(paced[1] > paced[0] * 0.5, "a third of the way in, still well short (%.0f of %.0f)" % [paced[1], paced[0]])
+	t.ok(paced[2] > Rules.FORMATION_CHANGE_SECONDS * 0.8 and paced[2] < Rules.FORMATION_CHANGE_SECONDS + 1.0,
+		"and formed as the clock runs out (%.1fs of %.1fs)" % [paced[2], Rules.FORMATION_CHANGE_SECONDS])
+	print("  [feel] line to square: at 2s the men are %.0f units from their places (was %.0f); formed at %.1fs" % [
+		paced[1], free[1], paced[2]])
+
+
+func test_a_new_frontage_is_walked_at_an_orderly_pace(t) -> void:
+	var men = Bodies.new()
+	_settle(men, 120)
+	var wide := _pose(120, Vector2.ZERO, 0.0, [], Regiment.State.IDLE, 40)
+	var worst := 0.0
+	for i in 600:
+		worst = maxf(worst, _step_fastest(men, wide, 1.0 / 60.0))
+	t.ok(worst <= Rules.REFORM_SPEED * 1.6,
+		"sidestepping into new files, not hurrying (%.0f u/s)" % worst)
+
+
+func test_closing_into_a_column_for_a_bridge_is_quick(t) -> void:
+	# The one re-dress that is done on the march: it has to be finished by the time the
+	# planks are underfoot, and at REFORM_SPEED a 20 -> 10 squeeze would take nine seconds.
+	var men = Bodies.new()
+	men.build(_pose(120, Vector2.ZERO, 0.0, [], Regiment.State.MOVING, 20), [1], 0.016)
+	var squeeze := _pose(120, Vector2.ZERO, 0.0, [], Regiment.State.MOVING, 10)
+	squeeze[ID]["crossing"] = true
+	men.build(squeeze, [1], 1.0 / 60.0)
+	var walk := absf(Formation.frontage(120, 20, 1.0) - Formation.frontage(120, 10, 1.0))
+	t.near(men.dressing(ID), walk / Rules.DRESS_SPEED, 0.05, "the quick clock, not the orderly one")
 
 
 ## How long the men take to settle into `to` files, coming from `from`.

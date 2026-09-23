@@ -568,7 +568,7 @@ static func _sides(bs, seat: int) -> Array:
 			continue
 		if r.owner_id == seat:
 			mine.append(r)
-		else:
+		elif bs.visible_to(seat, r):       # Jev is told what the seat can see, no more
 			foes.append(r)
 	return [mine, foes]
 

@@ -14,7 +14,10 @@ const GROUND := {
 	Rules.GROUND_WOOD: Color(0.18, 0.3, 0.16, 0.9),
 	Rules.GROUND_HILL: Color(0.55, 0.48, 0.32, 0.7),
 	Rules.GROUND_MARSH: Color(0.24, 0.36, 0.36, 0.8),
+	Rules.GROUND_LAKE: Color(0.2, 0.34, 0.5, 0.95),
+	Rules.GROUND_BRIDGE: Color(0.55, 0.4, 0.24, 1.0),
 }
+const BattleState := preload("res://sim/battle_state.gd")
 
 var view
 var _pose := {}
@@ -62,6 +65,14 @@ func _draw() -> void:
 	var battle = Net.battle
 	if battle != null:
 		for f: Array in battle.features:
+			if int(f[0]) == Rules.GROUND_RIVER:
+				var line := PackedVector2Array()
+				var y := -Rules.BATTLE_HALF_EXTENT
+				while y <= Rules.BATTLE_HALF_EXTENT:
+					line.append(_to_map(Vector2(BattleState.river_x(f, y), y)))
+					y += 60.0
+				draw_polyline(line, GROUND[Rules.GROUND_LAKE], maxf(2.0, float(f[3]) * 2.0 * scale))
+				continue
 			draw_circle(_to_map(Vector2(f[1], f[2])), float(f[3]) * scale, GROUND.get(int(f[0]), Color.TRANSPARENT))
 		for w: Array in battle.walls:
 			if float(w[4]) < 1.0:

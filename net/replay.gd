@@ -100,7 +100,7 @@ static func apply_order(bs, sender: int, bytes: PackedByteArray) -> void:
 			# recorded. One branch, in the sim, for the live path and this one.
 			bs.steer(r, order["target"], order["facing"])
 		elif kind == Orders.Type.FOCUS:
-			r.focus = int(order["mark"])
+			bs.aim(r, int(order["mark"]))
 		elif kind == Orders.Type.STANCE:
 			r.stance = int(order["mask"])
 		elif not r.set_formation(order["formation"]) and int(order["width"]) > 0:

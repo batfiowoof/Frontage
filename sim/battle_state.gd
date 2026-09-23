@@ -6,6 +6,7 @@ extends RefCounted
 const Rules := preload("res://sim/rules.gd")
 const Regiment := preload("res://sim/regiment.gd")
 const Formation := preload("res://sim/formation.gd")
+const Pathing := preload("res://sim/pathing.gd")
 
 enum Exposure { FRONT, FLANK, REAR }
 
@@ -60,6 +61,8 @@ var sides := {}
 var walls := []
 ## Whoever has already been mourned, so an army is shaken by losing him once.
 var _mourned := {}
+## The pathfinder, made when first needed. See `nav()`.
+var _nav = null
 
 
 ## The biggest regiment on each side carries the general.
@@ -278,25 +281,36 @@ func side_of_owner(owner: int) -> float:
 ## kept DEPLOY_MARGIN clear of the middle. Setting up inside the enemy would make the
 ## phase a free first move rather than a chance to arrange the one you are about to make.
 func deployable(r: Regiment, to: Vector2) -> Vector2:
-	var side := side_of_owner(r.owner_id)
-	var e := Rules.BATTLE_HALF_EXTENT
-	var x := clampf(to.x, -e, e)
-	var floor_x := Rules.DEPLOY_MARGIN
+	var zone := deploy_zone(r.owner_id)
+	return Vector2(clampf(to.x, zone.position.x, zone.end.x), clampf(to.y, zone.position.y, zone.end.y))
+
+
+## The ground this side may set up on. One rectangle, read by the clamp above and drawn by
+## the view, so what you are shown is what you get.
+func deploy_zone(owner: int) -> Rect2:
+	var side := side_of_owner(owner)
+	var near := Rules.DEPLOY_MARGIN
 	# Behind your own wall, if it is yours. Letting the defender set up in FRONT of it
 	# would hand the attacker the open-field fight the wall exists to refuse, and it is
 	# the one mistake the geometry makes easy.
 	if not walls.is_empty() and signf(float(walls[0][0])) == side:
-		floor_x = Rules.WALL_STANDOFF + Rules.WALL_CLEAR
-	x = maxf(x * side, floor_x) * side
-	return Vector2(x, clampf(to.y, -e, e))
+		near = Rules.WALL_STANDOFF + Rules.WALL_CLEAR
+	# ...and no further back or out than DEPLOY_DEPTH: the whole half-field is a place to
+	# lose an army in, not a zone to arrange one.
+	var far := maxf(near, Rules.DEPLOY_DEPTH)
+	var xs := [near * side, far * side]
+	return Rect2(minf(xs[0], xs[1]), -Rules.DEPLOY_HALF_WIDTH, far - near, Rules.DEPLOY_HALF_WIDTH * 2.0)
 
 
 ## Put it there. Deploying is not marching: the men are set out where you want them
-## rather than walking, so this moves the regiment outright and leaves it IDLE.
+## rather than walking, so this moves the regiment outright and leaves it IDLE. Not into
+## a lake: it stays where it was and only turns.
 func place(r: Regiment, to: Vector2, face: float) -> void:
 	if phase != Phase.DEPLOY or not r.is_alive():
 		return
-	r.pos = deployable(r, to)
+	var at := deployable(r, to)
+	if not wet(at):
+		r.pos = at
 	r.target = r.pos
 	r.facing = face
 	r.target_facing = face
@@ -313,8 +327,24 @@ func place(r: Regiment, to: Vector2, face: float) -> void:
 func steer(r: Regiment, to: Vector2, face: float) -> void:
 	if phase == Phase.DEPLOY:
 		place(r, to, face)
-	else:
-		r.order_move(to, face)
+		return
+	# Told to stand on a bridge, it stands on the middle of it: a column whose centre is
+	# off the centreline hangs its outer files over the water.
+	var on = bridge_at(to)
+	if on != null:
+		to.y = float(on[2])
+	r.order_move(to, face)
+
+
+## Tell a regiment who to deal with. Refused -- false, focus untouched -- for an enemy its
+## side cannot see: an attack order naming a hidden regiment would be a way to probe ids
+## through the fog. In the sim, like `steer`, so the live path and a replay agree.
+func aim(r: Regiment, mark: int) -> bool:
+	var m = regiments.get(mark)
+	if m != null and m.owner_id != r.owner_id and not visible_to(r.owner_id, m):
+		return false
+	r.focus = mark
+	return true
 
 
 ## A side is done arranging. Irreversible on purpose -- unreadying would let one player
@@ -404,7 +434,12 @@ func _separate(dt: float) -> void:
 			continue
 		for j in range(i + 1, ids.size()):
 			var b: Regiment = regiments[ids[j]]
-			if not b.is_alive() or b.owner_id == a.owner_id:
+			if not b.is_alive():
+				continue
+			# Friends too, once both have stopped: two of your own blocks standing inside
+			# one another read as one mass. Not while either marches -- two passing on the
+			# move is passing, and the planner already keeps a march clear of the standing.
+			if b.owner_id == a.owner_id and (_on_the_move(a) or _on_the_move(b)):
 				continue
 			var overlap := -gap_between(a, b)
 			if overlap <= 0.0:
@@ -418,10 +453,15 @@ func _separate(dt: float) -> void:
 			# Shoving somebody THROUGH a wall would undo in one tick what the wall spent
 			# the whole battle doing. A pair that cannot be pushed apart stays merged,
 			# which is the lesser of the two and only reachable in a gateway anyway.
-			if not crosses_a_wall(a.pos, a.pos + push):
+			# ...and nobody is shoved into a river either.
+			if not crosses_a_wall(a.pos, a.pos + push) and not wet(a.pos + push):
 				a.pos += push
-			if not crosses_a_wall(b.pos, b.pos - push):
+			if not crosses_a_wall(b.pos, b.pos - push) and not wet(b.pos - push):
 				b.pos -= push
+
+
+static func _on_the_move(r: Regiment) -> bool:
+	return r.state == Regiment.State.MOVING or r.state == Regiment.State.ROUTING
 
 
 ## An effect key for one side, across everything it has learned. The same shape the
@@ -443,55 +483,280 @@ func tech(owner: int, key: StringName) -> float:
 ## What the ground does where a regiment is standing. Overlapping patches take the
 ## worst of each, so a wood on a hillside is slow AND gives cover rather than cancelling
 ## out into open field.
+##
+## Water and a river are not "ground" -- nobody stands in them -- so their rows are empty
+## and skipped here. See `wet()`.
 func ground_at(pos: Vector2) -> Dictionary:
-	var out := {"speed": 1.0, "damage": 1.0, "cover": 0.0, "range": 1.0}
+	var out := {"speed": 1.0, "damage": 1.0, "cover": 0.0}
 	for f: Array in features:
-		var centre := Vector2(f[1], f[2])
-		if pos.distance_squared_to(centre) > f[3] * f[3]:
-			continue
 		var g: Dictionary = Rules.GROUND.get(int(f[0]), {})
 		if g.is_empty():
+			continue
+		if pos.distance_squared_to(Vector2(f[1], f[2])) > f[3] * f[3]:
 			continue
 		out["speed"] = minf(out["speed"], float(g["speed"]))
 		out["damage"] = maxf(out["damage"], float(g["damage"])) if float(g["damage"]) > 1.0 \
 			else minf(out["damage"], float(g["damage"]))
 		out["cover"] = maxf(out["cover"], float(g["cover"]))
-		out["range"] = minf(out["range"], float(g["range"])) if float(g["range"]) < 1.0 \
-			else maxf(out["range"], float(g["range"]))
 	return out
 
 
-## Lay out a battlefield for the hex the armies met on. Deterministic from the seed, so
-## the same meeting always produces the same ground and a replay of it still lines up.
-func lay_ground(terrain: int, seed_value: int) -> void:
+## How high the ground stands here: the highest hill under this point, each one a dome
+## whose peak is its radius times HILL_RISE -- so a bigger hill is a higher one and height
+## costs nothing on the wire.
+func height_at(pos: Vector2) -> float:
+	var h := 0.0
+	for f: Array in features:
+		if int(f[0]) != Rules.GROUND_HILL:
+			continue
+		var r := float(f[3])
+		var d2 := pos.distance_squared_to(Vector2(f[1], f[2]))
+		if d2 < r * r:
+			h = maxf(h, r * Rules.HILL_RISE * (1.0 - d2 / (r * r)))
+	return h
+
+
+## How far `a` stands above `b`, from -1 (a full slope below) to 1 (a full slope above).
+func slope(a: Vector2, b: Vector2) -> float:
+	return clampf((height_at(a) - height_at(b)) / Rules.HEIGHT_SPAN, -1.0, 1.0)
+
+
+## What height does to how far a man at `a` shoots and sees toward `b`.
+func lift(a: Vector2, b: Vector2) -> float:
+	return 1.0 + Rules.HEIGHT_RANGE * slope(a, b)
+
+
+## A river's centreline at this y. The whole river is one row: [kind, x0, phase, half_width].
+static func river_x(row: Array, y: float) -> float:
+	return float(row[1]) + Rules.RIVER_BEND * sin(y * Rules.RIVER_WAVE + float(row[2]))
+
+
+func _in(kind: int, pos: Vector2) -> bool:
+	for f: Array in features:
+		if int(f[0]) == kind and pos.distance_squared_to(Vector2(f[1], f[2])) < f[3] * f[3]:
+			return true
+	return false
+
+
+## Too near a lake or a river to stand, and not on a bridge. A regiment's centre keeps
+## WATER_CLEAR off the water, because it is a block and not a point: tested at the centre
+## alone, its front ranks stood in the river whenever it walked along the bank.
+func wet(pos: Vector2) -> bool:
+	if bridge_at(pos) != null:
+		return false
+	for f: Array in features:
+		match int(f[0]):
+			Rules.GROUND_LAKE:
+				var reach := float(f[3]) + Rules.WATER_CLEAR
+				if pos.distance_squared_to(Vector2(f[1], f[2])) < reach * reach:
+					return true
+			Rules.GROUND_RIVER:
+				if absf(pos.x - river_x(f, pos.y)) < float(f[3]) + Rules.WATER_CLEAR:
+					return true
+	return false
+
+
+## The bridge under this point, or null. A bridge is a strip straight across its river --
+## its row's radius either side of its middle, BRIDGE_HALF_LENGTH out along it -- and the
+## planks drawn are exactly this strip. `approach` widens it, for the ground in front.
+func bridge_at(pos: Vector2, approach := 0.0) -> Variant:
+	for f: Array in features:
+		if int(f[0]) == Rules.GROUND_BRIDGE and absf(pos.y - float(f[2])) < float(f[3]) \
+				and absf(pos.x - float(f[1])) < Rules.BRIDGE_HALF_LENGTH + approach:
+			return f
+	return null
+
+
+## A regiment on a bridge, or walking onto one, crosses it as a column BRIDGE_FILES wide:
+## the facing that column takes, or null when it is not crossing. Pointed at the far bank
+## when it is going over, and along the bridge the way it already faces when it is only
+## standing on one.
+##
+## The sim holds a regiment's ordered facing and frontage whatever it walks through, so
+## without this a twenty-file line walked over the planks with its files strung up and
+## down the river. The view draws the column; `_accumulate_strike` fights at it.
+func crossing(r: Regiment) -> Variant:
+	var on = bridge_at(r.pos, Rules.BRIDGE_APPROACH)
+	if on == null:
+		return null
+	var river = _river()
+	if river == null:
+		return null
+	var there := r.target.x - river_x(river, r.target.y)
+	var here := r.pos.x - river_x(river, r.pos.y)
+	if (there >= 0.0) != (here >= 0.0):
+		return 0.0 if there >= 0.0 else PI
+	# Over, or standing on it: a column until its REAR is off the planks too, facing away
+	# from the water. Opening out the moment its centre reached the bank left the back
+	# half of it standing over the river.
+	if bridge_at(r.pos, column_reach(r)) == null:
+		return null                        # beside the bridge, or well clear of it
+	return 0.0 if r.pos.x >= float(on[1]) else PI
+
+
+## Half the length of the column a regiment crosses a bridge in: its ranks at
+## BRIDGE_FILES wide. A column is long, and all of it has to be off the water.
+static func column_reach(r: Regiment) -> float:
+	return ceilf(float(r.max_strength) / float(Rules.BRIDGE_FILES)) * Rules.RANK_SPACING * r.spacing() * 0.5
+
+
+func _river() -> Variant:
+	for f: Array in features:
+		if int(f[0]) == Rules.GROUND_RIVER:
+			return f
+	return null
+
+
+## Out of whatever water `into` is in, measured at the dry point `at` beside it: away from
+## a lake's centre, or square to the river's centreline on the side `at` is on. At `at` and
+## not at `into`, because the tangent at a point already inside a circle leans into it --
+## a regiment sliding along that stalled on the rim.
+func _water_normal(into: Vector2, at: Vector2) -> Vector2:
+	for f: Array in features:
+		match int(f[0]):
+			Rules.GROUND_LAKE:
+				var reach := float(f[3]) + Rules.WATER_CLEAR
+				if into.distance_squared_to(Vector2(f[1], f[2])) < reach * reach:
+					return (at - Vector2(f[1], f[2])).normalized()
+			Rules.GROUND_RIVER:
+				if absf(into.x - river_x(f, into.y)) < float(f[3]) + Rules.WATER_CLEAR:
+					var bend := Rules.RIVER_BEND * Rules.RIVER_WAVE * cos(at.y * Rules.RIVER_WAVE + float(f[2]))
+					var off := at.x - river_x(f, at.y)
+					return Vector2(1.0, -bend).normalized() * (1.0 if off >= 0.0 else -1.0)
+	return Vector2.RIGHT
+
+
+## Lay out a battlefield for the hex the armies met on AND the six around it. Seeded, so
+## the same meeting always produces the same ground; random, because the seed is the tile
+## and the turn, so the next battle on the same hex is a different field.
+##
+## `ring` is `CampaignState.ring_of()`, and `toward` is the direction the attacker came
+## from, so the hex behind him is on his side of the field (-x) and the rest go round.
+## A lake is only ever where a water hex is; a big hill only where a mountain is.
+func lay_ground(here: int, seed_value: int, ring := [], toward := 3) -> void:
 	features = []
 	var rng := RandomNumberGenerator.new()
-	rng.seed = seed_value
+	# Hashed: neighbouring seeds -- the same hex a turn later -- otherwise start the
+	# generator in nearly the same place and lay nearly the same field.
+	rng.seed = hash(seed_value)
 	var reach := Rules.DEPLOY_SEPARATION * 0.9
 
-	var wanted := 2
-	var kind := Rules.GROUND_WOOD
-	match terrain:
-		1:                                 # forest
-			wanted = 5
-			kind = Rules.GROUND_WOOD
-		3:                                 # hills
-			wanted = 4
-			kind = Rules.GROUND_HILL
-		2:                                 # mountain, so rocky going
-			wanted = 4
-			kind = Rules.GROUND_HILL
-		4:                                 # water, so the field is half marsh
-			wanted = 4
-			kind = Rules.GROUND_MARSH
-		_:
-			wanted = 2
-			kind = Rules.GROUND_WOOD
+	# A river first, so the cap never squeezes out the bridge across it. Kept inside the
+	# deployment margin, so it is always no-man's-land between the two lines.
+	var near_water: bool = here == 4 or ring.has(4)
+	if rng.randf() < (Rules.RIVER_CHANCE_NEAR_WATER if near_water else Rules.RIVER_CHANCE):
+		var room := Rules.DEPLOY_MARGIN - Rules.RIVER_HALF_WIDTH - Rules.RIVER_BEND - Rules.WATER_CLEAR - 5.0
+		var river := [Rules.GROUND_RIVER, rng.randf_range(-room, room), rng.randf_range(0.0, TAU),
+			Rules.RIVER_HALF_WIDTH]
+		_lay(river)
+		var spans := [rng.randf_range(-300.0, 300.0)] if rng.randf() < 0.5 \
+			else [rng.randf_range(-450.0, -120.0), rng.randf_range(120.0, 450.0)]
+		for y: float in spans:
+			_lay([Rules.GROUND_BRIDGE, river_x(river, y), y, Rules.RIVER_HALF_WIDTH * Rules.BRIDGE_REACH])
 
-	for i in mini(wanted, Rules.MAX_FEATURES):
-		features.append([kind,
-			rng.randf_range(-reach, reach), rng.randf_range(-reach * 0.7, reach * 0.7),
+	# Somewhere to hide on each side, if there are trees anywhere near: the wood is what
+	# the battle fog is for, and one that fell behind the enemy line hides nobody of yours.
+	if here == 1 or ring.has(1):
+		for side in [-1.0, 1.0]:
+			_lay([Rules.GROUND_WOOD, side * rng.randf_range(300.0, 550.0),
+				rng.randf_range(-500.0, 500.0), rng.randf_range(100.0, 150.0)])
+
+	# The hex itself, across the whole field.
+	var kind := Rules.GROUND_WOOD
+	var wanted := 1
+	match here:
+		1: wanted = 3                              # forest
+		2, 3:                                      # mountain, hills
+			wanted = 3
+			kind = Rules.GROUND_HILL
+		4:                                         # water, so the field is half marsh
+			wanted = 3
+			kind = Rules.GROUND_MARSH
+	for i in wanted:
+		_lay([kind, rng.randf_range(-reach, reach), rng.randf_range(-reach * 0.7, reach * 0.7),
 			rng.randf_range(90.0, 190.0)])
+
+	# Each neighbour, out toward its own edge of the field.
+	for j in ring.size():
+		var bearing := PI - float(j - toward) * PI / 3.0 + rng.randf_range(-0.35, 0.35)
+		var out := rng.randf_range(600.0, 950.0)
+		match int(ring[j]):
+			1:
+				for k in 1 + rng.randi() % 2:
+					_lay_toward(Rules.GROUND_WOOD, bearing + rng.randf_range(-0.3, 0.3),
+						out + rng.randf_range(-150.0, 100.0), rng.randf_range(90.0, 170.0))
+			3:
+				_lay_toward(Rules.GROUND_HILL, bearing, out, rng.randf_range(140.0, 200.0))
+			2:
+				_lay_toward(Rules.GROUND_HILL, bearing, out, rng.randf_range(220.0, 300.0))
+			4:
+				_lay_toward(Rules.GROUND_LAKE, bearing, out, rng.randf_range(120.0, 220.0))
+			_:
+				if rng.randf() < 0.25:
+					_lay_toward(Rules.GROUND_WOOD, bearing, out, rng.randf_range(80.0, 130.0))
+
+	_keep_the_land_dry()
+
+
+## Woods, hills and marsh are land, and none of them may stand in the water. They are laid
+## from the hexes round the field with no regard to the river running through it -- and a
+## lake can land after a wood -- so the trees grew out of the middle of the river. Each is
+## shrunk until it clears every lake and the river's bank by LAND_CLEAR, and dropped if
+## that leaves too little of it to be worth anything.
+func _keep_the_land_dry() -> void:
+	var kept := []
+	for f: Array in features:
+		var kind := int(f[0])
+		if kind != Rules.GROUND_WOOD and kind != Rules.GROUND_HILL and kind != Rules.GROUND_MARSH:
+			kept.append(f)
+			continue
+		var at := Vector2(f[1], f[2])
+		var radius := minf(float(f[3]), _to_water(at) - Rules.LAND_CLEAR)
+		if radius >= Rules.LAND_MIN_RADIUS:
+			kept.append([kind, f[1], f[2], radius])
+	features = kept
+
+
+## How far `at` is from the nearest water's edge: a lake's rim, or the river's bank --
+## the closest point of its bending centreline, less its half-width.
+func _to_water(at: Vector2) -> float:
+	var best := INF
+	for f: Array in features:
+		match int(f[0]):
+			Rules.GROUND_LAKE:
+				best = minf(best, at.distance_to(Vector2(f[1], f[2])) - float(f[3]))
+			Rules.GROUND_RIVER:
+				var y := -Rules.BATTLE_HALF_EXTENT
+				while y <= Rules.BATTLE_HALF_EXTENT:
+					best = minf(best, at.distance_to(Vector2(river_x(f, y), y)) - float(f[3]))
+					y += 10.0
+	return best
+
+
+func _lay(row: Array) -> void:
+	if features.size() < Rules.MAX_FEATURES:
+		features.append(row)
+
+
+## A circle out along a bearing. A lake is walked further out until it covers nobody's
+## deployment: an army dealt into the water could not move, and one dealt against it has
+## lost half its line before the battle starts.
+func _lay_toward(kind: int, bearing: float, out: float, radius: float) -> void:
+	var dir := Vector2.from_angle(bearing)
+	if kind == Rules.GROUND_LAKE:
+		while _covers_a_deployment(dir * out, radius):
+			out += 50.0
+			if out > Rules.BATTLE_HALF_EXTENT:
+				return
+	_lay([kind, dir.x * out, dir.y * out, radius])
+
+
+static func _covers_a_deployment(at: Vector2, radius: float) -> bool:
+	var slots := Rules.DEPLOY_SPACING * 4.0
+	for x in [-Rules.DEPLOY_SEPARATION * 0.5, Rules.DEPLOY_SEPARATION * 0.5]:
+		if _distance_to_segment(at, Vector2(x, -slots), Vector2(x, slots)) < radius + Rules.DEPLOY_SPACING:
+			return true
+	return false
 
 
 ## How far a regiment's formation extends toward an enemy at this angle: half its
@@ -551,6 +816,7 @@ func _shoot(contacts: Dictionary, dt: float) -> void:
 			continue
 		var mark = _volley_target(r)
 		if mark == null:
+			_face_what_it_could_hit(r)
 			continue
 		r.reload = float(Rules.KINDS[r.kind]["reload"])
 		r.ammo -= 1
@@ -579,9 +845,83 @@ func _volley_target(shooter: Regiment):
 func _shootable(shooter: Regiment, mark: Regiment) -> bool:
 	if mark == null or mark.owner_id == shooter.owner_id or not mark.is_alive():
 		return false
-	if shooter.pos.distance_to(mark.pos) > shooter.range_of():
+	if not in_arc(shooter, mark.pos, reach_of(shooter, mark.pos)):
+		return false
+	if not visible_to(shooter.owner_id, mark):
 		return false
 	return line_is_clear(shooter, mark, regiments.values())
+
+
+## Nothing in the arc, but something it could reach if it turned: it turns. A standing
+## bow with an enemy off its flank is otherwise a regiment doing nothing, and an AI that
+## never set its facing would never shoot at all. The one it was told to deal with first.
+func _face_what_it_could_hit(r: Regiment) -> void:
+	var best = null
+	var best_distance := INF
+	for id in sorted_ids():
+		var e: Regiment = regiments[id]
+		if e.owner_id == r.owner_id or not e.is_alive() or not visible_to(r.owner_id, e):
+			continue
+		var d := r.pos.distance_to(e.pos)
+		if d > reach_of(r, e.pos):
+			continue
+		if e.id == r.focus:
+			best = e
+			break
+		if d < best_distance:
+			best_distance = d
+			best = e
+	if best != null:
+		r.target_facing = (best.pos - r.pos).angle()
+
+
+## How far this shooter reaches toward that point: its bow, lengthened by standing above
+## what it is shooting at and shortened by standing below it.
+func reach_of(shooter: Regiment, at: Vector2) -> float:
+	return shooter.range_of() * lift(shooter.pos, at)
+
+
+## A bow looses into an arc in front of the line: a fan off each end of the front rank,
+## splayed out by ARC_SPREAD, rounded off at `reach` from the nearest point of the line.
+## So a wider line covers a wider arc, and nothing behind or beside it can be hit at all.
+## Static and pure, so the view draws exactly what the sim uses.
+static func in_arc(shooter: Regiment, point: Vector2, reach: float) -> bool:
+	var local := (point - shooter.pos).rotated(-shooter.facing)
+	if local.x < 0.0:
+		return false
+	var half_front := shooter.extent().y
+	if absf(local.y) > half_front + local.x * tan(Rules.ARC_SPREAD):
+		return false
+	return local.distance_to(Vector2(0.0, clampf(local.y, -half_front, half_front))) <= reach
+
+
+## Can `owner` see this regiment? Your own always; anybody within sight of one of yours,
+## further from higher ground; and a regiment standing in a wood only from WOOD_SPOT --
+## unless it has given itself away by fighting or by loosing a volley in the last reload.
+##
+## Owner 0 sees everything: that is the replay, the save and every test.
+##
+## One rule, three callers: the wire (`Snapshot.encode_battle`), the host's own view, and
+## the sim itself -- nobody shoots or chases what their side cannot see. Without the
+## second, the host would see everything a joined client cannot.
+func visible_to(owner: int, r: Regiment) -> bool:
+	if owner == 0 or r.owner_id == owner:
+		return true
+	var hidden: bool = r.engaged_with < 0 and r.reload <= 0.0 and _in(Rules.GROUND_WOOD, r.pos)
+	var fielded := false
+	for id in sorted_ids():
+		var o: Regiment = regiments[id]
+		if o.owner_id != owner:
+			continue
+		fielded = true
+		if not o.is_alive():
+			continue
+		var sight := Rules.WOOD_SPOT if hidden else Rules.BATTLE_SIGHT * lift(o.pos, r.pos)
+		if o.pos.distance_squared_to(r.pos) <= sight * sight:
+			return true
+	# Somebody with no regiment on this field at all -- the dead count, they were here --
+	# is watching it: a spectator seat, or a replay of somebody else's battle.
+	return not fielded
 
 
 ## Nobody shoots through their own line. A friendly regiment anywhere between the two,
@@ -609,7 +949,7 @@ static func line_is_clear(shooter: Regiment, mark: Regiment, everyone) -> bool:
 
 func _land_volley(shooter: Regiment, mark: Regiment) -> void:
 	var distance := shooter.pos.distance_to(mark.pos)
-	var reach := maxf(1.0, shooter.range_of())
+	var reach := maxf(1.0, reach_of(shooter, mark.pos))
 	var falloff := lerpf(1.0, Rules.MISSILE_FALLOFF, clampf(distance / reach, 0.0, 1.0))
 	var cover := clampf(float(mark.form()["missile"]) + float(ground_at(mark.pos)["cover"]), -1.0, 0.95)
 	var kills := float(Rules.KINDS[shooter.kind]["volley"]) * shooter.fraction() * falloff
@@ -712,7 +1052,11 @@ func _pursue(r: Regiment, contacts: Array) -> void:
 	if mark == null or not mark.is_alive() or mark.owner_id == r.owner_id:
 		r.focus = -1                       # the man you named is gone
 		return
-	if r.can_shoot() and r.pos.distance_to(mark.pos) <= r.range_of():
+	# The man you named has gone into the trees: you keep his name and lose his trail.
+	if not visible_to(r.owner_id, mark):
+		return
+	# In reach, if not yet in the arc: _shoot turns it the rest of the way.
+	if r.can_shoot() and r.pos.distance_to(mark.pos) <= reach_of(r, mark.pos):
 		return
 	var stop := contact_distance(r, mark)
 	var gap: Vector2 = r.pos - mark.pos
@@ -821,8 +1165,17 @@ func _accumulate_strike(attacker: Regiment, defender: Regiment, dt: float, kills
 	if bool(defender.form()["brace"]) and attacker.is_cavalry():
 		braced = 1.0 - Rules.BRACE_PROTECTION
 
+	# Height between the two of them. The man above hits harder and frightens more; the man
+	# below does neither as well -- so a hill is easier to hold and harder to take, and
+	# that is one number, not two.
+	var hill := 1.0 + Rules.HIGH_GROUND * slope(attacker.pos, defender.pos)
+
 	var files := contact_files(attacker, defender, swinging_from, hit_from)
-	var output := Rules.KILLS_PER_FILE_PER_SEC * float(files) * response_of(swinging_from)
+	# On a bridge, the bridge is the frontage: the planks take BRIDGE_FILES and no more,
+	# whichever side of the fight is standing on them. A bridge is held the way a gate is.
+	if bridge_at(attacker.pos) != null or bridge_at(defender.pos) != null:
+		files = mini(files, Rules.BRIDGE_FILES)
+	var output := Rules.KILLS_PER_FILE_PER_SEC * float(files) * response_of(swinging_from) * hill
 	output *= attacker.readiness() * damage_mult * dt
 	output *= float(attacker.form()["damage"]) * attacker.order_factor() * braced
 	output *= float(ground_at(attacker.pos)["damage"])
@@ -851,7 +1204,7 @@ func _accumulate_strike(attacker: Regiment, defender: Regiment, dt: float, kills
 	# damage and one mid-reform all frightened a man exactly as much as a fresh block
 	# did. Morale was measuring how long you had been standing there rather than how
 	# badly you were being handled.
-	var pressure := attacker.readiness() * attacker.order_factor() * float(attacker.form()["damage"])
+	var pressure := attacker.readiness() * attacker.order_factor() * float(attacker.form()["damage"]) * hill
 	# defender.nerve() is the defender's OWN exhaustion making it break sooner, which is a
 	# different thing from the attacker's readiness inside `pressure` -- that is how hard
 	# he can press. Tired men breaking sooner had no expression here at all.
@@ -936,7 +1289,7 @@ func _step_regiment(r: Regiment, dt: float) -> void:
 		# At the pace the men are walking, over the distance they actually have to cover,
 		# so the ramp and the walk finish together whatever size the change was.
 		var walk := r.dress_walk()
-		r.dressed = 1.0 if walk <= 0.01 else minf(1.0, r.dressed + Rules.DRESS_SPEED / walk * dt)
+		r.dressed = 1.0 if walk <= 0.01 else minf(1.0, r.dressed + Rules.REFORM_SPEED / walk * dt)
 	if r.charge > 0.0:
 		r.charge = maxf(0.0, r.charge - dt)
 	_drive_the_point(r, dt)
@@ -990,7 +1343,7 @@ func _drive_the_point(r: Regiment, dt: float) -> void:
 	if r.bite > was:
 		var to := r.pos + Vector2.from_angle(r.facing) \
 			* r.extent().x * Rules.WEDGE_PENETRATION * (r.bite - was)
-		if not crosses_a_wall(r.pos, to):
+		if not crosses_a_wall(r.pos, to) and not wet(to):
 			r.pos = to
 			r.target = to
 
@@ -1084,6 +1437,19 @@ func _advance(r: Regiment, dt: float) -> void:
 	var to_target: Vector2 = r.target - r.pos
 	var dist := to_target.length()
 
+	# Where it is walking this tick: the next waypoint of its plan, and how far it still
+	# has to go along the whole of it. Routers do not plan -- they run straight away from
+	# what broke them, and the shore and the walls stop them as they always did.
+	var goal := r.target
+	var last := true
+	if not routing:
+		_follow(r, dt)
+		goal = r.path[0]
+		last = r.path.size() == 1
+		dist = r.pos.distance_to(goal)
+		for k in range(1, r.path.size()):
+			dist += r.path[k - 1].distance_to(r.path[k])
+
 	# Brake into the destination rather than stopping dead on it. This is the term that
 	# removes the arrival snap: `r.pos = r.target` used to jump a regiment up to a stride.
 	var rate := top / Rules.ACCELERATION_SECONDS
@@ -1098,21 +1464,55 @@ func _advance(r: Regiment, dt: float) -> void:
 		* tech(r.owner_id, &"stamina") * dt)
 
 	# Only when it is genuinely within one step, so the last move is a shuffle rather than
-	# the up-to-ARRIVE_EPSILON teleport this used to finish on.
-	if dist <= step_len:
-		if not crosses_a_wall(r.pos, r.target):
-			r.pos = r.target
-		r.pace = 0.0
+	# the up-to-ARRIVE_EPSILON teleport this used to finish on. The end of the plan may be
+	# short of the target -- the shore of a lake it was sent into, the outside of a wall --
+	# and then that is where it stops, and that is its target now.
+	var halt := dist <= step_len and last
+	if halt and not wet(goal):
+		if not crosses_a_wall(r.pos, goal):
+			r.pos = goal
 		if not routing:
-			r.state = Regiment.State.IDLE
-		_turn_toward(r, r.target_facing, dt)
+			r.target = goal
+			r.path = PackedVector2Array()
+		_halt(r, routing, dt)
 		return
 
-	var step := to_target / dist * step_len
-	# A wall stops a march the way an enemy does: the regiment comes up against it and
-	# stays there. Nothing steers round, deliberately -- finding the gate is the player's
-	# job and the AI's, and a pathfinder here would quietly solve the one problem a siege
-	# is supposed to pose.
+	var heading := goal - r.pos
+	if heading.length() <= 0.001:
+		heading = to_target
+	if heading.length() <= 0.001:
+		_halt(r, routing, dt)
+		return
+	var step := heading.normalized() * step_len
+	# Water is walked round, not through: a step that would end in a lake or a river slides
+	# along the shore instead. One sent INTO the water halts on its edge -- nobody stands in
+	# a lake, and sliding round one looking for a way in would circle it forever.
+	var shore := _shore(r.pos, step)
+	if shore != step and wet(r.target):
+		r.target = r.pos
+		_halt(r, routing, dt)
+		return
+	step = shore
+	r.waiting = false
+	if not routing:
+		var blocker = _blocker(r, step, dist)
+		if blocker != null:
+			# Blocked on the way in by a friend standing on its destination: it stops
+			# there rather than queueing behind him for the rest of the battle.
+			if _spot_taken(r):
+				r.target = r.pos
+				r.path = PackedVector2Array()
+				_halt(r, routing, dt)
+				return
+			if _gives_way(r, blocker):
+				r.waiting = true
+			else:
+				r.replan = minf(r.replan, Rules.BLOCKED_REPLAN)
+			r.pace = 0.0
+			_turn_toward(r, r.target_facing, dt)
+			return
+	# The plan goes round walls, through the gate; this is the backstop that means no step
+	# ever crosses one whatever the plan says -- a router has no plan at all.
 	if not crosses_a_wall(r.pos, r.pos + step):
 		r.pos += step
 	# The facing it was ORDERED, not the way it happens to be walking. This one line was
@@ -1120,6 +1520,163 @@ func _advance(r: Regiment, dt: float) -> void:
 	# anywhere behind itself swung the whole block round. Movement never needed a front --
 	# `r.pos +=` above walks straight at the target whatever way the block faces.
 	_turn_toward(r, r.target_facing, dt)
+
+
+## Friends on the move give way to one another.
+##
+## The planner goes round whoever is STANDING, but two marching blocks used to walk
+## straight through each other -- two columns over one bridge were one column. Steering
+## round each other did not work, and it is worth knowing why: `gap_between` measures by
+## the angle between two blocks, so a sidestep out of a head-on meeting brings the FLANK
+## into play and the gap still shrinks. Every dodge read as worse, and the two merged by a
+## hundred units.
+##
+## So the planner does it, and the rule is a queue and a detour:
+##
+##   a friend on the march crossing in front of you    you WAIT for him
+##   a friend standing, or waiting himself            you plan round him
+##
+## A waiting regiment counts as standing to the planner, so whoever it waits for walks
+## round it. Two meeting head-on would each wait for the other; the lower id is the one
+## that does not, and a replay agrees because the rule is deterministic.
+##
+## Friends only -- an enemy in the way is not somebody to step round, it is contact, and
+## the fight is the point. Routers neither wait nor get waited for: a fleeing mob goes
+## through its own lines.
+func _gives_way(r: Regiment, f: Regiment) -> bool:
+	if f.state != Regiment.State.MOVING or f.waiting:
+		return false                           # standing: go round him instead
+	return f.id < r.id or _blocker(f, _heading(f), _heading(f).length()) != r
+
+
+## The friend `r` would run into within AVOID_LOOKAHEAD along `step`, or null.
+##
+## Seen that far ahead so the one who waits stops outside the other's planning margin --
+## at 40 units he was already inside it, and the detour round him was too tight to be one.
+## Measured with the two real footprints (`separation`), not `gap_between`, whose reach
+## flips from front to flank as a block moves sideways: a detour past somebody read as a
+## collision with him. Only an approach counts, so two already tangled can walk apart.
+##
+## Never further than `left`, the rest of its own route. Looking a hundred units past
+## where it meant to stop, a regiment closing on an enemy's flank saw the friend already
+## fighting that enemy's front -- and stopped short of the flank it was sent to take.
+func _blocker(r: Regiment, step: Vector2, left: float):
+	if step.length() < 0.0001:
+		return null
+	var dir := step.normalized()
+	var look := minf(Rules.AVOID_LOOKAHEAD, left)
+	var mine := r.extent()
+	for id in sorted_ids():
+		var o: Regiment = regiments[id]
+		if o.id == r.id or o.owner_id != r.owner_id or not o.is_alive():
+			continue
+		# Not a friend in a melee: coming up alongside him to hit the same enemy's flank IS
+		# the flank attack. Blocking on him had the flankers re-planning a stride short of
+		# the fight they were sent to, and flank contact fell from 17% of a battle to 7%.
+		if o.state == Regiment.State.ROUTING or o.state == Regiment.State.FIGHTING:
+			continue
+		var theirs := o.extent()
+		if r.pos.distance_to(o.pos) > mine.length() + theirs.length() + look:
+			continue
+		var now := separation(r.pos, r.facing, mine, o.pos, o.facing, theirs)
+		for part in [0.5, 1.0]:
+			var then := separation(r.pos + dir * look * part, r.facing, mine,
+				o.pos, o.facing, theirs)
+			if then < Rules.AVOID_CLEAR and then < now:
+				return o
+	return null
+
+
+## How far apart two footprints are -- rectangles at `pos`, turned to `facing`, half
+## `extent` (depth, frontage) -- on the axis that separates them best. Negative is how
+## deep they overlap. The separating-axis test: continuous whichever way either faces.
+static func separation(pa: Vector2, fa: float, ea: Vector2, pb: Vector2, fb: float, eb: Vector2) -> float:
+	var d := pb - pa
+	var best := -INF
+	for axis: Vector2 in [Vector2.from_angle(fa), Vector2.from_angle(fa + PI * 0.5),
+			Vector2.from_angle(fb), Vector2.from_angle(fb + PI * 0.5)]:
+		best = maxf(best, absf(d.dot(axis)) - _half_along(axis, fa, ea) - _half_along(axis, fb, eb))
+	return best
+
+
+static func _half_along(axis: Vector2, facing: float, e: Vector2) -> float:
+	return e.x * absf(axis.dot(Vector2.from_angle(facing))) \
+		+ e.y * absf(axis.dot(Vector2.from_angle(facing + PI * 0.5)))
+
+
+## Which way a marching regiment is going this tick: at its next waypoint.
+static func _heading(r: Regiment) -> Vector2:
+	var to: Vector2 = r.path[0] if not r.path.is_empty() else r.target
+	return to - r.pos
+
+
+## Blocked, and its destination is somebody else's ground: close enough, it stops. Two
+## sent to one spot would otherwise leave the second marching on the spot forever -- and a
+## regiment that is never IDLE never shoots and never rests.
+##
+## Only a friend who has STOPPED there, and only if the two would genuinely stand in one
+## another at the destination. Measured loosely -- any friend, anywhere near -- it had the
+## AI's spears give up and stand for half a battle, because the sword marching beside them
+## happened to be passing their slot.
+func _spot_taken(r: Regiment) -> bool:
+	for id in sorted_ids():
+		var o: Regiment = regiments[id]
+		if o.id == r.id or o.owner_id != r.owner_id or not o.is_alive():
+			continue
+		if o.state == Regiment.State.MOVING or o.state == Regiment.State.ROUTING:
+			continue
+		if separation(r.target, r.target_facing, r.extent(), o.pos, o.facing, o.extent()) < 0.0:
+			return true
+	return false
+
+
+func _halt(r: Regiment, routing: bool, dt: float) -> void:
+	r.pace = 0.0
+	if not routing:
+		r.state = Regiment.State.IDLE
+	_turn_toward(r, r.target_facing, dt)
+
+
+## This step, or the same length along the shore if it would end in the water, or nothing
+## if neither is dry. Already standing in water, any step goes: that is how you get out.
+func _shore(from: Vector2, step: Vector2) -> Vector2:
+	if wet(from) or not wet(from + step):
+		return step
+	var normal := _water_normal(from + step, from)
+	var along := normal.orthogonal()
+	if along.dot(step) < 0.0:
+		along = -along
+	# A hair outward as well: a straight line along a curved shore still clips it.
+	var slid := (along + normal * 0.05).normalized() * step.length()
+	return slid if not wet(from + slid) else Vector2.ZERO
+
+
+## Keep the plan current. It is made again when there is none, when the target has moved
+## further than REPLAN_DISTANCE from where it was planned to, and every REPLAN_SECONDS
+## while marching -- somebody may have stopped in the way since. Between those a plan that
+## reaches its target simply follows it, so a chase costs nothing until something is
+## actually in the way. Waypoints are dropped as they are reached.
+##
+## Never issued as an order, the way `_pursue` keeps a chase current: nothing is
+## re-ordered, so MOVING stays MOVING and arrival still means arrival.
+func _follow(r: Regiment, dt: float) -> void:
+	r.replan -= dt
+	if r.path.is_empty() or r.replan <= 0.0 or r.path_to.distance_to(r.target) > Rules.REPLAN_DISTANCE:
+		r.path = nav().plan(self, r)
+		r.path_to = r.target
+		r.path_whole = r.path[r.path.size() - 1] == r.target
+		r.replan = Rules.REPLAN_SECONDS
+	elif r.path_whole:
+		r.path[r.path.size() - 1] = r.target
+	while r.path.size() > 1 and r.pos.distance_to(r.path[0]) <= Rules.WAYPOINT_REACHED:
+		r.path.remove_at(0)
+
+
+## The planner, made the first time anybody needs it. Server-side and never sent.
+func nav() -> Pathing:
+	if _nav == null:
+		_nav = Pathing.new()
+	return _nav
 
 
 ## Wheel toward `desired`, and take the free half of the turn first.

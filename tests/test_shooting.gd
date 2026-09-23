@@ -138,6 +138,46 @@ func test_archers_on_the_march_do_not_shoot(t) -> void:
 	t.eq(s[1].ammo, int(Rules.KINDS[&"archer"]["ammo"]), "a bow needs a moment and both hands")
 
 
+# --- the arc --------------------------------------------------------------
+
+func test_a_bow_shoots_into_an_arc_in_front_and_turns_to_what_is_beside_it(t) -> void:
+	var bs = BattleState.new()
+	var bows = bs.add(1, &"archer", Vector2.ZERO, 0.0)
+	var beside = bs.add(2, &"spear", Vector2(0, 250), -PI / 2.0)
+	t.ok(not BattleState.in_arc(bows, beside.pos, bows.range_of()), "square off its flank is outside the arc")
+	bs.step()
+	t.eq(bows.ammo, int(Rules.KINDS[&"archer"]["ammo"]), "so the first chance to shoot is not taken")
+	_run(bs, 12.0)
+	t.ok(bows.ammo < int(Rules.KINDS[&"archer"]["ammo"]), "it turned to face it, then shot")
+	t.ok(absf(angle_difference(bows.facing, PI / 2.0)) < 0.3, "facing it (%.2f)" % bows.facing)
+
+
+func test_a_wider_line_covers_a_wider_arc(t) -> void:
+	var bs = BattleState.new()
+	var wide = bs.add(1, &"archer", Vector2.ZERO, 0.0)
+	wide.width = 24
+	var narrow = bs.add(1, &"archer", Vector2.ZERO, 0.0)
+	narrow.width = 6
+	var out_wide := Vector2(100, 140)
+	t.ok(BattleState.in_arc(wide, out_wide, wide.range_of()), "twenty-four files reach out wide")
+	t.ok(not BattleState.in_arc(narrow, out_wide, narrow.range_of()), "six do not")
+	t.ok(not BattleState.in_arc(wide, Vector2(-50, 0), wide.range_of()), "and nobody shoots behind")
+
+
+func test_a_hill_lengthens_a_bow(t) -> void:
+	for up in [true, false]:
+		var bs = BattleState.new()
+		if up:
+			bs.features = [[Rules.GROUND_HILL, 0.0, 0.0, 200.0]]
+		var bows = bs.add(1, &"archer", Vector2.ZERO, 0.0)
+		var mark = bs.add(2, &"spear", Vector2(bows.range_of() * 1.2, 0), PI)
+		_run(bs, 8.0)
+		if up:
+			t.ok(mark.strength < mark.max_strength, "from a hilltop it reaches a fifth further")
+		else:
+			t.eq(mark.strength, mark.max_strength, "on the flat, the same shot is out of range")
+
+
 # --- formation against arrows ---------------------------------------------
 
 func test_loose_order_blunts_arrows_and_a_square_invites_them(t) -> void:

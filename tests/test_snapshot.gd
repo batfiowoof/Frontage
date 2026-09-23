@@ -23,6 +23,8 @@ func _random_battle(n: int, seed_value: int):
 		r.target = Vector2(rng.randf_range(-2000, 2000), rng.randf_range(-2000, 2000))
 		r.target_facing = rng.randf_range(-PI, PI)
 		r.engaged_with = rng.randi_range(-1, n)
+		for k in rng.randi_range(0, 3):
+			r.path.append(Vector2(rng.randf_range(-1100, 1100), rng.randf_range(-1100, 1100)))
 	bs.tick = rng.randi_range(0, 100000)
 	return bs
 
@@ -81,6 +83,47 @@ func test_duplicate_ids_are_rejected(t) -> void:
 	var data = bytes_to_var(Snapshot.encode_battle(bs))
 	data[3][1][0] = data[3][0][0]               # second regiment claims the first one's id
 	t.eq(Snapshot.decode_battle(var_to_bytes(data)), null, "duplicate ids would silently drop a regiment")
+
+
+func test_a_path_goes_only_to_its_owner(t) -> void:
+	# Where a regiment is going is its own side's business: the recorder keeps every path,
+	# a player is sent his own, and an enemy's arrives empty.
+	var bs = BattleState.new()
+	var mine = bs.add(1, &"spear", Vector2(-100, 0), 0.0)
+	var theirs = bs.add(2, &"spear", Vector2(100, 0), PI)
+	mine.path = PackedVector2Array([Vector2(0, 200), Vector2(300, 200)])
+	theirs.path = PackedVector2Array([Vector2(-300, -50)])
+	var seen = Snapshot.decode_battle(Snapshot.encode_battle(bs, 1))
+	t.eq(seen.regiments[mine.id].path, mine.path, "his own, whole")
+	t.eq(seen.regiments[theirs.id].path, PackedVector2Array(), "the enemy's, empty")
+	var all = Snapshot.decode_battle(Snapshot.encode_battle(bs))
+	t.eq(all.regiments[theirs.id].path, theirs.path, "the recorder keeps every one")
+
+
+func test_a_path_off_the_field_is_pulled_onto_it_not_refused(t) -> void:
+	# A skirmisher stepping back at the edge can plan to a point just off the field. One
+	# such point used to be all it took to have the whole snapshot refused.
+	var bs = BattleState.new()
+	var r = bs.add(1, &"archer", Vector2(1150, 0), 0.0)
+	r.path = PackedVector2Array([Vector2(1300, 0)])
+	var back = Snapshot.decode_battle(Snapshot.encode_battle(bs))
+	t.ok(back != null)
+	if back != null:
+		t.eq(back.regiments[r.id].path[0], Vector2(Rules.BATTLE_HALF_EXTENT, 0))
+
+
+func test_a_hostile_path_is_refused(t) -> void:
+	var bs = _random_battle(1, 3)
+	var data = bytes_to_var(Snapshot.encode_battle(bs))
+	var last: int = Snapshot.REGIMENT_FIELDS.size() - 1
+	var long := PackedVector2Array()
+	long.resize(Rules.MAX_PATH_POINTS + 1)
+	data[3][0][last] = long
+	t.eq(Snapshot.decode_battle(var_to_bytes(data)), null, "too many points")
+	data[3][0][last] = PackedVector2Array([Vector2(NAN, 0)])
+	t.eq(Snapshot.decode_battle(var_to_bytes(data)), null, "not a number")
+	data[3][0][last] = PackedVector2Array([Vector2(1e9, 0)])
+	t.eq(Snapshot.decode_battle(var_to_bytes(data)), null, "off the field")
 
 
 func test_wrong_field_type_is_rejected(t) -> void:

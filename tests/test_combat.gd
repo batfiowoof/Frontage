@@ -558,23 +558,37 @@ func test_a_wood_slows_men_down_and_hides_them(t) -> void:
 	t.ok(bs.ground_at(Vector2.ZERO)["cover"] > 0.0, "and there is something to hide behind")
 
 
+## A hill behind the first regiment, so it stands well up the slope and the other at its
+## foot. Height is a difference between two men, so this is the whole comparison.
+func _one_up_a_hill() -> Array:
+	var s := _facing_each_other()
+	var apart: float = s[2].pos.x - s[1].pos.x
+	s[0].features = [[Rules.GROUND_HILL, -apart * 0.5 - 150.0, 0.0, 220.0]]
+	return s
+
+
 func test_high_ground_hits_harder(t) -> void:
 	var low := _facing_each_other()
-	var high = BattleState.new()
-	var uphill = high.add(1, &"spear", Vector2.ZERO, 0.0)
-	var downhill = high.add(2, &"spear", Vector2.ZERO, PI)
-	var apart := BattleState.contact_distance(uphill, downhill, Rules.CONTACT_GAP * 0.5)
-	_stand(uphill, Vector2(-apart * 0.5, 0))
-	_stand(downhill, Vector2(apart * 0.5, 0))
-	# Centred on the uphill regiment and too small to reach the other one, so only the
-	# first one stands on it -- which is the whole comparison.
-	high.features = [[Rules.GROUND_HILL, -apart * 0.5, 0.0, apart * 0.45]]
+	var high := _one_up_a_hill()
+	t.ok(high[0].slope(high[1].pos, high[2].pos) > 0.5, "one of them really is above the other")
+	_run(low[0], Rules.TICK_HZ * 20)
+	_run(high[0], Rules.TICK_HZ * 20)
+	t.ok(high[2].max_strength - high[2].strength > low[2].max_strength - low[2].strength,
+		"the man on the hill should be doing more damage (%d vs %d)" % [
+			high[2].max_strength - high[2].strength, low[2].max_strength - low[2].strength])
 
-	_run(low[0], 20)
-	for i in Rules.TICK_HZ * 20:
-		high.step()
-	t.ok(downhill.max_strength - downhill.strength > low[2].max_strength - low[2].strength,
-		"the man on the hill should be doing more damage")
+
+func test_attacking_uphill_is_harder(t) -> void:
+	# The same number read the other way: easier to hold is harder to take.
+	var low := _facing_each_other()
+	var high := _one_up_a_hill()
+	_run(low[0], Rules.TICK_HZ * 20)
+	_run(high[0], Rules.TICK_HZ * 20)
+	var held: int = high[1].max_strength - high[1].strength
+	var flat: int = low[1].max_strength - low[1].strength
+	t.ok(held < flat, "the men below should be killing fewer (%d vs %d on the flat)" % [held, flat])
+	print("  [feel] 20s up a hill: the high side loses %d, the low side %d; on the flat %d each" % [
+		held, high[2].max_strength - high[2].strength, flat])
 
 
 func test_the_ground_is_the_same_every_time_for_the_same_meeting(t) -> void:
@@ -594,10 +608,17 @@ func test_wooded_country_gives_a_woodier_field(t) -> void:
 	wood.lay_ground(1, 7)                     # forest
 	var plain = BattleState.new()
 	plain.lay_ground(0, 7)                    # plains
-	t.ok(wood.features.size() > plain.features.size(),
+	t.ok(_count(wood, Rules.GROUND_WOOD) > _count(plain, Rules.GROUND_WOOD),
 		"a battle in the woods should be fought among more of them")
-	for f: Array in wood.features:
-		t.eq(int(f[0]), Rules.GROUND_WOOD)
+	t.eq(_count(wood, Rules.GROUND_HILL), 0, "and among trees, not hills")
+
+
+func _count(bs, kind: int) -> int:
+	var n := 0
+	for f: Array in bs.features:
+		if int(f[0]) == kind:
+			n += 1
+	return n
 
 
 # --- exhaustion reaches the rest of the model -------------------------------

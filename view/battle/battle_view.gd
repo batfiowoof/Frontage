@@ -34,6 +34,8 @@ const FIELD_EDGE_W := 3.0
 ## The wall, in WORLD units -- unlike the field edge and the banner, because a wall is a
 ## real thing standing on the ground with a real thickness and men stand against it.
 const WALL_W := 14.0
+const WATER := Color(0.2, 0.34, 0.44, 0.92)
+const SHORE := Color(0.36, 0.32, 0.22, 0.7)
 const EDGE_MARGIN := 24.0
 const EDGE_SPEED := 900.0
 const KEY_SPEED := 900.0
@@ -51,6 +53,7 @@ var _drag_select_from := Vector2.INF
 var _order_from := Vector2.INF
 var _panning := false
 var _groups := {}                        # slot -> PackedInt32Array, view-side only
+var _showing_paths := false              # Space is held
 
 
 func _ready() -> void:
@@ -221,8 +224,15 @@ func _pose_of(a, b, alpha: float) -> Dictionary:
 	if a == null:
 		return out
 	var fights := _engagements(a)
+	# The battle fog, on the one machine that is never sent a snapshot: the host holds the
+	# real field, so without this its window would show everything a joined client cannot.
+	# A client does not re-filter -- its mirror already came filtered, and `reload`, which
+	# the rule reads, is not on the wire. Everything drawn and clicked comes off the pose.
+	var fogged: bool = Net.is_server() and a == Net.battle
 	for id in a.sorted_ids():
 		var r = a.regiments[id]
+		if fogged and not a.visible_to(Net.my_id(), r):
+			continue
 		var pos: Vector2 = r.pos
 		var facing: float = r.facing
 		if b != null and b.regiments.has(id):
@@ -233,13 +243,25 @@ func _pose_of(a, b, alpha: float) -> Dictionary:
 			# through ninety degrees, which is the exact thing it exists to avoid.
 			facing = n.facing if absf(angle_difference(r.facing, n.facing)) > ABOUT_FACE \
 				else lerp_angle(r.facing, n.facing, alpha)
+		# Going over a bridge, it goes over in a column: the men close up into the files
+		# the planks take, pointed at the far bank, and open out again once over. The sim
+		# fights at that frontage too (`_accumulate_strike`), so this is not only a look.
+		var width: int = r.width
+		var column = a.crossing(r)
+		if column != null:
+			facing = float(column)
+			width = mini(width, Rules.BRIDGE_FILES)
 		out[id] = {
 			"pos": pos, "facing": facing, "owner": r.owner_id, "kind": r.kind,
 			"strength": r.strength, "max_strength": r.max_strength,
-			"morale": r.morale, "stamina": r.stamina, "width": r.width, "state": r.state,
+			"morale": r.morale, "stamina": r.stamina, "width": width, "state": r.state,
 			"formation": r.formation, "reforming": r.reforming, "spacing": r.spacing(),
 			"ammo": r.ammo, "focus": r.focus, "engaged_with": r.engaged_with,
 			"stance": r.stance,
+			"crossing": column != null,        # bodies: this re-dress is quick, not a re-form
+			# Its plan, for the arrow. Only its owner is ever sent one, and it changes about
+			# once a second, so the older frame's is the one drawn.
+			"path": r.path,
 			"hits": fights[id]["sides"] if fights.has(id) else [],
 			"threats": fights[id]["threats"] if fights.has(id) else PackedVector2Array(),
 			"shapes": fights[id]["shapes"] if fights.has(id) else PackedVector3Array(),
@@ -327,10 +349,36 @@ static func targets_in_reach(state, shooter_id: int) -> Dictionary:
 		var e = state.regiments[id]
 		if not e.is_alive() or e.owner_id == shooter.owner_id:
 			continue
-		if shooter.pos.distance_to(e.pos) > shooter.range_of():
+		# No fog test here: the tints only reach men that are drawn, and the pose already
+		# left out whoever cannot be seen.
+		if not BattleState.in_arc(shooter, e.pos, state.reach_of(shooter, e.pos)):
 			continue
 		out[id] = BattleState.line_is_clear(shooter, e, everyone)
 	return out
+
+
+## The arc a line can shoot into, in its own frame (+x ahead): a fan off each end of the
+## front rank, rounded off at `reach` from the nearest point of the line. The same shape
+## `BattleState.in_arc` tests, drawn.
+static func reach_outline(half_front: float, reach: float, spread := Rules.ARC_SPREAD) -> PackedVector2Array:
+	var out := PackedVector2Array([Vector2(0.0, -half_front)])
+	for k in 13:
+		out.append(Vector2(0.0, -half_front) + Vector2.from_angle(lerpf(-spread, 0.0, k / 12.0)) * reach)
+	for k in 13:
+		out.append(Vector2(0.0, half_front) + Vector2.from_angle(lerpf(0.0, spread, k / 12.0)) * reach)
+	out.append(Vector2(0.0, half_front))
+	out.append(out[0])
+	return out
+
+
+## Draw that arc at a spot, turned to a facing, lengthened by the ground it stands on.
+func _draw_arc_of_fire(at: Vector2, facing: float, half_front: float, bow: float, colour: Color) -> void:
+	if Net.battle != null:
+		bow *= 1.0 + Rules.HEIGHT_RANGE * clampf(Net.battle.height_at(at) / Rules.HEIGHT_SPAN, 0.0, 1.0)
+	var shape := reach_outline(half_front, bow)
+	for i in shape.size():
+		shape[i] = at + shape[i].rotated(facing)
+	draw_polyline(shape, colour, 1.5 / _camera.zoom.x, true)
 
 
 ## How far a regiment of this kind can shoot, or 0 if it has nothing to shoot with.
@@ -350,7 +398,7 @@ func _draw_reach(pose: Dictionary) -> void:
 		# Grey once the quiver is empty: the reach is still true and no longer useful.
 		var spent: bool = int(p.get("ammo", 0)) <= 0
 		var ring := Color(0.55, 0.55, 0.55, 0.3) if spent else Color(Colors.GOLD, 0.5)
-		draw_arc(p["pos"], reach, 0.0, TAU, 72, ring, 1.5 / _camera.zoom.x)
+		_draw_arc_of_fire(p["pos"], float(p["facing"]), Bodies.extent_of(p).y, reach, ring)
 		# Which of them it can actually hit is shown on the men themselves: see _tints.
 
 
@@ -360,6 +408,7 @@ func _draw() -> void:
 	_draw_features()
 	_draw_walls()
 	_draw_reach(pose)
+	_draw_paths(pose)
 	var zoom := _camera.zoom.x
 	# Who each selected regiment has been told to deal with. An attack order that cannot
 	# be seen is an attack order you cannot tell you gave: the target's men are tinted,
@@ -403,6 +452,12 @@ func _draw_field() -> void:
 	var field := Rect2(Vector2(-e, -e), Vector2(e, e) * 2.0)
 	draw_rect(field, Color(0.1, 0.08, 0.05, 0.9), false, (FIELD_EDGE_W + 2.0) / _camera.zoom.x)
 	draw_rect(field, Colors.TRIM, false, FIELD_EDGE_W / _camera.zoom.x)
+	# While arranging the line: where yours may go. The same rectangle the sim clamps to.
+	var bs = Net.battle
+	if bs != null and bs.phase == BattleState.Phase.DEPLOY and not bs.owned_by(Net.my_id()).is_empty():
+		var zone: Rect2 = bs.deploy_zone(Net.my_id())
+		draw_rect(zone, Color(Colors.SELECT, 0.06))
+		draw_rect(zone, Color(Colors.SELECT, 0.6), false, FIELD_EDGE_W * 0.6 / _camera.zoom.x)
 
 
 ## Woods, hills and marsh. They have been on the wire and deciding fights since the ground
@@ -448,6 +503,29 @@ func _draw_features() -> void:
 				for n in 26:
 					var reed := at + Vector2.from_angle(rng.randf() * TAU) * sqrt(rng.randf()) * r * 0.92
 					draw_line(reed, reed + Vector2(rng.randf_range(-2.0, 2.0), -9.0), Color(0.5, 0.52, 0.3, 0.8), 1.5)
+			Rules.GROUND_LAKE:
+				draw_circle(at, r + 6.0, SHORE)
+				draw_circle(at, r, WATER)
+				draw_circle(at + Vector2(-r, -r) * 0.2, r * 0.55, Color(1, 1, 1, 0.05))
+			Rules.GROUND_RIVER:
+				# One row, drawn by walking its centreline down the field.
+				var e := Rules.BATTLE_HALF_EXTENT
+				var line := PackedVector2Array()
+				var y := -e
+				while y <= e:
+					line.append(Vector2(BattleState.river_x(f, y), y))
+					y += 24.0
+				draw_polyline(line, SHORE, r * 2.0 + 12.0, true)
+				draw_polyline(line, WATER, r * 2.0, true)
+			Rules.GROUND_BRIDGE:
+				# Planks straight across -- exactly the strip `bridge_at` lets men stand on.
+				var deck := Rect2(at - Vector2(Rules.BRIDGE_HALF_LENGTH, r), Vector2(Rules.BRIDGE_HALF_LENGTH, r) * 2.0)
+				draw_rect(deck.grow(3.0), Color(0.18, 0.12, 0.07))
+				draw_rect(deck, Color(0.55, 0.4, 0.24))
+				var plank := deck.position.x
+				while plank < deck.end.x:
+					draw_line(Vector2(plank, deck.position.y), Vector2(plank, deck.end.y), Color(0.3, 0.2, 0.11), 1.5)
+					plank += 8.0
 
 
 ## The town's walls: a stone line with merlons along it and a tower at each end. A
@@ -533,24 +611,65 @@ func _draw_banner(p: Dictionary, centre: Vector2, is_selected: bool) -> void:
 		draw_texture_rect(icon, Rect2(mid - Vector2(s, s) * 0.5, Vector2(s, s)), false, Color(0.08, 0.07, 0.06, 0.9))
 
 
+## A filled arrowhead: its point at `tip`, pointing along `dir`, `length` long and
+## `half_wide` either side of its axis.
+func _arrowhead(tip: Vector2, dir: Vector2, length: float, half_wide: float, colour: Color) -> void:
+	var across := Vector2(-dir.y, dir.x)
+	var base := tip - dir * length
+	draw_colored_polygon(PackedVector2Array([tip, base - across * half_wide, base + across * half_wide]), colour)
+
+
+## Which regiments' paths to draw: a selected one of ours that is marching and has a plan,
+## and, while Space is held, every one of ours that is. Never an enemy's -- the wire never
+## sends one, and this does not rely on that. Static and pose-driven, so it tests headless
+## the way `plan_order` does.
+static func paths_to_draw(pose: Dictionary, chosen: PackedInt32Array, me: int, all_mine: bool) -> Array:
+	var out := []
+	for id in pose:
+		var p: Dictionary = pose[id]
+		if int(p["owner"]) != me or int(p["state"]) != Regiment.State.MOVING:
+			continue
+		if (p.get("path", PackedVector2Array()) as PackedVector2Array).is_empty():
+			continue
+		if all_mine or id in chosen:
+			out.append(id)
+	out.sort()
+	return out
+
+
+## The route each of those is walking: from where its men are, through every waypoint, to
+## an arrowhead where it will stop. Bright for the selected, fainter for the rest. Constant
+## thickness on SCREEN, like the field edge, so it reads at every zoom.
+func _draw_paths(pose: Dictionary) -> void:
+	var zoom := _camera.zoom.x
+	for id in paths_to_draw(pose, selected, Net.my_id(), _showing_paths):
+		var p: Dictionary = pose[id]
+		var colour := Color(Colors.ORDER, 0.9 if id in selected else 0.45)
+		var line := PackedVector2Array([_men.centre_of(id, p["pos"])])
+		line.append_array(p["path"])
+		draw_polyline(line, Color(0, 0, 0, colour.a * 0.5), 5.0 / zoom, true)
+		draw_polyline(line, colour, 2.5 / zoom, true)
+		var tip: Vector2 = line[line.size() - 1]
+		var dir: Vector2 = (tip - line[line.size() - 2])
+		if dir.length() > 0.001:
+			_arrowhead(tip, dir.normalized(), 16.0 / zoom, 8.0 / zoom, colour)
+
+
 func _draw_ghost(row: Dictionary) -> void:
 	var at: Vector2 = row["target"]
 	var ahead := Vector2.from_angle(row["face"])
-	var across := Vector2(-ahead.y, ahead.x)
 	var half_d: float = row["half_depth"]
 	var zoom := _camera.zoom.x
 
 	# The men themselves are the ghost (_fill_ghosts). This is only where they come from,
 	# and an arrowhead ahead of the front rank so which way they will face is not a guess.
-	var tip := at + ahead * (half_d + 20.0)
-	draw_colored_polygon(PackedVector2Array([tip, at + ahead * (half_d + 4.0) - across * 9.0,
-		at + ahead * (half_d + 4.0) + across * 9.0]), Colors.ORDER)
+	_arrowhead(at + ahead * (half_d + 20.0), ahead, 16.0, 9.0, Colors.ORDER)
 	draw_dashed_line(row["from"], at, Color(Colors.ORDER, 0.4), 1.5 / zoom, 8.0 / zoom)
 
 	# Where an archer would reach from there, which is most of why you move one.
 	var reach: float = row.get("reach", 0.0)
 	if reach > 0.0:
-		draw_arc(at, reach, 0.0, TAU, 72, Color(Colors.GOLD, 0.35), 1.5 / zoom)
+		_draw_arc_of_fire(at, float(row["face"]), float(row["half_width"]), reach, Color(Colors.GOLD, 0.35))
 
 
 # --- camera ---------------------------------------------------------------
@@ -590,6 +709,18 @@ func _move_camera(delta: float) -> void:
 
 
 # --- input ----------------------------------------------------------------
+
+## Space shows every one of your marching regiments' paths while it is held.
+##
+## Caught here, BEFORE the GUI, and swallowed: a Godot button with keyboard focus is
+## pressed by `ui_accept`, which includes Space, and the HUD's buttons take focus when
+## clicked. Without this, holding Space to look at the paths after pressing "Give up"'s
+## neighbour -- or "Give up" -- presses it again.
+func _input(event: InputEvent) -> void:
+	if event is InputEventKey and event.keycode == KEY_SPACE:
+		_showing_paths = event.pressed
+		get_viewport().set_input_as_handled()
+
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton:

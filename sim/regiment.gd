@@ -47,6 +47,18 @@ var xp_pool := 0.0
 ## only ever draws interpolated positions. Nothing on the wire has to carry it.
 var pace := 0.0
 
+## Where it is walking to get to `target`, the target that was planned for, whether the
+## plan reaches it, and how long until the plan is checked again. Server-side, like `pace`:
+## not on the wire, empty in any snapshot, and a replay rebuilds it from the orders --
+## `Pathing` is deterministic, so it rebuilds the same one.
+var path := PackedVector2Array()
+var path_to := Vector2.INF
+var path_whole := false
+var replan := 0.0
+## Stopped on the march because a friend is crossing in front of it. The planner treats a
+## waiting regiment as standing, so whoever it is waiting for plans round it. Server-side.
+var waiting := false
+
 ## The frontage it is still actually FIGHTING at, and how far through the re-dress it is.
 ## Server-side like `pace`: they start settled and a replay rebuilds them from the orders.
 ##
@@ -289,6 +301,7 @@ func order_move(to: Vector2, face: float) -> bool:
 	target_facing = face
 	state = State.MOVING
 	engaged_with = -1
+	path = PackedVector2Array()         # a new order is a new plan
 	return true
 
 

@@ -16,7 +16,7 @@ const BattleState := preload("res://sim/battle_state.gd")
 const CampaignState := preload("res://sim/campaign_state.gd")
 const Rules := preload("res://sim/rules.gd")
 
-const VERSION := 11
+const VERSION := 12
 
 ## Field order on the wire.  Add a field here and the round-trip test covers it.
 const REGIMENT_FIELDS := [
@@ -52,19 +52,55 @@ const REGIMENT_FIELDS := [
 	# replay rebuilds the fight from the opening snapshot, so anything the sim reads to
 	# decide the outcome has to be in it.
 	["xp", TYPE_INT],
+	# The way it is walking, so a player can see it -- the arrow on a selected regiment,
+	# and all of yours while Space is held. Only ever sent to its OWNER (see encode_battle):
+	# an enemy's path would say where he is going.
+	["path", TYPE_PACKED_VECTOR2_ARRAY],
 ]
 
 
-static func encode_battle(bs) -> PackedByteArray:
+## `for_owner` of 0 is the whole field -- what a replay records and a test asks for. With a
+## real owner the rows it cannot see are left out entirely, so a modified client has
+## nothing to draw: the battle fog is on the wire, not a curtain in the view.
+static func encode_battle(bs, for_owner := 0) -> PackedByteArray:
 	var rows := []
 	for id in bs.sorted_ids():
 		var r = bs.regiments[id]
+		if not bs.visible_to(for_owner, r):
+			continue
 		var row := []
 		for field in REGIMENT_FIELDS:
 			row.append(r.get(field[0]))
+		# Whole for the recorder, so a replay reproduces itself byte for byte, and for the
+		# regiment's own side. Nobody else learns where it is going.
+		if for_owner != 0 and r.owner_id != for_owner:
+			row[row.size() - 1] = PackedVector2Array()
+		else:
+			row[row.size() - 1] = _wire_path(r.path)
 		rows.append(row)
 	return var_to_bytes([VERSION, bs.tick, bs._next_id, rows, bs.features, bs.techs,
 		bs.renown, bs.phase, bs.ready, bs.walls])
+
+
+## A path onto the wire: on the field and no longer than decode will take. A skirmisher
+## stepping back near the edge can plan to a point just off it, and one such point would
+## otherwise get the whole snapshot refused.
+static func _wire_path(path: PackedVector2Array) -> PackedVector2Array:
+	var e := Rules.BATTLE_HALF_EXTENT
+	var out := path.slice(0, Rules.MAX_PATH_POINTS)
+	for i in out.size():
+		out[i] = out[i].clamp(Vector2(-e, -e), Vector2(e, e))
+	return out
+
+
+## A path off the wire: a few points, every one of them finite and on the field.
+static func _sane_path(path: PackedVector2Array) -> bool:
+	if path.size() > Rules.MAX_PATH_POINTS:
+		return false
+	for p in path:
+		if not p.is_finite() or absf(p.x) > Rules.BATTLE_HALF_EXTENT or absf(p.y) > Rules.BATTLE_HALF_EXTENT:
+			return false
+	return true
 
 
 ## Returns a BattleState, or null if the bytes are not a snapshot we understand.
@@ -95,6 +131,8 @@ static func decode_battle(bytes: PackedByteArray):
 			if field[0] == "formation" and not Rules.FORMATIONS.has(row[i]):
 				return null
 			if field[0] == "width" and (row[i] < 1 or row[i] > Rules.MAX_WIDTH):
+				return null
+			if field[0] == "path" and not _sane_path(row[i]):
 				return null
 			r.set(field[0], row[i])
 		if bs.regiments.has(r.id):
