@@ -35,6 +35,9 @@ var seen := {}                     # owner -> PackedByteArray
 ## for the reason `settlements` is one: a row of known length and known types is something
 ## `decode_campaign` can actually check. WAR is the default for any pair with no row.
 var relations := []
+## Which people each seat is playing: owner -> a key of Rules.CIVS. Missing means the
+## generic roster, which is what barbarians and every hand-built test campaign get.
+var civs := {}
 var _next_army := 1
 
 
@@ -225,6 +228,37 @@ static func unrest_of(s: Dictionary) -> int:
 	return int(s.get("unrest", 0))
 
 
+func civ_of(owner: int) -> StringName:
+	return civs.get(owner, &"")
+
+
+## Every kind this owner's people can ever raise: the shared ones and their own, less
+## whatever their own replace. The one place a roster is decided -- recruiting, the AI and
+## the HUD all come through here.
+func roster_of(owner: int) -> Array:
+	var civ := civ_of(owner)
+	var gone := []
+	for kind: StringName in Rules.KINDS:
+		if Rules.KINDS[kind].get("civ", &"") == civ and civ != &"":
+			gone.append(Rules.KINDS[kind].get("replaces", &""))
+	var out := []
+	for kind: StringName in Rules.KINDS:
+		var own: StringName = Rules.KINDS[kind].get("civ", &"")
+		if (own == &"" or own == civ) and not gone.has(kind):
+			out.append(kind)
+	return out
+
+
+## This owner's version of a generic kind: a Gaul's spearmen are a warband.
+func civ_kind(owner: int, kind: StringName) -> StringName:
+	var civ := civ_of(owner)
+	for k: StringName in Rules.KINDS:
+		var spec: Dictionary = Rules.KINDS[k]
+		if civ != &"" and spec.get("civ", &"") == civ and spec.get("replaces", &"") == kind and spec.get("tech", &"") == &"":
+			return k
+	return kind
+
+
 ## Everything this player has learned.
 func techs_of(owner: int) -> Array:
 	return known.get(owner, [])
@@ -273,6 +307,9 @@ func cost_of(owner: int, structure: StringName) -> int:
 func can_learn(owner: int, name: StringName) -> bool:
 	if not Rules.TECHS.has(name) or techs_of(owner).has(name):
 		return false
+	var civ: StringName = Rules.TECHS[name].get("civ", &"")
+	if civ != &"" and civ != civ_of(owner):
+		return false                       # another people's tech
 	for needed: StringName in Rules.TECHS[name]["needs"]:
 		if not techs_of(owner).has(needed):
 			return false
@@ -612,19 +649,29 @@ func unlocked_at(tile: int) -> Array:
 		var s = working_settlement(near)
 		if s == null or s["tile"] != tile:
 			continue
+		out.append(name)                   # the structure itself, for `requires`
 		out.append_array(Rules.STRUCTURES[name]["unlocks"])
 	return out
 
 
 func recruitable_at(tile: int) -> Array:
+	var s = settlement_at(tile)
+	var owner: int = s["owner"] if s != null else 0
 	var unlocked := unlocked_at(tile)
 	var out := []
-	for kind: StringName in Rules.KINDS:
-		var needs: StringName = Rules.KINDS[kind]["requires"]
-		if needs == &"" or unlocked.has(kind):
-			out.append(kind)
+	for kind: StringName in roster_of(owner):
+		var spec: Dictionary = Rules.KINDS[kind]
+		# The structure it `requires`, standing on land this town works. It used to be read
+		# off the structure's `unlocks` list alone, which named no ram -- so the ram that
+		# "requires a barracks" could not be raised anywhere at all.
+		var needs: StringName = spec["requires"]
+		if needs != &"" and not unlocked.has(needs) and not unlocked.has(kind):
+			continue
+		var tech: StringName = spec.get("tech", &"")
+		if tech != &"" and not techs_of(owner).has(tech):
+			continue
+		out.append(kind)
 	return out
-
 
 
 func upkeep_of(owner: int) -> int:
@@ -757,6 +804,7 @@ func remap_owners(mapping: Dictionary) -> void:
 	food = _remapped(food, mapping)
 	research = _remapped(research, mapping)
 	known = _remapped(known, mapping)
+	civs = _remapped(civs, mapping)
 	ready = _remapped(ready, mapping)
 	seen = _remapped(seen, mapping)    # miss this and a player loads somebody else's map
 	# Both ends of every row, and re-sorted afterwards: the pair is stored low-id-first
@@ -1208,8 +1256,10 @@ func _reinforce(a: Dictionary) -> void:
 
 ## Deterministic from `map_seed`. Clients receive the map in the snapshot rather than
 ## regenerating it, but a reproducible map is worth a great deal when debugging.
-static func generate(owner_ids: Array, map_seed: int):
+static func generate(owner_ids: Array, map_seed: int, picks := {}):
 	var cs = new()
+	for n in owner_ids.size():
+		cs.civs[owner_ids[n]] = picks.get(owner_ids[n], Rules.CIV_ORDER[n % Rules.CIV_ORDER.size()])
 	var rng := RandomNumberGenerator.new()
 	rng.seed = map_seed
 
@@ -1274,7 +1324,9 @@ static func generate(owner_ids: Array, map_seed: int):
 	for n in owner_ids.size():
 		cs.research[owner_ids[n]] = Rules.START_RESEARCH
 		cs.known[owner_ids[n]] = []
-		cs.add_army(owner_ids[n], towns[n]["tile"], [&"spear", &"spear", &"archer"])
+		var o: int = owner_ids[n]
+		cs.add_army(o, towns[n]["tile"], [cs.civ_kind(o, &"spear"), cs.civ_kind(o, &"spear"),
+			cs.civ_kind(o, &"archer")])
 	cs.observe_all()                   # everybody can see the ground they are standing on
 
 	# Every capital starts with a barracks standing on a hex beside it: a real place,

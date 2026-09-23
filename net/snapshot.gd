@@ -222,7 +222,7 @@ static func encode_campaign(cs, for_owner := 0) -> PackedByteArray:
 	return var_to_bytes([
 		VERSION, cs.turn, cs._next_army, cs.terrain,
 		settlements, armies, cs.gold, cs.food, cs.ready, structures,
-		cs.research, cs.known, memory, cs.relations,
+		cs.research, cs.known, memory, cs.relations, cs.civs,
 	])
 
 
@@ -230,7 +230,7 @@ static func decode_campaign(bytes: PackedByteArray):
 	if bytes.size() < 4:
 		return null
 	var d = bytes_to_var(bytes)
-	if typeof(d) != TYPE_ARRAY or d.size() != 14:
+	if typeof(d) != TYPE_ARRAY or d.size() != 15:
 		return null
 	if typeof(d[0]) != TYPE_INT or d[0] != VERSION:
 		return null
@@ -354,6 +354,14 @@ static func decode_campaign(bytes: PackedByteArray):
 		if row[2] < 0 or row[2] > CampaignState.Relation.PEACE:
 			return null
 	cs.relations = d[13]
+	# Who is playing as whom. Checked by value and not merely typed: a civilization decides
+	# which kinds are legal to raise, so a peer that could name one could name its roster.
+	if typeof(d[14]) != TYPE_DICTIONARY:
+		return null
+	for owner in d[14]:
+		if typeof(owner) != TYPE_INT or typeof(d[14][owner]) != TYPE_STRING_NAME or not Rules.CIVS.has(d[14][owner]):
+			return null
+	cs.civs = d[14]
 	cs.structures = d[9]
 	cs.research = pool
 	cs.known = d[11]

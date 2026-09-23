@@ -947,6 +947,41 @@ armoured keeps 92 and leaves them 76. Fifty seconds, not seventy: past about six
 sides have broken and run, and two regiments that have stopped taking casualties measure
 nothing.
 
+## Civilizations
+
+Four peoples -- Rome, Gauls, Parthia, Carthage -- **picked in the lobby**, dealt by seat
+(`Rules.CIV_ORDER`) to anybody who does not pick. A civ is nothing but a filter on two
+tables that already existed:
+
+	KINDS   `civ` who may raise it, `replaces` the generic kind they give up for it,
+	        `tech` a tech the owner must know first
+	TECHS   `civ` who may learn it
+
+Each has one unit from turn 1 that replaces a generic one (legionary, warband, horse
+archer, numidian) and one behind its own battle tech (praetorian, gaesatae, cataphract,
+war elephant), plus one tech in each tree nobody else can see.
+
+**The battle wire did not change.** A unique unit is a kind, and the kind was already on
+it; a unique tech is a tech, and the techs header was already on it. So replays, the
+battle snapshot and 203 B/regiment are untouched. Only the campaign snapshot carries
+`civs`, range-checked on decode for the reason population is: a civ decides which kinds are
+legal, so a peer that could name one could name its roster.
+
+Kinds finally differ in the fight by more than headcount, width, speed and range: optional
+`attack`, `armour` and `resolve` on a KINDS row, read with `.get()` defaults so the old rows
+are untouched. Measured in `tests/test_civs.gd`: over 30s against swords, a sword loses 31
+and kills 31, a legion loses 25 and kills 39.
+
+- **`roster_of(owner)` is the one place a roster is decided.** `recruitable_at`, the HUD, the
+  AI and Jev all come through it or through `can_learn`, so none of them knows civs exist.
+- **The pick is an order**, `PICK_CIV`, through `_receive_order` like any other (constraint
+  #4). A seat speaks for itself; the host also speaks for its AIs, which have nobody else.
+- **Barbarians have no civ**, and `civ_of` returning `&""` gives them the generic roster.
+
+`recruitable_at` used to read a structure's `unlocks` list alone, which named no ram -- so the
+ram that "requires a barracks" could not be raised anywhere. It now checks `requires` against
+the structures themselves, which is also what lets a barracks raise a people's own horse.
+
 ## Barbarians
 
 The early game had no pressure in it: the only thing that could come for you was the other
@@ -1683,5 +1718,5 @@ Marked in code with `# ponytail:` comments naming the ceiling and the upgrade pa
 Currently deferred: delta encoding, client-side prediction, reconnect/host migration,
 NAT punch-through (LAN + direct IP only), an AI that respects fog, a remembered stale
 owner for towns behind the fog, per-town food, an AI that lays road ROUTES, a walled
-ENCLOSURE rather than one wall line, allied armies reinforcing each other, and alliances
-beyond a plain peace.
+ENCLOSURE rather than one wall line, allied armies reinforcing each other, alliances
+beyond a plain peace, and an AI that values a civ tech for the unit it unlocks.

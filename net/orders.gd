@@ -20,7 +20,7 @@ const TILE_COUNT := Rules.MAP_W * Rules.MAP_H
 ## them silently reinterprets every recording ever made.
 enum Type { BATTLE_MOVE, ARMY_MOVE, RECRUIT, READY, BUILD, SET_FORMATION, FOCUS, RAZE,
 	RESEARCH, MERGE, SPLIT, FORFEIT, STANCE, FOUND, ARMY_STANCE, DEPLOYED, PROPOSE,
-	ANSWER }
+	ANSWER, PICK_CIV }
 
 
 ## The orders that change a BATTLE, and therefore the orders a recording has to keep.
@@ -112,6 +112,13 @@ static func forfeit(confirm: bool) -> PackedByteArray:
 	return var_to_bytes([VERSION, Type.FORFEIT, confirm])
 
 
+## Play as this people. A lobby order, refused once the campaign is dealt. It names a seat
+## only so the host can choose for its AIs; whether the sender may speak for that seat is
+## the server's business, like everything else about ownership.
+static func pick_civ(seat: int, civ: StringName) -> PackedByteArray:
+	return var_to_bytes([VERSION, Type.PICK_CIV, seat, civ])
+
+
 static func research(tech: StringName) -> PackedByteArray:
 	return var_to_bytes([VERSION, Type.RESEARCH, tech])
 
@@ -188,6 +195,8 @@ static func decode(bytes: PackedByteArray) -> Dictionary:
 			return _decode_propose(d)
 		Type.ANSWER:
 			return _decode_answer(d)
+		Type.PICK_CIV:
+			return _decode_pick_civ(d)
 	return {}
 
 
@@ -361,6 +370,14 @@ static func _decode_research(d: Array) -> Dictionary:
 	if not Rules.TECHS.has(d[2]):
 		return {}
 	return {"type": Type.RESEARCH, "tech": d[2]}
+
+
+static func _decode_pick_civ(d: Array) -> Dictionary:
+	if d.size() != 4 or typeof(d[2]) != TYPE_INT or typeof(d[3]) != TYPE_STRING_NAME:
+		return {}
+	if not Rules.CIVS.has(d[3]):
+		return {}
+	return {"type": Type.PICK_CIV, "seat": d[2], "civ": d[3]}
 
 
 static func _is_tile(i: int) -> bool:

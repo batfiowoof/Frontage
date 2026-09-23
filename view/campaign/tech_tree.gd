@@ -16,6 +16,7 @@ const STEP := Vector2(200, 58)
 
 var _buttons := {}                       # tech -> Button
 var _board: Control
+var _built_for = null                    # the civ the board was laid out for
 
 
 func _init() -> void:
@@ -46,6 +47,14 @@ func _init() -> void:
 	_board.draw.connect(_draw_links)
 	rows.add_child(_board)
 
+
+## Laid out per people, because each has techs nobody else can see: a hole in the tree
+## where another civ's row would be is worse than a tree that is simply shaped differently.
+func _build(civ: StringName) -> void:
+	_built_for = civ
+	for c in _board.get_children():
+		c.queue_free()
+	_buttons.clear()
 	var extent := Vector2.ZERO
 	var top := 0.0
 	for tree: String in ["economy", "battle"]:
@@ -56,6 +65,9 @@ func _init() -> void:
 		var in_column := {}
 		for name: StringName in Rules.TECHS:
 			if Rules.TECHS[name]["tree"] != tree:
+				continue
+			var own: StringName = Rules.TECHS[name].get("civ", &"")
+			if own != &"" and own != civ:
 				continue
 			var col := _depth(name)
 			var row: int = in_column.get(col, 0)
@@ -68,6 +80,8 @@ func _init() -> void:
 			b.size = NODE
 			b.alignment = HORIZONTAL_ALIGNMENT_LEFT
 			b.pressed.connect(func() -> void: Net.order_research(name))
+			if own != &"":
+				b.add_theme_color_override("font_color", Colors.GOLD)
 			_board.add_child(b)
 			_buttons[name] = b
 			extent = extent.max(b.position + NODE)
@@ -85,11 +99,19 @@ static func _depth(name: StringName) -> int:
 func refresh(cs, me: int) -> void:
 	if not visible or cs == null:
 		return
+	if _built_for != cs.civ_of(me):
+		_build(cs.civ_of(me))
 	var known: Array = cs.techs_of(me)
 	for name: StringName in _buttons:
 		var b: Button = _buttons[name]
 		var effect: Dictionary = Rules.TECHS[name]["effect"]
 		var what := ", ".join(effect.keys().map(func(k): return "%s ×%s" % [k, effect[k]]))
+		var own: StringName = Rules.TECHS[name].get("civ", &"")
+		if own != &"":
+			what = "%s only\n%s" % [Rules.CIVS[own]["name"], what]
+		for kind: StringName in Rules.KINDS:
+			if Rules.KINDS[kind].get("tech", &"") == name:
+				what += "\nraises %s" % String(kind).capitalize()
 		if known.has(name):
 			b.disabled = true
 			b.modulate = Colors.GOLD

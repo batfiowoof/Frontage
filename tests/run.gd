@@ -37,6 +37,7 @@ const TESTS := [
 	"res://tests/test_encircle.gd",
 	"res://tests/test_jev.gd",
 	"res://tests/test_shapes.gd",
+	"res://tests/test_civs.gd",
 ]
 
 

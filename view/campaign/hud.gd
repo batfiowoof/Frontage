@@ -207,7 +207,9 @@ func refresh() -> void:
 	if cs == null:
 		return
 	var me: int = Net.my_id()
-	_turn.text = "Turn %d / %d" % [cs.turn, Rules.TURN_LIMIT]
+	var civ: StringName = cs.civ_of(me)
+	_turn.text = "%sTurn %d / %d" % [Rules.CIVS[civ]["name"] + "  ·  " if civ != &"" else "",
+		cs.turn, Rules.TURN_LIMIT]
 	var income: Dictionary = cs.income_of(me)
 	var upkeep: int = cs.upkeep_of(me)
 	_stat("gold", int(cs.gold.get(me, 0)), int(income["gold"]))
@@ -447,13 +449,16 @@ func _settlement_panel(body: VBoxContainer, cs, me: int, s: Dictionary) -> void:
 	var recruits := HBoxContainer.new()
 	recruits.add_theme_constant_override("separation", 3)
 	raising.add_child(recruits)
-	for kind: StringName in Rules.KINDS:
+	for kind: StringName in cs.roster_of(me):
 		var spec: Dictionary = Rules.KINDS[kind]
 		var b := _priced(Art.kind_icon(kind), int(spec["cost"]))
 		b.disabled = not available.has(kind) or purse < int(spec["cost"])
 		b.tooltip_text = "%s — %d men, %d gold, %d upkeep" % [String(kind).capitalize(),
 			spec["strength"], spec["cost"], spec["upkeep"]]
-		if not available.has(kind):
+		var tech: StringName = spec.get("tech", &"")
+		if not available.has(kind) and tech != &"" and not cs.techs_of(me).has(tech):
+			b.tooltip_text += "\nneeds %s researched" % String(tech).capitalize()
+		elif not available.has(kind):
 			b.tooltip_text += "\nneeds a %s on the land nearby" % spec["requires"]
 		b.pressed.connect(func() -> void: Net.order_recruit(s["tile"], kind))
 		recruits.add_child(b)

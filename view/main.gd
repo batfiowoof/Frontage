@@ -8,6 +8,7 @@ const Save := preload("res://net/save.gd")
 const Colors := preload("res://view/colors.gd")
 const UiTheme := preload("res://view/ui/theme.gd")
 const Widgets := preload("res://view/ui/widgets.gd")
+const Rules := preload("res://sim/rules.gd")
 
 var _screen: Node = null
 var _lobby: CanvasLayer
@@ -230,9 +231,31 @@ func _refresh_lobby() -> void:
 		chip.custom_minimum_size = Vector2(14, 14)
 		chip.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 		row.add_child(chip)
-		row.add_child(Widgets.label("%s%s" % ["AI %d" % -id if id < 0 else "Player %d" % id,
-			"  (you)" if id == Net.my_id() else ""]))
+		var name := Widgets.label("%s%s" % ["AI %d" % -id if id < 0 else "Player %d" % id,
+			"  (you)" if id == Net.my_id() else ""])
+		name.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		row.add_child(name)
+		row.add_child(_civ_picker(id))
 		_roster.add_child(row)
+
+
+## Your own seat's people, and on the host its AIs' too. Everyone else's is shown and not
+## offered. A pick is an order like any other, so the host's goes through the pipeline too.
+func _civ_picker(seat: int) -> Control:
+	var civ: StringName = Net.civs.get(seat, &"")
+	var mine := Net.campaign == null and (seat == Net.my_id() or (seat < 0 and Net.is_server()))
+	if not mine:
+		return Widgets.label(Rules.CIVS[civ]["name"] if civ != &"" else "by seat", "Dim")
+	var pick := OptionButton.new()
+	pick.add_item("by seat")
+	for key: StringName in Rules.CIV_ORDER:
+		pick.add_item(Rules.CIVS[key]["name"])
+		if key == civ:
+			pick.select(pick.item_count - 1)
+	pick.item_selected.connect(func(i: int) -> void:
+		if i > 0:
+			Net.order_pick_civ(seat, Rules.CIV_ORDER[i - 1]))
+	return pick
 
 
 ## A battle takes over the screen while it lasts; the campaign comes back after.

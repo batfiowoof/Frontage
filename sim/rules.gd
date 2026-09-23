@@ -358,7 +358,49 @@ const KINDS := {
 	# it is in the table so an army can carry one. Slow, few men, dreadful in a melee --
 	# what it is for is the wall, and taking it anywhere else is a wasted regiment.
 	&"ram":     {"strength": 30,  "width": 6,  "cost": 180, "upkeep": 3, "speed": 0.7,  "requires": &"barracks", "range": 0.0,   "reload": 0.0, "volley": 0.0,  "ammo": 0},
+
+	# --- the peoples' own. See CIVS. Four optional keys, all read through .get():
+	#   civ       the one civilization that may raise it
+	#   replaces  the generic kind that civilization gives up for it
+	#   tech      a tech the owner must know first
+	#   attack / armour / resolve   damage dealt, damage shrugged off, morale drain
+	# The last three are what make a legionary more than a sword with a new name: until
+	# these, kinds differed only in headcount, width, speed and range.
+	&"legionary":    {"strength": 100, "width": 20, "cost": 170, "upkeep": 3, "speed": 1.0,  "requires": &"",         "range": 0.0,   "reload": 0.0, "volley": 0.0, "ammo": 0,
+		"civ": &"rome", "replaces": &"sword", "attack": 1.2, "armour": 0.15},
+	&"praetorian":   {"strength": 90,  "width": 18, "cost": 300, "upkeep": 5, "speed": 1.0,  "requires": &"barracks", "range": 0.0,   "reload": 0.0, "volley": 0.0, "ammo": 0,
+		"civ": &"rome", "tech": &"praetorian_guard", "attack": 1.35, "armour": 0.25, "resolve": 0.8},
+	&"warband":      {"strength": 140, "width": 22, "cost": 100, "upkeep": 2, "speed": 1.1,  "requires": &"",         "range": 0.0,   "reload": 0.0, "volley": 0.0, "ammo": 0,
+		"civ": &"gauls", "replaces": &"spear", "attack": 1.15, "resolve": 1.2},
+	&"gaesatae":     {"strength": 80,  "width": 18, "cost": 200, "upkeep": 3, "speed": 1.2,  "requires": &"",         "range": 0.0,   "reload": 0.0, "volley": 0.0, "ammo": 0,
+		"civ": &"gauls", "tech": &"druids", "attack": 1.5, "resolve": 0.7},
+	&"horse_archer": {"strength": 60,  "width": 14, "cost": 200, "upkeep": 3, "speed": 1.7,  "requires": &"",         "range": 380.0, "reload": 3.0, "volley": 7.0, "ammo": 12,
+		"civ": &"parthia", "replaces": &"archer"},
+	&"cataphract":   {"strength": 60,  "width": 14, "cost": 340, "upkeep": 6, "speed": 1.45, "requires": &"barracks", "range": 0.0,   "reload": 0.0, "volley": 0.0, "ammo": 0,
+		"civ": &"parthia", "replaces": &"cavalry", "tech": &"cataphracts", "attack": 1.3, "armour": 0.3},
+	&"numidian":     {"strength": 60,  "width": 14, "cost": 220, "upkeep": 4, "speed": 2.0,  "requires": &"barracks", "range": 0.0,   "reload": 0.0, "volley": 0.0, "ammo": 0,
+		"civ": &"carthage", "replaces": &"cavalry", "attack": 0.9},
+	# Few beasts and very wide ones: frontage-limited combat scales output by FILES, so
+	# eight files at 3.5 is a line and a half of killing on a front a third as wide.
+	&"war_elephant": {"strength": 24,  "width": 8,  "cost": 360, "upkeep": 6, "speed": 1.0,  "requires": &"barracks", "range": 0.0,   "reload": 0.0, "volley": 0.0, "ammo": 0,
+		"civ": &"carthage", "tech": &"elephant_corps", "attack": 3.5, "armour": 0.35},
 }
+
+# --- civilizations --------------------------------------------------------
+## Who a seat is playing as, picked in the lobby. A civilization is nothing but a filter on
+## two tables: which KINDS rows it may raise (their `civ` and `replaces` keys) and which
+## TECHS rows it may learn (their `civ` key). Nothing about it reaches the battle wire --
+## a unique unit is a kind and a unique tech is a tech, and both were already there.
+const CIVS := {
+	&"rome":     {"name": "Rome"},
+	&"gauls":    {"name": "Gauls"},
+	&"parthia":  {"name": "Parthia"},
+	&"carthage": {"name": "Carthage"},
+}
+## Dealt by seat to anybody who did not pick.
+## ponytail: the AI scores a civ tech like any other, blind to the unit it unlocks. Weigh
+## `KINDS[..]["tech"]` in its research pick if it keeps leaving elephants on the table.
+const CIV_ORDER := [&"rome", &"gauls", &"parthia", &"carthage"]
 ## What a settler founds, and what it cannot found on top of. The map used to be dealt
 ## once at generation and never change shape again: one capital each plus four neutral
 ## towns, so the only way to grow was conquest and the whole Civ half of this game --
@@ -470,6 +512,10 @@ const CAVALRY_SPEED := 1.4
 ##   stamina      how fast stamina drains (lower is better)
 ##   resolve      how fast morale drains (lower is better)
 ##   siege        multiplies the defender's fortification, so 0.5 halves walls
+##   missile      what a volley kills
+##
+## A row with a `civ` key belongs to that civilization alone; see CIVS. Some of those also
+## unlock a kind, through the kind's own `tech` key rather than anything here.
 const TECHS := {
 	# --- economy
 	&"husbandry":    {"tree": "economy", "cost": 40,  "needs": [],              "effect": {"yield": {"farm": 1.5, "pasture": 1.4}}},
@@ -486,6 +532,27 @@ const TECHS := {
 	&"discipline":   {"tree": "battle",  "cost": 100, "needs": [&"drill"],      "effect": {"resolve": 0.65}},
 	&"siegecraft":   {"tree": "battle",  "cost": 105, "needs": [&"armoury"],    "effect": {"siege": 0.5}},
 	&"stirrups":     {"tree": "battle",  "cost": 120, "needs": [&"horsemanship"], "effect": {"horse_attack": 1.4}},
+	&"archery":      {"tree": "battle",  "cost": 50,  "needs": [],              "effect": {"missile": 1.25}},
+	&"composite_bows": {"tree": "battle", "cost": 130, "needs": [&"archery"],   "effect": {"missile": 1.25}},
+	&"iron_working": {"tree": "battle",  "cost": 90,  "needs": [&"armoury"],    "effect": {"attack": 1.1}},
+	&"lamellar":     {"tree": "battle",  "cost": 150, "needs": [&"iron_working"], "effect": {"armour": 0.1}},
+	&"tactics":      {"tree": "battle",  "cost": 160, "needs": [&"discipline"], "effect": {"resolve": 0.85}},
+
+	# --- economy, the third tier
+	&"forestry":     {"tree": "economy", "cost": 40,  "needs": [],              "effect": {"yield": {"lumber": 1.6}}},
+	&"scholarship":  {"tree": "economy", "cost": 90,  "needs": [&"coinage"],    "effect": {"yield": {"library": 1.6}}},
+	&"trade_routes": {"tree": "economy", "cost": 170, "needs": [&"banking"],    "effect": {"yield": {"market": 1.5}}},
+	&"engineering":  {"tree": "economy", "cost": 180, "needs": [&"guilds"],     "effect": {"build_cost": 0.8}},
+
+	# --- one people's own
+	&"aqueducts":        {"tree": "economy", "civ": &"rome",     "cost": 80,  "needs": [&"masonry"],      "effect": {"yield": {"farm": 1.4}}},
+	&"praetorian_guard": {"tree": "battle",  "civ": &"rome",     "cost": 120, "needs": [&"discipline"],   "effect": {"resolve": 0.9}},
+	&"oppida":           {"tree": "economy", "civ": &"gauls",    "cost": 60,  "needs": [],                "effect": {"build_cost": 0.85}},
+	&"druids":           {"tree": "battle",  "civ": &"gauls",    "cost": 70,  "needs": [],                "effect": {"resolve": 0.85}},
+	&"silk_road":        {"tree": "economy", "civ": &"parthia",  "cost": 90,  "needs": [&"coinage"],      "effect": {"yield": {"market": 1.6}}},
+	&"cataphracts":      {"tree": "battle",  "civ": &"parthia",  "cost": 110, "needs": [&"horsemanship"], "effect": {"horse_attack": 1.15}},
+	&"mercantile":       {"tree": "economy", "civ": &"carthage", "cost": 100, "needs": [&"coinage"],      "effect": {"town_gold": 20}},
+	&"elephant_corps":   {"tree": "battle",  "civ": &"carthage", "cost": 110, "needs": [],                "effect": {"attack": 1.05}},
 }
 
 # --- campaign -----------------------------------------------------------

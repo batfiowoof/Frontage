@@ -19,6 +19,15 @@ const KIND_ICON := {
 	&"cavalry": &"chess_knight",
 	&"settler": &"hand_hexagon",
 	&"ram": &"resource_wood",
+	# A people's own units wear the picture of what they stand in for.
+	&"legionary": &"sword",
+	&"praetorian": &"chess_bishop",
+	&"warband": &"chess_pawn",
+	&"gaesatae": &"sword",
+	&"horse_archer": &"bow",
+	&"cataphract": &"chess_knight",
+	&"numidian": &"chess_knight",
+	&"war_elephant": &"crown_a",
 }
 const STRUCTURE_ICON := {
 	&"farm": &"resource_wheat",

@@ -105,7 +105,7 @@ func test_food_floors_at_zero_rather_than_going_negative(t) -> void:
 	var cs = _two_player()
 	cs.food[1] = 0
 	for i in 20:
-		cs.armies[1]["regiments"].append(Campaign.make_regiment(&"sword"))
+		cs.armies[1]["regiments"].append(Campaign.make_regiment(&"spear"))
 	cs.end_turn()
 	t.eq(cs.food[1], 0, "deliberately floored, see the ponytail note in end_turn")
 
@@ -164,24 +164,24 @@ func test_recruiting_costs_gold_and_adds_a_regiment(t) -> void:
 	var capital: int = cs.armies[1]["tile"]
 	var before: int = cs.gold[1]
 	var count: int = cs.armies[1]["regiments"].size()
-	t.ok(cs.recruit(1, capital, &"sword"), "affordable and owned")
-	t.eq(cs.gold[1], before - int(Rules.KINDS[&"sword"]["cost"]))
+	t.ok(cs.recruit(1, capital, &"spear"), "affordable and owned")
+	t.eq(cs.gold[1], before - int(Rules.KINDS[&"spear"]["cost"]))
 	t.eq(cs.armies[1]["regiments"].size(), count + 1)
 
 
 func test_you_cannot_recruit_where_you_have_no_claim(t) -> void:
 	var cs = _two_player()
 	var enemy_capital: int = cs.armies[2]["tile"]
-	t.ok(not cs.recruit(1, enemy_capital, &"sword"), "not your settlement")
+	t.ok(not cs.recruit(1, enemy_capital, &"spear"), "not your settlement")
 	var field := Campaign.idx(10, 8)
-	t.ok(not cs.recruit(1, field, &"sword"), "not a settlement at all")
+	t.ok(not cs.recruit(1, field, &"spear"), "not a settlement at all")
 	t.eq(cs.gold[1], Rules.START_GOLD, "a refused order costs nothing")
 
 
 func test_you_cannot_recruit_what_you_cannot_afford(t) -> void:
 	var cs = _two_player()
 	cs.gold[1] = 10
-	t.ok(not cs.recruit(1, cs.armies[1]["tile"], &"sword"))
+	t.ok(not cs.recruit(1, cs.armies[1]["tile"], &"spear"))
 	t.eq(cs.gold[1], 10)
 
 
@@ -228,7 +228,7 @@ func test_a_player_with_nothing_left_is_out(t) -> void:
 func test_campaign_round_trips(t) -> void:
 	var cs = _two_player()
 	cs.move_army(1, Campaign.idx(8, 6))
-	cs.recruit(1, cs.settlements[0]["tile"], &"sword")
+	cs.recruit(1, cs.settlements[0]["tile"], &"spear")
 	cs.set_ready(1, true)
 	var bytes: PackedByteArray = Snapshot.encode_campaign(cs)
 	var back = Snapshot.decode_campaign(bytes)
@@ -335,10 +335,10 @@ func test_battle_move_targets_are_clamped_to_the_field(t) -> void:
 func test_a_recruited_regiment_starts_at_full_strength(t) -> void:
 	var cs = _two_player()
 	var capital: int = cs.armies[1]["tile"]
-	cs.recruit(1, capital, &"sword")
+	cs.recruit(1, capital, &"spear")
 	var last: Array = cs.armies[1]["regiments"][-1]
-	t.eq(last[0], &"sword")
-	t.eq(last[1], int(Rules.KINDS[&"sword"]["strength"]), "fresh recruits are not pre-battered")
+	t.eq(last[0], &"spear")
+	t.eq(last[1], int(Rules.KINDS[&"spear"]["strength"]), "fresh recruits are not pre-battered")
 
 
 func test_army_men_counts_men_not_regiments(t) -> void:

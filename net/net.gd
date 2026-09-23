@@ -47,6 +47,10 @@ signal server_left
 var battle: BattleState = null
 var campaign: CampaignState = null
 var players := {}                  # peer_id -> display name
+## Lobby picks: seat -> a key of Rules.CIVS. Server state replicated with the roster, and
+## handed to `CampaignState.generate` when the campaign is dealt; a seat with no pick is
+## dealt one by seat order there.
+var civs := {}
 var running := false               # is the battle sim ticking?
 
 ## The exact bytes the server last sent us. Kept so a client can prove its mirror is
@@ -168,9 +172,11 @@ func _roster_changed() -> void:
 	if multiplayer.has_multiplayer_peer() and is_server():
 		var seats := player_ids()
 		var names := []
+		var picks := []
 		for seat in seats:
 			names.append(players[seat])
-		_roster.rpc(seats, names)
+			picks.append(civs.get(seat, &""))
+		_roster.rpc(seats, names, picks)
 	players_changed.emit()
 
 
@@ -178,14 +184,17 @@ func _roster_changed() -> void:
 ## decides colour, so sending it explicitly is what makes host and client agree by
 ## construction instead of by both happening to sort the same way.
 @rpc("authority", "call_remote", "reliable")
-func _roster(seats: Array, names: Array) -> void:
-	if seats.size() != names.size():
+func _roster(seats: Array, names: Array, picks: Array) -> void:
+	if seats.size() != names.size() or seats.size() != picks.size():
 		return                             # off the network, so it is not to be trusted
 	players.clear()
+	civs.clear()
 	for i in seats.size():
 		if typeof(seats[i]) != TYPE_INT:
 			continue
 		players[seats[i]] = str(names[i])
+		if typeof(picks[i]) == TYPE_STRING_NAME and Rules.CIVS.has(picks[i]):
+			civs[seats[i]] = picks[i]
 	players_changed.emit()
 
 
@@ -214,6 +223,7 @@ func close() -> void:
 		multiplayer.multiplayer_peer.close()
 		multiplayer.multiplayer_peer = null
 	players.clear()
+	civs.clear()
 	_ais.clear()
 	battle = null
 	campaign = null
@@ -225,7 +235,7 @@ func start_campaign(map_seed := 0) -> void:
 	assert(is_server(), "only the server owns the world")
 	if map_seed == 0:
 		map_seed = randi()
-	campaign = CampaignState.generate(player_ids(), map_seed)
+	campaign = CampaignState.generate(player_ids(), map_seed, civs)
 	winner_seat = 0
 	_raise_the_raiders()
 	broadcast_campaign()
@@ -525,6 +535,10 @@ func order_stance(ids: PackedInt32Array, mask: int) -> void:
 	submit(Orders.stance(ids, mask))
 
 
+func order_pick_civ(seat: int, civ: StringName) -> void:
+	submit(Orders.pick_civ(seat, civ))
+
+
 func order_research(tech: StringName) -> void:
 	submit(Orders.research(tech))
 
@@ -584,6 +598,22 @@ func _receive_order(sender: int, bytes: PackedByteArray) -> void:
 			_propose(sender, order)
 		Orders.Type.ANSWER:
 			_answer(sender, order)
+		Orders.Type.PICK_CIV:
+			_pick_civ(sender, order)
+
+
+## A lobby order. A seat speaks for itself; the host may also speak for its AIs, which
+## have nobody else to choose for them.
+func _pick_civ(sender: int, order: Dictionary) -> void:
+	var seat: int = order["seat"]
+	if campaign != null:
+		_reject(sender, "the campaign has already been dealt")
+		return
+	if not players.has(seat) or not (seat == sender or (seat < 0 and sender == 1)):
+		_reject(sender, "that seat is not yours to choose for")
+		return
+	civs[seat] = order["civ"]
+	_roster_changed()
 
 
 func _stance(sender: int, order: Dictionary) -> void:

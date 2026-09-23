@@ -613,7 +613,7 @@ func _land_volley(shooter: Regiment, mark: Regiment) -> void:
 	var falloff := lerpf(1.0, Rules.MISSILE_FALLOFF, clampf(distance / reach, 0.0, 1.0))
 	var cover := clampf(float(mark.form()["missile"]) + float(ground_at(mark.pos)["cover"]), -1.0, 0.95)
 	var kills := float(Rules.KINDS[shooter.kind]["volley"]) * shooter.fraction() * falloff
-	kills *= (1.0 - cover) * shooter.order_factor()
+	kills *= (1.0 - cover) * shooter.order_factor() * tech(shooter.owner_id, &"missile")
 	var fell := int(round(maxf(0.0, kills)))
 	mark.take_casualties(fell)
 	shooter.xp += fell             # archers learn their trade too, and in whole men
@@ -827,9 +827,11 @@ func _accumulate_strike(attacker: Regiment, defender: Regiment, dt: float, kills
 	output *= float(attacker.form()["damage"]) * attacker.order_factor() * braced
 	output *= float(ground_at(attacker.pos)["damage"])
 	output *= tech(attacker.owner_id, &"attack") * attacker.veteran_attack()
+	output *= float(Rules.KINDS[attacker.kind].get("attack", 1.0))
 	if attacker.is_cavalry():
 		output *= tech(attacker.owner_id, &"horse_attack")
-	output *= 1.0 - clampf(tech(defender.owner_id, &"armour"), 0.0, 0.6)
+	output *= 1.0 - clampf(tech(defender.owner_id, &"armour")
+		+ float(Rules.KINDS[defender.kind].get("armour", 0.0)), 0.0, 0.6)
 	# Down to -0.5 and not 0: a column caught in a fight is WORSE than nothing at it.
 	output *= 1.0 - clampf(defender.defense + float(defender.form()["defense"]) * defender.order_factor(), -0.5, 0.9)
 	output *= defender.vulnerability()     # a spent regiment is easier to kill
@@ -859,6 +861,7 @@ func _accumulate_strike(attacker: Regiment, defender: Regiment, dt: float, kills
 		morale_drain += Rules.WEDGE_SHOCK * clampf(attacker.bite, 0.0, 1.0)
 	var shaken := morale_drain * pressure * tech(defender.owner_id, &"resolve") * dt
 	shaken *= defender.nerve() * defender.veteran_resolve()
+	shaken *= float(Rules.KINDS[defender.kind].get("resolve", 1.0))
 	if _in_reach_of_general(defender):
 		# A better commander steadies them harder: the drain multiplier is pushed further
 		# below 1, never past 0, so renown cannot make a regiment immune to morale.
