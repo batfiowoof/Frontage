@@ -1034,13 +1034,7 @@ func all_ready(owners: Array) -> bool:
 func end_turn() -> void:
 	var starving := {}
 	for owner in gold.keys():
-		var earned := worked_yield(owner)
-		for s: Dictionary in settlements:
-			if s["owner"] == owner:
-				var income := settlement_income(s)
-				earned["gold"] += income["gold"] + int(tech(owner, &"town_gold"))
-				earned["food"] += income["food"]
-				earned["research"] += income["research"]
+		var earned := income_of(owner)
 		gold[owner] = int(gold[owner]) + earned["gold"]
 		research[owner] = int(research.get(owner, 0)) + int(earned["research"])
 		var larder: int = int(food.get(owner, 0)) + int(earned["food"]) - upkeep_of(owner)
@@ -1066,6 +1060,19 @@ func end_turn() -> void:
 		_cull(id)
 	ready.clear()
 	turn += 1
+
+
+## What a turn brings in, before upkeep. One function because the HUD shows it and
+## end_turn pays it, and two copies of this sum would be two answers to one question.
+func income_of(owner: int) -> Dictionary:
+	var earned := worked_yield(owner)
+	for s: Dictionary in settlements:
+		if s["owner"] == owner:
+			var income := settlement_income(s)
+			earned["gold"] += income["gold"] + int(tech(owner, &"town_gold"))
+			earned["food"] += income["food"]
+			earned["research"] += income["research"]
+	return earned
 
 
 ## Towns grow on a food SURPLUS, and the surplus is what they cost. An empire that eats

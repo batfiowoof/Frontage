@@ -4,85 +4,79 @@ extends Node2D
 ## It never touches the world: every click becomes an order that goes to the server
 ## and comes back as a snapshot. On the host that round trip is a function call, but
 ## it is the same function call a remote client's order makes.
+##
+## Four layers, bottom to top: the ground (a shader, redrawn only when the map changes),
+## what grows on it, the fog, and then this node -- borders, towns, armies, the route.
+## The HUD is its own Control in hud.gd and owns none of the selection.
 
 const Rules := preload("res://sim/rules.gd")
 const Campaign := preload("res://sim/campaign_state.gd")
 const Colors := preload("res://view/colors.gd")
 const Hex := preload("res://view/campaign/hex.gd")
+const Art := preload("res://view/ui/art.gd")
+const Hud := preload("res://view/campaign/hud.gd")
+const TERRAIN_SHADER := preload("res://view/shaders/terrain.gdshader")
+const FOG_SHADER := preload("res://view/shaders/fog.gdshader")
 
 const TILE := Rules.HEX_SIZE * 2.0
 const DRAG_BUTTONS := [MOUSE_BUTTON_MIDDLE, MOUSE_BUTTON_RIGHT]
 ## Keyboard pan, in SCREEN pixels a second, so it feels the same at every zoom.
-## No edge scroll here, unlike the battle: the campaign HUD lives in three corners and
-## reaching for End Turn would send the map sliding out from under the cursor.
+## No edge scroll here, unlike the battle: the campaign HUD lives along the top and the
+## bottom, and reaching for End Turn would send the map sliding out from under the cursor.
 const PAN_SPEED := 700.0
-## Ground we have never had anybody near. Dark and translucent rather than opaque: the
-## terrain underneath is worth keeping, and a solid curtain makes the map unreadable at
-## the start of a campaign when almost all of it is fogged.
-const FOG := Color(0.05, 0.05, 0.08, 0.72)
-
-## The four things an army can be doing, in the order the enum has them.
-const STANCE_NAMES := {
-	"march": Campaign.Stance.MARCH,
-	"forced": Campaign.Stance.FORCED,
-	"fortify": Campaign.Stance.FORTIFY,
-	"ambush": Campaign.Stance.AMBUSH,
-	"besiege": Campaign.Stance.BESIEGE,
+## What grows on each kind of ground, and how much of it. Seeded by tile index, so a hex
+## looks the same every time and on every machine.
+const DECOR := {
+	Campaign.Terrain.FOREST: [[&"tree_pine", &"tree_round", &"tree_small"], 4, 0.42],
+	Campaign.Terrain.HILLS: [[&"rock_pile", &"bush"], 2, 0.4],
+	Campaign.Terrain.MOUNTAIN: [[&"rock_big", &"rock_pile"], 2, 0.62],
+	Campaign.Terrain.PLAINS: [[&"bush"], 1, 0.28],
 }
-## One letter above the counter, since the stance bar only shows the selected army.
-const STANCE_MARKS := {
-	Campaign.Stance.FORCED: "F",
-	Campaign.Stance.FORTIFY: "D",
-	Campaign.Stance.AMBUSH: "A",
-	Campaign.Stance.BESIEGE: "S",
-}
-const STANCE_HINTS := {
-	"march": "walk, and be seen",
-	"forced": "further each turn, but the men arrive spent",
-	"fortify": "stand and dig in: harder to beat on this hex. Costs the turn.",
-	"ambush": "the enemy is not told you are here. Costs the turn.",
-	"besiege": "sit on a town and starve it out. Costs the turn, and needs a town under you.",
-}
+## Sprites from a cheerful pack, pulled toward the map's own muted palette.
+const DECOR_TINT := Color(0.78, 0.8, 0.7)
 
 var selected_army := -1
 var selected_tile := -1
+## Regiment indices picked for a new army, and whether the next click places it. The HUD
+## sets these and the click handler spends them.
+var detaching := PackedInt32Array()
+var placing_detachment := false
 
 var _camera: Camera2D
-var _status: Label
-var _players: Label
-var _hint: Label
-var _news: Label
-var _end_turn: Button
-var _recruit_bar: HBoxContainer
-var _build_bar: HBoxContainer
-var _build_buttons := {}
-var _raze: Button
-var _found: Button
-var _stance_bar: HBoxContainer
-var _stance_buttons := {}
-var _treaty_bar: HBoxContainer
-var _treaty_label: Label
-var _offer_from := 0
-var _diplo_bar: HBoxContainer
-var _diplo_buttons := {}
-var _trees: PanelContainer
-var _tech_buttons := {}
-var _detach_bar: HBoxContainer
-var _detach_buttons := []
-var _detaching := PackedInt32Array()     # regiment indices picked for a new army
-var _placing_detachment := false
-var _recruit_buttons := {}
+var _hud: Hud
+var _ground: Node2D
+var _decor: Node2D
+var _fog: Node2D
 var _dragging := false
+var _hovered := -1
+## Territory, worked out once a snapshot rather than once a frame: [from, to, colour].
+var _borders: Array = []
+var _claims := {}                          # tile -> owner, for the faint wash of colour
 
 
 func _ready() -> void:
 	_build_camera()
-	_build_hud()
-	Net.campaign_updated.connect(_on_campaign_updated)
-	Net.peace_offered.connect(_on_peace_offered)
-	Net.order_rejected.connect(_on_order_rejected)
-	Net.news.connect(_on_news)
-	_refresh()
+	_ground = _layer(-3, TERRAIN_SHADER, _draw_ground)
+	_decor = _layer(-2, null, _draw_decor)
+	_fog = _layer(-1, FOG_SHADER, _draw_fog)
+	var hud_layer := CanvasLayer.new()
+	add_child(hud_layer)
+	_hud = Hud.new(self)
+	hud_layer.add_child(_hud)
+	Net.campaign_updated.connect(func(_cs) -> void: changed())
+	changed()
+
+
+func _layer(z: int, shader: Shader, painter: Callable) -> Node2D:
+	var n := Node2D.new()
+	n.z_index = z
+	if shader != null:
+		var m := ShaderMaterial.new()
+		m.shader = shader
+		n.material = m
+	n.draw.connect(painter)
+	add_child(n)
+	return n
 
 
 func _build_camera() -> void:
@@ -93,203 +87,15 @@ func _build_camera() -> void:
 	_camera.make_current()
 
 
-func _build_hud() -> void:
-	var layer := CanvasLayer.new()
-	add_child(layer)
-
-	_status = Label.new()
-	_status.position = Vector2(12, 8)
-	_status.add_theme_font_size_override("font_size", 18)
-	layer.add_child(_status)
-
-	_players = Label.new()
-	_players.position = Vector2(12, 34)
-	layer.add_child(_players)
-
-	_hint = Label.new()
-	_hint.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
-	_hint.position = Vector2(12, -124)
-	layer.add_child(_hint)
-
-	_news = Label.new()
-	_news.set_anchors_preset(Control.PRESET_CENTER_TOP)
-	_news.position = Vector2(-260, 10)
-	_news.custom_minimum_size = Vector2(520, 0)
-	_news.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_news.add_theme_color_override("font_color", Color("ffd98a"))
-	layer.add_child(_news)
-
-	_recruit_bar = HBoxContainer.new()
-	_recruit_bar.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
-	_recruit_bar.position = Vector2(12, -34)
-	layer.add_child(_recruit_bar)
-	for kind: StringName in Rules.KINDS:
-		var b := Button.new()
-		b.text = "%s  %dg" % [kind, Rules.KINDS[kind]["cost"]]
-		b.pressed.connect(_on_recruit.bind(kind))
-		_recruit_bar.add_child(b)
-		_recruit_buttons[kind] = b
-
-	_build_bar = HBoxContainer.new()
-	_build_bar.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
-	_build_bar.position = Vector2(12, -68)
-	layer.add_child(_build_bar)
-	for name: StringName in Rules.STRUCTURES:
-		var b := Button.new()
-		b.text = "%s  %dg" % [name, Rules.STRUCTURES[name]["cost"]]
-		b.pressed.connect(_on_build.bind(name))
-		_build_bar.add_child(b)
-		_build_buttons[name] = b
-
-	_raze = Button.new()
-	_raze.text = "Burn it"
-	_raze.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
-	_raze.position = Vector2(12, -102)
-	_raze.add_theme_color_override("font_color", Color("e0894a"))
-	_raze.pressed.connect(func() -> void:
-		if selected_army >= 0:
-			Net.order_raze(selected_army))
-	layer.add_child(_raze)
-
-	_found = Button.new()
-	_found.text = "Found a town"
-	_found.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
-	_found.position = Vector2(12, -132)
-	_found.add_theme_color_override("font_color", Color("9fd8a0"))
-	_found.pressed.connect(func() -> void:
-		if selected_army >= 0:
-			Net.order_found(selected_army))
-	layer.add_child(_found)
-
-	# What the selected army does between turns. Digging in and lying in wait both cost
-	# the whole turn's movement, so the bar sits where you can see the move counter.
-	# Somebody wants to talk. It sits at the top middle because it is the one thing here
-	# that arrives rather than being asked for, and it has to be noticed.
-	_treaty_bar = HBoxContainer.new()
-	_treaty_bar.set_anchors_preset(Control.PRESET_CENTER_TOP)
-	_treaty_bar.position = Vector2(-160, 12)
-	_treaty_bar.visible = false
-	layer.add_child(_treaty_bar)
-	_treaty_label = Label.new()
-	_treaty_bar.add_child(_treaty_label)
-	for label in ["accept", "refuse"]:
-		var yes: bool = label == "accept"
-		var b := Button.new()
-		b.text = label
-		b.pressed.connect(func() -> void:
-			if _offer_from != 0:
-				Net.order_answer(_offer_from, yes)
-				_offer_from = 0
-				_treaty_bar.visible = false)
-		_treaty_bar.add_child(b)
-
-	# ...and a way to start one. One button a seat, showing where we stand with them, so
-	# with two players it is one button and with four it is three.
-	_diplo_bar = HBoxContainer.new()
-	_diplo_bar.set_anchors_preset(Control.PRESET_CENTER_TOP)
-	_diplo_bar.position = Vector2(-160, 40)
-	layer.add_child(_diplo_bar)
-
-	_stance_bar = HBoxContainer.new()
-	_stance_bar.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
-	_stance_bar.position = Vector2(12, -164)
-	layer.add_child(_stance_bar)
-	for label in STANCE_NAMES:
-		var stance: int = STANCE_NAMES[label]
-		var b := Button.new()
-		b.text = label
-		b.tooltip_text = STANCE_HINTS[label]
-		b.pressed.connect(func() -> void:
-			if selected_army >= 0:
-				Net.order_army_stance(selected_army, stance))
-		_stance_bar.add_child(b)
-		_stance_buttons[stance] = b
-
-	if Net.is_server():
-		var save := Button.new()
-		save.text = "Save"
-		save.set_anchors_preset(Control.PRESET_TOP_RIGHT)
-		save.position = Vector2(-92, 10)
-		save.custom_minimum_size = Vector2(80, 28)
-		save.pressed.connect(func() -> void: Net.save_campaign())
-		layer.add_child(save)
-
-	_detach_bar = HBoxContainer.new()
-	_detach_bar.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
-	_detach_bar.position = Vector2(12, -136)
-	layer.add_child(_detach_bar)
-
-	_build_trees(layer)
-
-	_end_turn = Button.new()
-	_end_turn.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
-	_end_turn.position = Vector2(-150, -40)
-	_end_turn.custom_minimum_size = Vector2(138, 32)
-	_end_turn.pressed.connect(_on_end_turn)
-	layer.add_child(_end_turn)
-
-
-## Both trees side by side, one pool underneath. Hidden until asked for with T: the
-## map is the thing you are looking at, and this is a decision you make between turns.
-func _build_trees(layer: CanvasLayer) -> void:
-	_trees = PanelContainer.new()
-	_trees.set_anchors_preset(Control.PRESET_CENTER)
-	_trees.position = Vector2(-260, -190)
-	_trees.custom_minimum_size = Vector2(520, 380)
-	_trees.visible = false
-	layer.add_child(_trees)
-
-	var rows := VBoxContainer.new()
-	rows.add_theme_constant_override("separation", 6)
-	_trees.add_child(rows)
-
-	var title := Label.new()
-	title.text = "Research   (T to close)"
-	title.add_theme_font_size_override("font_size", 18)
-	rows.add_child(title)
-
-	var columns := HBoxContainer.new()
-	columns.add_theme_constant_override("separation", 18)
-	rows.add_child(columns)
-	for tree: String in ["economy", "battle"]:
-		var column := VBoxContainer.new()
-		column.custom_minimum_size = Vector2(240, 0)
-		columns.add_child(column)
-		var heading := Label.new()
-		heading.text = tree
-		column.add_child(heading)
-		for name: StringName in Rules.TECHS:
-			if Rules.TECHS[name]["tree"] != tree:
-				continue
-			var b := Button.new()
-			b.text = "%s  %d" % [name, Rules.TECHS[name]["cost"]]
-			b.pressed.connect(func() -> void: Net.order_research(name))
-			column.add_child(b)
-			_tech_buttons[name] = b
-
-
-func _refresh_trees() -> void:
-	if not _trees.visible:
-		return
-	var cs = Net.campaign
-	if cs == null:
-		return
-	var me: int = Net.my_id()
-	var known: Array = cs.techs_of(me)
-	for name: StringName in _tech_buttons:
-		var b: Button = _tech_buttons[name]
-		if known.has(name):
-			b.disabled = true
-			b.modulate = Color("9fd8a0")
-			b.tooltip_text = "known"
-			continue
-		b.disabled = not cs.can_learn(me, name)
-		b.modulate = Color.WHITE
-		var missing := []
-		for needed: StringName in Rules.TECHS[name]["needs"]:
-			if not known.has(needed):
-				missing.append(String(needed))
-		b.tooltip_text = "needs %s" % ", ".join(missing) if not missing.is_empty() else ""
+## Something moved: a snapshot landed, or the selection changed. Everything that is
+## worked out rather than drawn is worked out here.
+func changed() -> void:
+	_work_out_borders()
+	_ground.queue_redraw()
+	_decor.queue_redraw()
+	_fog.queue_redraw()
+	queue_redraw()
+	_hud.refresh()
 
 
 # --- input ----------------------------------------------------------------
@@ -308,15 +114,13 @@ func _unhandled_input(event: InputEvent) -> void:
 		_camera.position -= event.relative / _camera.zoom
 	elif event is InputEventKey and event.pressed and not event.echo:
 		if event.keycode == KEY_T:
-			_trees.visible = not _trees.visible
-			_refresh()
+			_hud.toggle_research()
 		elif event.keycode == KEY_ESCAPE:
-			if _trees.visible:
-				_trees.visible = false
-			else:
+			if not _hud.close_overlay():
 				selected_army = -1
 				selected_tile = -1
-			_refresh()
+				_clear_detachment()
+			changed()
 
 
 func _move_camera(delta: float) -> void:
@@ -353,32 +157,6 @@ func _clamp_camera() -> void:
 		mid.y if lo.y >= hi.y else clampf(_camera.position.y, lo.y, hi.y))
 
 
-## Built from the seating rather than once, because who is at the table is not known
-## when the HUD goes up and an AI can be added after it.
-func _refresh_diplomacy(cs, me: int) -> void:
-	for seat: int in Net.player_ids():
-		if seat == me or seat == 0:
-			continue
-		if not _diplo_buttons.has(seat):
-			var b := Button.new()
-			b.pressed.connect(func() -> void: Net.order_propose(seat))
-			_diplo_bar.add_child(b)
-			_diplo_buttons[seat] = b
-		var button: Button = _diplo_buttons[seat]
-		var warring: bool = cs.at_war(me, seat)
-		button.text = "offer peace to %d" % seat if warring else "declare war on %d" % seat
-		button.add_theme_color_override("font_color",
-			Color("9fd8a0") if warring else Color("d4553a"))
-
-
-func _on_peace_offered(from_seat: int, to_seat: int) -> void:
-	if to_seat != Net.my_id():
-		return                             # somebody else is being asked
-	_offer_from = from_seat
-	_treaty_label.text = "player %d offers peace   " % from_seat
-	_treaty_bar.visible = true
-
-
 func _zoom(factor: float) -> void:
 	_camera.zoom = (_camera.zoom * factor).clampf(0.35, 2.5)
 
@@ -387,9 +165,9 @@ func _tile_under_mouse() -> int:
 	return Hex.at(get_global_mouse_position())
 
 
-## Left click selects. A tile with your army selects the army; otherwise a tile you
-## own selects the settlement so you can recruit there. Clicking elsewhere with an
-## army selected is an order to march — the only mouse gesture that changes the world.
+## Left click selects. A tile with your army selects the army; otherwise the tile, which
+## puts its town or its ground in the HUD. Clicking elsewhere with an army selected is an
+## order to march -- the only mouse gesture that changes the world.
 func _on_click(tile: int) -> void:
 	var cs = Net.campaign
 	if cs == null or tile < 0:
@@ -398,10 +176,10 @@ func _on_click(tile: int) -> void:
 	var army = cs.army_at(tile)
 
 	# Waiting to be told where the detachment marches to.
-	if _placing_detachment and selected_army >= 0:
-		Net.order_split(selected_army, _detaching, tile)
+	if placing_detachment and selected_army >= 0:
+		Net.order_split(selected_army, detaching, tile)
 		_clear_detachment()
-		_refresh()
+		changed()
 		return
 
 	# Shift-click one of yours to fold the selected army into it. A combine idiom, and
@@ -412,7 +190,7 @@ func _on_click(tile: int) -> void:
 		selected_army = army["id"]
 		selected_tile = tile
 		_clear_detachment()
-		_refresh()
+		changed()
 		return
 
 	if army != null and army["owner"] == me:
@@ -426,178 +204,116 @@ func _on_click(tile: int) -> void:
 		selected_army = -1
 		selected_tile = tile
 		_clear_detachment()
-	_refresh()
+	changed()
 
 
 func _clear_detachment() -> void:
-	_detaching = PackedInt32Array()
-	_placing_detachment = false
+	detaching = PackedInt32Array()
+	placing_detachment = false
 
 
-## One toggle per regiment in the selected army, and a Detach button that arms the next
-## click. An army has to leave somebody behind, so the last regiment cannot be picked.
-func _rebuild_detach_bar(a: Dictionary) -> void:
-	for b: Node in _detach_buttons:
-		b.queue_free()
-	_detach_buttons = []
-
-	var regiments: Array = a["regiments"]
-	for i in regiments.size():
-		var b := Button.new()
-		b.toggle_mode = true
-		b.text = String(regiments[i][0])
-		b.button_pressed = Array(_detaching).has(i)
-		b.toggled.connect(func(on: bool) -> void:
-			var picked := Array(_detaching)
-			if on and not picked.has(i):
-				picked.append(i)
-			elif not on:
-				picked.erase(i)
-			_detaching = PackedInt32Array(picked)
-			_refresh())
-		_detach_bar.add_child(b)
-		_detach_buttons.append(b)
-
-	var go := Button.new()
-	go.text = "Detach → click a hex" if _placing_detachment else "Detach"
-	go.disabled = _detaching.is_empty() or _detaching.size() >= regiments.size()
-	go.pressed.connect(func() -> void:
-		_placing_detachment = true
-		_refresh())
-	_detach_bar.add_child(go)
-	_detach_buttons.append(go)
+func _process(delta: float) -> void:
+	_move_camera(delta)
+	var tile := _tile_under_mouse()
+	if tile != _hovered:
+		_hovered = tile
+		_hud.hover(tile)
+		queue_redraw()
+	elif selected_army >= 0:
+		queue_redraw()       # the selection ring breathes
 
 
-func _on_recruit(kind: StringName) -> void:
-	if selected_tile >= 0:
-		Net.order_recruit(selected_tile, kind)
+# --- working out ------------------------------------------------------------
 
-
-func _on_build(structure: StringName) -> void:
-	if selected_tile >= 0:
-		Net.order_build(selected_tile, structure)
-
-
-func _on_end_turn() -> void:
+## Whose each hex is: a town's own, or the nearest town working it. A line goes wherever
+## that changes -- the single biggest thing a strategy map needs to be read at a glance,
+## and the old one had nothing but coloured squares to go on.
+func _work_out_borders() -> void:
+	_borders = []
+	_claims = {}
 	var cs = Net.campaign
-	if cs != null:
-		Net.order_ready(not bool(cs.ready.get(Net.my_id(), false)))
+	if cs == null:
+		return
+	var seating: Array = Net.player_ids()
+	for i in cs.terrain.size():
+		var o := _claim(cs, i)
+		if o != 0:
+			_claims[i] = o
+	var corners := Hex.corners()
+	for i: int in _claims:
+		var at := Hex.centre(i)
+		for k in 6:
+			var a := at + corners[k]
+			var b := at + corners[(k + 1) % 6]
+			# The hex across this edge, found by stepping over it rather than by a
+			# direction table -- odd-r parity is exactly the thing that gets that wrong.
+			var across := Hex.at(at + ((a + b) * 0.5 - at) * 2.0)
+			if across >= 0 and _claims.get(across, 0) == _claims[i]:
+				continue
+			# Pulled a little inside, so two neighbours' borders sit side by side.
+			var inset := (at - (a + b) * 0.5).normalized() * 2.0
+			_borders.append([a + inset * 0.6, b + inset * 0.6, Colors.of_owner(_claims[i], seating)])
 
 
-func _on_order_rejected(_peer: int, reason: String) -> void:
-	_hint.text = "refused: " + reason
+func _claim(cs, tile: int) -> int:
+	var s = cs.settlement_at(tile)
+	if s != null:
+		return int(s["owner"])
+	var worked = cs.working_settlement(tile)
+	return 0 if worked == null else int(worked["owner"])
 
 
-func _on_news(text: String) -> void:
-	_news.text = text
+# --- drawing ------------------------------------------------------------------
+
+func _draw_ground() -> void:
+	var cs = Net.campaign
+	if cs == null:
+		return
+	var uvs := PackedVector2Array()
+	for c in Hex.corners():
+		uvs.append(c / (Rules.HEX_SIZE * 2.0) + Vector2(0.5, 0.5))
+	for i in cs.terrain.size():
+		var tint := Colors.of_terrain(cs.terrain[i])
+		if cs.terrain[i] == Campaign.Terrain.WATER:
+			tint.a = 0.98                  # the shader's flag for "this one ripples"
+		var shade := PackedColorArray([tint, tint, tint, tint, tint, tint])
+		_ground.draw_polygon(Hex.polygon(i), shade, uvs)
 
 
-# --- drawing --------------------------------------------------------------
-
-func _on_campaign_updated(_cs) -> void:
-	_refresh()
-
-
-func _refresh() -> void:
-	queue_redraw()
+func _draw_decor() -> void:
 	var cs = Net.campaign
 	if cs == null:
 		return
 	var me: int = Net.my_id()
-	var seating: Array = Net.player_ids()
+	for i in cs.terrain.size():
+		var spec: Array = DECOR.get(cs.terrain[i], [])
+		if spec.is_empty() or cs.settlement_at(i) != null or cs.structure_at(i) != &"":
+			continue
+		var rng := RandomNumberGenerator.new()
+		rng.seed = i * 7919 + 17
+		var count: int = spec[1] if cs.terrain[i] != Campaign.Terrain.PLAINS else int(rng.randf() < 0.3)
+		var size: float = Rules.HEX_SIZE * float(spec[2]) * 2.0
+		var at := Hex.centre(i)
+		var spots := []
+		for n in count:
+			spots.append(at + Vector2(rng.randf_range(-0.5, 0.5), rng.randf_range(-0.45, 0.4)) * Rules.HEX_SIZE)
+		# Back to front, so the nearer tree stands in front of the one behind it.
+		spots.sort_custom(func(a: Vector2, b: Vector2) -> bool: return a.y < b.y)
+		var dim := DECOR_TINT if cs.can_see(me, i) else DECOR_TINT.darkened(0.3)
+		for spot: Vector2 in spots:
+			var tex := Art.sprite(spec[0][rng.randi() % spec[0].size()])
+			if tex != null:
+				_decor.draw_texture_rect(tex, Rect2(spot - Vector2(size * 0.5, size * 0.8), Vector2(size, size)), false, dim)
 
-	_status.text = "Turn %d      gold %d      food %d      research %d      upkeep %d" % [
-		cs.turn, int(cs.gold.get(me, 0)), int(cs.food.get(me, 0)),
-		int(cs.research.get(me, 0)), cs.upkeep_of(me)]
-	_status.text += "      T: research (%d known)" % cs.techs_of(me).size()
 
-	var lines := PackedStringArray()
-	for id: int in seating:
-		lines.append("%s  %s  (%d towns)" % [
-			"you" if id == me else "player %d" % id,
-			"ready" if bool(cs.ready.get(id, false)) else "thinking",
-			cs.settlements_of(id)])
-	_players.text = "\n".join(lines)
-
-	_refresh_trees()
-
-	var mine_ready := bool(cs.ready.get(me, false))
-	_end_turn.text = "Waiting..." if mine_ready else "End Turn"
-
-	var settlement = cs.settlement_at(selected_tile) if selected_tile >= 0 else null
-	var mine_here: bool = settlement != null and settlement["owner"] == me
-	_recruit_bar.visible = mine_here
-
-	# One bar for everything that can stand on a hex, including the walls that only go
-	# on a town's own.
-	var can_build := false
-	if selected_tile >= 0:
-		var purse := int(cs.gold.get(me, 0))
-		for name: StringName in _build_buttons:
-			var allowed: bool = cs.can_place(me, selected_tile, name)
-			can_build = can_build or allowed
-			var button: Button = _build_buttons[name]
-			button.disabled = not allowed or purse < int(Rules.STRUCTURES[name]["cost"])
-			button.tooltip_text = "" if allowed else "not on this ground, or too far from a town of yours"
-	_build_bar.visible = can_build
-
-	# Burn what is under your feet, if it is not yours.
-	_raze.visible = false
-	if selected_army >= 0 and cs.armies.has(selected_army):
-		var standing = cs.armies[selected_army]
-		var underfoot := cs.structure_at(standing["tile"])
-		var worked = cs.working_settlement(standing["tile"])
-		_raze.visible = underfoot != &"" and standing["move_left"] > 0 \
-			and (worked == null or worked["owner"] != me)
-		if _raze.visible:
-			_raze.text = "Burn the %s" % underfoot
-
-	# ...and put one down, if you brought somebody to do it. can_found is asked rather
-	# than reimplemented here: the button has to appear exactly when the order would be
-	# accepted, and there is one answer to that question.
-	_refresh_diplomacy(cs, me)
-	_found.visible = selected_army >= 0 and cs.can_found(me, selected_army)
-
-	# Posting an army is only yours to do, so the bar is hidden for anybody else's.
-	var posting: bool = selected_army >= 0 and cs.armies.has(selected_army) 		and cs.armies[selected_army]["owner"] == me
-	_stance_bar.visible = posting
-	if posting:
-		var now: int = Campaign.stance_of(cs.armies[selected_army])
-		for stance: int in _stance_buttons:
-			var b: Button = _stance_buttons[stance]
-			b.disabled = stance == now
-			b.modulate = Color("9fd8a0") if stance == now else Color.WHITE
-	if mine_here:
-		var purse := int(cs.gold.get(me, 0))
-		var available: Array = cs.recruitable_at(selected_tile)
-		for kind: StringName in _recruit_buttons:
-			var button: Button = _recruit_buttons[kind]
-			var needs: StringName = Rules.KINDS[kind]["requires"]
-			button.disabled = not available.has(kind) or purse < int(Rules.KINDS[kind]["cost"])
-			button.tooltip_text = "" if available.has(kind) else "needs a %s on the land nearby" % needs
-
-	_detach_bar.visible = selected_army >= 0 and cs.armies.has(selected_army)
-	if _detach_bar.visible:
-		_rebuild_detach_bar(cs.armies[selected_army])
-
-	if selected_army >= 0 and cs.armies.has(selected_army):
-		var a = cs.armies[selected_army]
-		_hint.text = "army %d: %d regiments, %d moves left — click a tile to march, shift-click one of yours to join it" % [
-			a["id"], a["regiments"].size(), a["move_left"]]
-		if _placing_detachment:
-			_hint.text = "click an empty hex beside the army to send %d regiment(s) there" % _detaching.size()
-	elif selected_tile >= 0 and settlement == null:
-		var made := cs.structure_at(selected_tile)
-		_hint.text = "tile %d: %s%s" % [selected_tile,
-			Campaign.Terrain.keys()[cs.terrain[selected_tile]].to_lower(),
-			", %s" % made if made != &"" else ""]
-	elif mine_here:
-		var built: String = ", ".join(PackedStringArray(settlement["buildings"])) if settlement["buildings"].size() > 0 else "nothing built"
-		var income := Campaign.settlement_income(settlement)
-		_hint.text = "%s — %s — +%dg +%d food per turn" % [
-			settlement["name"], built, income["gold"], income["food"]]
-	else:
-		_hint.text = "click your army to select it"
+func _draw_fog() -> void:
+	var cs = Net.campaign
+	if cs == null:
+		return
+	var me: int = Net.my_id()
+	for i in cs.terrain.size():
+		if not cs.can_see(me, i):
+			_fog.draw_colored_polygon(Hex.polygon(i), Color.WHITE)
 
 
 func _draw() -> void:
@@ -606,89 +322,204 @@ func _draw() -> void:
 		return
 	var seating: Array = Net.player_ids()
 	var me: int = Net.my_id()
+	var font := Art.font(false, true)
 
-	var outline := PackedColorArray()
+	# Whose land is whose: a faint wash, and a hard line where it changes hands.
+	for i: int in _claims:
+		if cs.can_see(me, i):
+			var wash := Colors.of_owner(_claims[i], seating)
+			wash.a = 0.13
+			draw_colored_polygon(Hex.polygon(i), wash)
+	for b: Array in _borders:
+		draw_line(b[0], b[1], b[2], 3.0, true)
+
+	var focus = cs.settlement_at(selected_tile) if selected_tile >= 0 and selected_army < 0 else null
+	if focus != null and int(focus["owner"]) == me:
+		# The fields this town works, since that is what a build button here reaches.
+		for i in cs.terrain.size():
+			var worked = cs.working_settlement(i)
+			if worked != null and worked["tile"] == focus["tile"]:
+				_outline(i, Color(Colors.SELECT, 0.45), 1.5)
+	if selected_tile >= 0 and selected_army < 0:
+		_outline(selected_tile, Colors.SELECT, 2.5)
+	if _hovered >= 0:
+		_outline(_hovered, Color(1, 1, 1, 0.35), 1.5)
+
+	_draw_roads(cs, me)
 	for i in cs.terrain.size():
-		var shape := Hex.polygon(i)
-		draw_colored_polygon(shape, Colors.of_terrain(cs.terrain[i]))
-		draw_polyline(shape + PackedVector2Array([shape[0]]), Color(0, 0, 0, 0.14), 1.0)
-
-		# Ground nobody of ours has been near. The terrain shows through: this is fog of
-		# war and not an unexplored map -- you can see the shape of the country, you
-		# cannot see who is standing in it.
-		if not cs.can_see(me, i):
-			draw_colored_polygon(shape, FOG)
-			continue
-
-		# What stands on the land, as a mark in the middle of it.
 		var made := cs.structure_at(i)
-		if made != &"":
-			draw_circle(Hex.centre(i), Rules.HEX_SIZE * 0.24, Colors.of_structure(made))
-			draw_arc(Hex.centre(i), Rules.HEX_SIZE * 0.24, 0, TAU, 16, Color(0, 0, 0, 0.55), 1.5)
+		if made != &"" and made != &"road" and made != &"walls" and cs.can_see(me, i):
+			_badge(Hex.centre(i) + Vector2(0, Rules.HEX_SIZE * 0.1), Art.structure_icon(made),
+				Colors.of_structure(made), Rules.HEX_SIZE * 0.34)
 
-	var font := ThemeDB.fallback_font
 	for s: Dictionary in cs.settlements:
-		var c := Colors.of_owner(s["owner"], seating)
-		var at := Hex.centre(s["tile"])
-		var box := Rules.HEX_SIZE * 0.62
-		draw_rect(Rect2(at - Vector2(box, box) * 0.5, Vector2(box, box)), c)
-		draw_rect(Rect2(at - Vector2(box, box) * 0.5, Vector2(box, box)), Color.BLACK, false, 2.0)
-		# How many live there, and how much they mind you. A town that is merely coloured
-		# in tells you nothing about whether it is worth anything.
-		draw_string(font, at + Vector2(-4, 5), str(Campaign.pop_of(s)),
-			HORIZONTAL_ALIGNMENT_LEFT, -1, 15, Color.BLACK)
-		var anger := Campaign.unrest_of(s)
-		if anger > 0:
-			# A ring that closes as the town boils over, so the one about to revolt is
-			# the one you can see from across the map.
-			draw_arc(at, box * 0.95, -PI * 0.5,
-				-PI * 0.5 + TAU * (float(anger) / float(Rules.UNREST_REVOLT)),
-				20, Color("d4553a"), 3.0)
-
+		_draw_settlement(cs, s, seating, font)
 
 	# armies_visible_to and not sorted_army_ids: the same call the wire filter makes, so
 	# the host's window hides exactly what a joined client was never sent. A separate
 	# view-side rule here would be the listen-server bug the whole design is built to
 	# avoid -- two rules that agree today.
 	for a: Dictionary in cs.armies_visible_to(me):
-		var centre := Hex.centre(a["tile"])
-		var c := Colors.of_owner(a["owner"], seating)
-		draw_circle(centre, Rules.HEX_SIZE * 0.42, c)
-		draw_arc(centre, Rules.HEX_SIZE * 0.42, 0, TAU, 24, Color.BLACK, 2.0)
-		if a["id"] == selected_army:
-			draw_arc(centre, Rules.HEX_SIZE * 0.6, 0, TAU, 28, Color.WHITE, 2.5)
-		draw_string(font, centre + Vector2(-5, 5), str(a["regiments"].size()),
-			HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color.BLACK)
-		# What it is doing between turns. A dug-in or hidden army looks exactly like a
-		# marching one otherwise, and both of them gave up a turn to be that way.
-		var posted := Campaign.stance_of(a)
-		if posted != Campaign.Stance.MARCH:
-			draw_string(font, centre + Vector2(-Rules.HEX_SIZE * 0.5, -Rules.HEX_SIZE * 0.5),
-				STANCE_MARKS[posted], HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color.WHITE)
-		# Who is in command, and how many battles he has won. The name is derived from
-		# the army id, so it costs nothing on the wire and every machine agrees.
-		if a["id"] == selected_army:
-			var renown := Campaign.renown_of(a)
-			draw_string(font, centre + Vector2(-Rules.HEX_SIZE, Rules.HEX_SIZE * 0.95),
-				"%s%s" % [Campaign.general_name(int(a["id"])), " *".repeat(renown)],
-				HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color.WHITE)
+		_draw_army(cs, a, seating, font)
 
-	# The route the selected army would take, so marching is not guesswork.
-	if selected_army >= 0 and cs.armies.has(selected_army):
-		var from: int = cs.armies[selected_army]["tile"]
-		var to := _tile_under_mouse()
-		if to >= 0 and to != from:
-			var prev := Hex.centre(from)
-			var left: int = cs.armies[selected_army]["move_left"]
-			var walked := 0
-			for step: int in cs.path(from, to):
-				var here := Hex.centre(step)
-				walked += 1
-				draw_line(prev, here, Color.WHITE if walked <= left else Color(1, 1, 1, 0.3), 2.0)
-				prev = here
+	_draw_route(cs, me)
 
 
-func _process(delta: float) -> void:
-	_move_camera(delta)
-	if selected_army >= 0:
-		queue_redraw()       # the route preview follows the mouse
+func _outline(tile: int, colour: Color, width: float) -> void:
+	var shape := Hex.polygon(tile)
+	draw_polyline(shape + PackedVector2Array([shape[0]]), colour, width, true)
+
+
+## A structure: its picture on a dark disc, ringed in its own colour.
+func _badge(at: Vector2, icon: Texture2D, ring: Color, radius: float) -> void:
+	draw_circle(at, radius, Color(0.08, 0.07, 0.05, 0.82))
+	draw_arc(at, radius, 0, TAU, 20, ring, 1.5, true)
+	if icon != null:
+		var s := radius * 1.3
+		draw_texture_rect(icon, Rect2(at - Vector2(s, s) * 0.5, Vector2(s, s)), false, ring)
+
+
+## A road is worth nothing alone and everything as a chain, so it is drawn as the chain:
+## a track from each road hex to every road or town beside it.
+func _draw_roads(cs, me: int) -> void:
+	for i in cs.terrain.size():
+		if cs.structure_at(i) != &"road" or not cs.can_see(me, i):
+			continue
+		var at := Hex.centre(i)
+		var joined := false
+		for n in cs.adjacent(i):
+			if cs.structure_at(n) == &"road" or cs.settlement_at(n) != null:
+				draw_line(at, (at + Hex.centre(n)) * 0.5, Color("6b5a44"), 5.0, true)
+				draw_line(at, (at + Hex.centre(n)) * 0.5, Color("a08a68"), 2.5, true)
+				joined = true
+		if not joined:
+			draw_circle(at, 4.0, Color("a08a68"))
+
+
+func _draw_settlement(cs, s: Dictionary, seating: Array, font: Font) -> void:
+	var owner := int(s["owner"])
+	var colour := Colors.of_owner(owner, seating) if owner != 0 else Colors.NEUTRAL
+	var at := Hex.centre(s["tile"])
+	var pop := Campaign.pop_of(s)
+	var sprite: StringName = &"castle" if pop >= 5 else &"keep" if pop >= 3 else &"house"
+	var size := Rules.HEX_SIZE * (1.15 + 0.06 * minf(pop, 8.0))
+
+	if cs.structure_at(s["tile"]) == &"walls":
+		draw_arc(at, Rules.HEX_SIZE * 0.78, 0, TAU, 32, Color("3a342c"), 5.0, true)
+		draw_arc(at, Rules.HEX_SIZE * 0.78, 0, TAU, 32, Color("b8b0a0"), 3.0, true)
+	var tex := Art.sprite(sprite)
+	if tex != null:
+		draw_texture_rect(tex, Rect2(at - Vector2(size * 0.5, size * 0.62), Vector2(size, size)), false,
+			Color(0.9, 0.88, 0.82))
+	else:
+		draw_rect(Rect2(at - Vector2(12, 12), Vector2(24, 24)), colour)
+
+	# The name plate: who holds it, what it is called, how many live there.
+	var text: String = s["name"]
+	var fs := 13
+	var wide := font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x
+	var plate := Rect2(at + Vector2(-wide * 0.5 - 7, Rules.HEX_SIZE * 0.42), Vector2(wide + 14, 17))
+	draw_rect(plate, Color(0.07, 0.06, 0.05, 0.88))
+	draw_rect(Rect2(plate.position, Vector2(4, plate.size.y)), colour)
+	draw_rect(plate, Color(colour, 0.9), false, 1.0)
+	draw_string(font, plate.position + Vector2(9, 13), text, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, Colors.TEXT)
+	# How many live there, on a disc at the end of the plate.
+	var disc := plate.position + Vector2(plate.size.x + 7, plate.size.y * 0.5)
+	draw_circle(disc, 8.5, Color(0.07, 0.06, 0.05, 0.92))
+	draw_arc(disc, 8.5, 0, TAU, 16, colour, 1.5, true)
+	var n := str(pop)
+	draw_string(font, disc + Vector2(-font.get_string_size(n, HORIZONTAL_ALIGNMENT_LEFT, -1, 11).x * 0.5, 4),
+		n, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Colors.GOLD)
+
+	# How much they mind you, as a bar under the plate that fills toward revolt -- the
+	# one about to go is the one you can see from across the map.
+	var anger := Campaign.unrest_of(s)
+	if anger > 0:
+		var bar := Rect2(plate.position + Vector2(0, plate.size.y + 1), Vector2(plate.size.x, 3))
+		draw_rect(bar, Color(0, 0, 0, 0.6))
+		draw_rect(Rect2(bar.position, Vector2(bar.size.x * float(anger) / float(Rules.UNREST_REVOLT), 3)), Colors.BAD)
+
+
+## An army as a disc in its owner's colour, carrying the kind it has most of, with how
+## many regiments on a badge and what it is doing between turns on another.
+func _draw_army(cs, a: Dictionary, seating: Array, font: Font) -> void:
+	var centre := Hex.centre(a["tile"])
+	if cs.settlement_at(a["tile"]) != null:
+		centre += Vector2(Rules.HEX_SIZE * 0.42, -Rules.HEX_SIZE * 0.4)   # beside the town
+	var colour := Colors.of_owner(a["owner"], seating)
+	var r := Rules.HEX_SIZE * 0.5
+	var chosen: bool = a["id"] == selected_army
+
+	draw_circle(centre + Vector2(0, r * 0.35), r * 1.05, Color(0, 0, 0, 0.35))   # its shadow
+	if chosen:
+		var breathe := 0.55 + 0.45 * sin(Time.get_ticks_msec() * 0.005)
+		draw_arc(centre, r * 1.4, 0, TAU, 32, Color(Colors.SELECT, breathe), 3.0, true)
+	draw_circle(centre, r + 2.5, Color(0.06, 0.05, 0.04))
+	draw_circle(centre, r, colour)
+	draw_arc(centre, r - 2.0, 0, TAU, 28, colour.lightened(0.35), 1.5, true)
+	var lead := Art.kind_icon(_lead_kind(a))
+	if lead != null:
+		draw_texture_rect(lead, Rect2(centre - Vector2(r, r) * 0.62, Vector2(r, r) * 1.24), false, Color(0.08, 0.06, 0.05, 0.92))
+
+	var badge := centre + Vector2(r * 0.85, r * 0.8)
+	draw_circle(badge, 8.0, Color(0.07, 0.06, 0.05))
+	draw_arc(badge, 8.0, 0, TAU, 16, colour, 1.5, true)
+	var count := str(a["regiments"].size())
+	draw_string(font, badge + Vector2(-font.get_string_size(count, HORIZONTAL_ALIGNMENT_LEFT, -1, 11).x * 0.5, 4),
+		count, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Colors.TEXT)
+
+	# What it is doing between turns. A dug-in or hidden army looks exactly like a
+	# marching one otherwise, and both of them gave up a turn to be that way.
+	var posted := Campaign.stance_of(a)
+	if posted != Campaign.Stance.MARCH:
+		var tag := centre + Vector2(-r * 0.9, -r * 0.85)
+		draw_circle(tag, 8.0, Color(0.07, 0.06, 0.05))
+		var icon := Art.stance_icon(posted)
+		if icon != null:
+			draw_texture_rect(icon, Rect2(tag - Vector2(6, 6), Vector2(12, 12)), false, Colors.GOLD)
+
+
+static func _lead_kind(a: Dictionary) -> StringName:
+	var counts := {}
+	var best: StringName = &""
+	for r: Array in a["regiments"]:
+		counts[r[0]] = counts.get(r[0], 0) + 1
+		if best == &"" or counts[r[0]] > counts[best]:
+			best = r[0]
+	return best
+
+
+## The route the selected army would take, so marching is not guesswork: dashes within
+## this turn's reach, fainter beyond it, and a numbered marker wherever a turn runs out.
+func _draw_route(cs, me: int) -> void:
+	if selected_army < 0 or not cs.armies.has(selected_army):
+		return
+	var a: Dictionary = cs.armies[selected_army]
+	var from: int = a["tile"]
+	var to := _tile_under_mouse()
+	if to < 0 or to == from:
+		return
+	var left: int = a["move_left"]
+	var stride := maxi(1, Campaign.move_points(a))
+	var prev := Hex.centre(from)
+	var walked := 0
+	var font := Art.font(false, true)
+	for step: int in cs.path(from, to):
+		var here := Hex.centre(step)
+		walked += 1
+		var now := walked <= left
+		draw_dashed_line(prev, here, Colors.ORDER if now else Color(Colors.ORDER, 0.35), 3.0, 8.0)
+		if walked == left or (walked > left and (walked - left) % stride == 0):
+			var turns := 1 + (0 if walked <= left else ceili(float(walked - left) / float(stride)))
+			draw_circle(here, 9.0, Color(0.07, 0.06, 0.05, 0.9))
+			draw_string(font, here + Vector2(-4, 5), str(turns), HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Colors.ORDER)
+		prev = here
+
+	# What waits at the end: somebody to fight, or just ground.
+	var enemy = cs.army_at(to)
+	var town = cs.settlement_at(to)
+	var hostile: bool = (enemy != null and enemy["owner"] != me) or (town != null and town["owner"] != me)
+	var mark := Art.icon(&"sword" if hostile else &"flag_triangle")
+	if mark != null:
+		draw_texture_rect(mark, Rect2(Hex.centre(to) - Vector2(11, 30), Vector2(22, 22)), false,
+			Colors.BAD if hostile else Colors.ORDER)

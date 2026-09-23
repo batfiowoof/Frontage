@@ -715,7 +715,7 @@ func battle_orders(bs) -> Array:
 				# one regiment's own width of open ground beside it. That is the line
 				# between a line with horns and a set of separate columns, and it is the
 				# rule the last attempt had no expression of at all.
-				var span := Formation.frontage(r.max_strength, r.width, r.spacing()) * 2.0
+				var span: float = r.extent().y * 2.0
 				var most := maxf(0.0, span * 2.0 - LINE_SPACING)
 				slot += signf(slot) * clampf(reach_out - absf(slot), 0.0, most)
 			target = enemy_centre + across * slot - approach * STANDOFF

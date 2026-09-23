@@ -71,6 +71,10 @@ var charge := 0.0
 ## Server-side only, like damage_pool: a client draws the battle, it does not run it.
 var reload := 0.0
 var focus := -1
+## How far a wedge has driven into what is in front of it, 0..1. Server-side like `pace`:
+## it starts at nothing, a replay rebuilds it from the fight, and a client only draws the
+## positions it produces. See Rules.WEDGE_*.
+var bite := 0.0
 var stance := 0                    # a mask of Stance bits
 
 ## Fortification credit from whatever the regiment is standing behind, 0..1.
@@ -174,6 +178,15 @@ func spacing() -> float:
 	return float(form()["spacing"])
 
 
+## The outline it stands in: block, wedge or hollow. See Formation.shape_of.
+func shape() -> StringName:
+	return StringName(form().get("shape", &"block"))
+
+
+## (half depth, half frontage) of the shape it stands in, from max_strength like reach().
+func extent() -> Vector2:
+	return Formation.extent(shape(), max_strength, width, spacing())
+
 ## Caught mid-change, a regiment is worth rather less than either shape it is between.
 func order_factor() -> float:
 	return Rules.REFORM_PENALTY if reforming > 0.0 else 1.0
@@ -201,6 +214,7 @@ func set_formation(name: StringName) -> bool:
 	formation = name
 	width = natural_width()
 	reforming = Rules.FORMATION_CHANGE_SECONDS
+	bite = 0.0
 	return true
 
 

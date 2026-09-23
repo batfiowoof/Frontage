@@ -501,10 +501,19 @@ func lay_ground(terrain: int, seed_value: int) -> void:
 ## ponytail: measured from max_strength, so the engagement distance does not drift as
 ## a regiment is worn down -- which is the entire point. A ten-man remnant therefore
 ## keeps a full block's footprint. Give it a real occupied depth if that ever shows.
+##
+## The SHAPE decides it, through Formation.extent: a hollow square reaches as far every way,
+## a wedge's sides slope in, and a wedge that has bitten into a line reaches LESS far
+## forward -- which is the penetration itself. Contact stops its march later and
+## _separate lets the overlap stand, so the point physically drives in.
 static func reach(r: Regiment, exposure: Exposure) -> float:
+	var e := r.extent()
+	var shape := r.shape()
 	if exposure == Exposure.FLANK:
-		return Formation.frontage(r.max_strength, r.width, r.spacing())
-	return Formation.half_depth(r.max_strength, r.width, r.spacing())
+		return e.y * (Rules.WEDGE_FLANK_REACH if shape == &"wedge" else 1.0)
+	if exposure == Exposure.FRONT and shape == &"wedge":
+		return e.x * (1.0 - Rules.WEDGE_PENETRATION * clampf(r.bite, 0.0, 1.0))
+	return e.x
 
 
 ## The space between two regiments' facing edges. Negative means they overlap.
@@ -592,7 +601,7 @@ static func line_is_clear(shooter: Regiment, mark: Regiment, everyone) -> bool:
 		if travelled <= 0.0 or travelled >= length:
 			continue                       # beside us or behind the target
 		var aside := absf(offset.cross(along))
-		var width := Formation.frontage(f.max_strength, f.width, f.spacing()) + Rules.LINE_OF_FIRE_MARGIN
+		var width: float = f.extent().y + Rules.LINE_OF_FIRE_MARGIN
 		if aside < width:
 			return false
 	return true
@@ -791,6 +800,10 @@ func _accumulate_strike(attacker: Regiment, defender: Regiment, dt: float, kills
 			morale_drain = Rules.MORALE_DRAIN_REAR
 	if defender.state == Regiment.State.ROUTING:
 		damage_mult *= Rules.RUNDOWN_DAMAGE_MULT
+	# A wedge's sloped sides are a rank or two deep where a line's flank is its whole
+	# depth: the price of the point.
+	if defender.shape() == &"wedge" and hit_from != Exposure.FRONT:
+		damage_mult *= Rules.WEDGE_EXPOSED
 
 	# The impact itself, decaying over CHARGE_SECONDS into an ordinary melee. A braced
 	# defender takes most of it out -- set spears stopping a charge is the whole reason
@@ -817,7 +830,8 @@ func _accumulate_strike(attacker: Regiment, defender: Regiment, dt: float, kills
 	if attacker.is_cavalry():
 		output *= tech(attacker.owner_id, &"horse_attack")
 	output *= 1.0 - clampf(tech(defender.owner_id, &"armour"), 0.0, 0.6)
-	output *= 1.0 - clampf(defender.defense + float(defender.form()["defense"]) * defender.order_factor(), 0.0, 0.9)
+	# Down to -0.5 and not 0: a column caught in a fight is WORSE than nothing at it.
+	output *= 1.0 - clampf(defender.defense + float(defender.form()["defense"]) * defender.order_factor(), -0.5, 0.9)
 	output *= defender.vulnerability()     # a spent regiment is easier to kill
 
 	kills[defender.id] = float(kills.get(defender.id, 0.0)) + output
@@ -839,6 +853,10 @@ func _accumulate_strike(attacker: Regiment, defender: Regiment, dt: float, kills
 	# defender.nerve() is the defender's OWN exhaustion making it break sooner, which is a
 	# different thing from the attacker's readiness inside `pressure` -- that is how hard
 	# he can press. Tired men breaking sooner had no expression here at all.
+	# A wedge driven into a line is breaking it, and that goes through its nerve as well
+	# as its numbers. Scaled by how far in the point has got.
+	if attacker.shape() == &"wedge" and swinging_from == Exposure.FRONT:
+		morale_drain += Rules.WEDGE_SHOCK * clampf(attacker.bite, 0.0, 1.0)
 	var shaken := morale_drain * pressure * tech(defender.owner_id, &"resolve") * dt
 	shaken *= defender.nerve() * defender.veteran_resolve()
 	if _in_reach_of_general(defender):
@@ -854,11 +872,14 @@ func _accumulate_strike(attacker: Regiment, defender: Regiment, dt: float, kills
 ## the men take to walk there. `reach()` deliberately still reads `width` -- the footprint
 ## is in flux while they walk anyway, and ramping it too would have contact distance
 ## wobbling through every re-dress for nothing.
+##
+## And the shape: a wedge fights with its point until it has bitten in, and a hollow
+## square with one face, whichever way it is hit.
 static func files_engaged(r: Regiment, exposure: Exposure) -> int:
 	var w := r.fighting_width()
 	if exposure == Exposure.FRONT:
-		return Formation.files_across(r.strength, w)
-	return Formation.ranks_deep(r.strength, w)
+		return Formation.front_files(r.shape(), r.strength, w, r.bite)
+	return Formation.side_files(r.shape(), r.strength, w)
 
 
 ## Men fight only where the formations actually touch, so an attacker cannot bring
@@ -915,6 +936,7 @@ func _step_regiment(r: Regiment, dt: float) -> void:
 		r.dressed = 1.0 if walk <= 0.01 else minf(1.0, r.dressed + Rules.DRESS_SPEED / walk * dt)
 	if r.charge > 0.0:
 		r.charge = maxf(0.0, r.charge - dt)
+	_drive_the_point(r, dt)
 	match r.state:
 		Regiment.State.DEAD:
 			return
@@ -946,6 +968,28 @@ func _step_regiment(r: Regiment, dt: float) -> void:
 			var foe = regiments.get(r.engaged_with)
 			if foe != null:
 				_turn_toward(r, (foe.pos - r.pos).angle(), dt * Rules.ENGAGED_TURN_MULT, false)
+
+
+## A wedge in frontal contact drives further in, and one that is not works its way back
+## out, at the same rate either way. Only a wedge, only pushing, only from its front.
+func _drive_the_point(r: Regiment, dt: float) -> void:
+	if r.shape() != &"wedge":
+		r.bite = 0.0
+		return
+	var foe = regiments.get(r.engaged_with)
+	var pushing: bool = r.state == Regiment.State.FIGHTING and foe != null 		and exposure_of(r, foe) == Exposure.FRONT
+	var rate := dt / Rules.WEDGE_BITE_SECONDS
+	var was := r.bite
+	r.bite = clampf(r.bite + (rate if pushing else -rate), 0.0, 1.0)
+	# ...and it moves forward by exactly the reach the bite took off it. A regiment in a
+	# fight stands still, so shortening its reach alone would only open a gap between the
+	# two lines -- contact lost, bite decaying, round and round. The point has to walk in.
+	if r.bite > was:
+		var to := r.pos + Vector2.from_angle(r.facing) \
+			* r.extent().x * Rules.WEDGE_PENETRATION * (r.bite - was)
+		if not crosses_a_wall(r.pos, to):
+			r.pos = to
+			r.target = to
 
 
 ## Morale comes back to anybody who is out of contact and has had a moment to breathe.
@@ -1085,7 +1129,10 @@ func _advance(r: Regiment, dt: float) -> void:
 ##
 ## `free` is false in contact. That is not a detail: a regiment taken in the rear that
 ## could flip to face its attacker would delete the flank-and-rear mechanic outright.
+##
+## And only a symmetric shape may flip at all. A wedge turned about would have its point
+## jump to the back, so a wedge wheels round like anything else changing its ground.
 func _turn_toward(r: Regiment, desired: float, dt: float, free := true) -> void:
-	if free and absf(angle_difference(r.facing, desired)) > PI * 0.5:
+	if free and Formation.symmetric(r.shape()) and absf(angle_difference(r.facing, desired)) > PI * 0.5:
 		r.about_face()
 	r.facing = rotate_toward(r.facing, desired, Rules.TURN_SPEED * float(r.form()["turn"]) * dt)

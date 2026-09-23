@@ -389,15 +389,43 @@ const LINE_OF_FIRE_MARGIN := 18.0
 ##   all_round no flank or rear penalty -- the answer to being surrounded
 ##   brace     spears set against a charge: hurts cavalry, and is hurt less by it
 ##   missile   resistance to shooting, unused until M19
+##   shape     the outline the men actually stand in, which the fight reads through
+##             sim/formation.gd -- block, wedge (a point that bites in) or hollow (a
+##             square of four faces). Everything else here is a number; this is geometry.
+##
+## Column's negative defense is "bad if caught": the table said so for a long time and
+## nothing enforced it.
 const FORMATIONS := {
-	&"line":   {"width": 1.0,  "spacing": 1.0,  "speed": 1.0,  "turn": 1.0,  "damage": 1.0, "defense": 0.0,  "all_round": false, "brace": false, "missile": 0.0},
-	&"column": {"width": 0.35, "spacing": 1.0,  "speed": 1.3,  "turn": 1.4,  "damage": 1.0, "defense": 0.0,  "all_round": false, "brace": false, "missile": 0.0},
-	&"square": {"width": 0.55, "spacing": 1.0,  "speed": 0.55, "turn": 0.6,  "damage": 0.85, "defense": 0.1, "all_round": true,  "brace": true,  "missile": -0.25},
-	&"wedge":  {"width": 0.6,  "spacing": 1.0,  "speed": 1.15, "turn": 1.1,  "damage": 1.25, "defense": 0.0, "all_round": false, "brace": false, "missile": 0.0},
-	&"loose":  {"width": 1.0,  "spacing": 1.9,  "speed": 1.15, "turn": 1.3,  "damage": 0.55, "defense": 0.0, "all_round": false, "brace": false, "missile": 0.6},
-	&"shield": {"width": 1.0,  "spacing": 0.85, "speed": 0.5,  "turn": 0.35, "damage": 0.9, "defense": 0.35, "all_round": false, "brace": true,  "missile": 0.45},
+	&"line":   {"shape": &"block",  "width": 1.0,  "spacing": 1.0,  "speed": 1.0,  "turn": 1.0,  "damage": 1.0, "defense": 0.0,  "all_round": false, "brace": false, "missile": 0.0},
+	&"column": {"shape": &"block",  "width": 0.35, "spacing": 1.0,  "speed": 1.3,  "turn": 1.4,  "damage": 1.0, "defense": -0.15, "all_round": false, "brace": false, "missile": 0.0},
+	&"square": {"shape": &"hollow", "width": 0.55, "spacing": 1.0,  "speed": 0.3,  "turn": 0.6,  "damage": 0.85, "defense": 0.1, "all_round": true,  "brace": true,  "missile": -0.25},
+	&"wedge":  {"shape": &"wedge",  "width": 0.6,  "spacing": 1.0,  "speed": 1.15, "turn": 1.1,  "damage": 1.25, "defense": 0.0, "all_round": false, "brace": false, "missile": 0.0},
+	&"loose":  {"shape": &"block",  "width": 1.0,  "spacing": 1.9,  "speed": 1.15, "turn": 1.3,  "damage": 0.55, "defense": 0.0, "all_round": false, "brace": false, "missile": 0.6},
+	&"shield": {"shape": &"block",  "width": 1.0,  "spacing": 0.85, "speed": 0.5,  "turn": 0.35, "damage": 0.9, "defense": 0.35, "all_round": false, "brace": true,  "missile": 0.45},
 }
 const DEFAULT_FORMATION := &"line"
+
+# --- shapes ---------------------------------------------------------------
+## A wedge meets the enemy with its point: this many files in contact at first, however
+## wide the wedge is. The rest of it comes into the fight as it drives in.
+const WEDGE_POINT_FILES := 3
+## Seconds of frontal pushing for a wedge to drive fully into a line, `bite` 0 -> 1.
+const WEDGE_BITE_SECONDS := 6.0
+## How much of its own half-depth a fully-bitten wedge has driven inside its enemy's
+## front. This is what makes the penetration physical: `gap_between` allows the overlap.
+const WEDGE_PENETRATION := 0.6
+## Extra morale drain a second on a line with a wedge driven fully into it. Breaking
+## the line is the whole point of the shape, so it goes through morale and not only
+## through casualties.
+const WEDGE_SHOCK := 1.5
+## How far back each file stands per file out from the point, in ranks. 0 is a line.
+const WEDGE_SLOPE := 0.9
+## What a wedge suffers on its sides or rear, on top of the ordinary flank multiplier.
+const WEDGE_EXPOSED := 1.3
+## A wedge's sides slope in, so it reaches less far toward a flank than its widest rank.
+const WEDGE_FLANK_REACH := 0.6
+## Ranks on each face of a hollow square. Men per face is the regiment over 4x this.
+const SQUARE_RANKS := 3
 
 ## Frontage the player may ask for. Two is a file of one man wide either side of
 ## nothing; forty is wider than any regiment we field.

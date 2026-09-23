@@ -6,11 +6,13 @@ const BattleView := preload("res://view/battle/battle_view.gd")
 const Replay := preload("res://net/replay.gd")
 const Save := preload("res://net/save.gd")
 const Colors := preload("res://view/colors.gd")
+const UiTheme := preload("res://view/ui/theme.gd")
+const Widgets := preload("res://view/ui/widgets.gd")
 
 var _screen: Node = null
 var _lobby: CanvasLayer
 var _status: Label
-var _roster: Label
+var _roster: VBoxContainer
 var _address: LineEdit
 var _start: Button
 var _add_ai: Button
@@ -23,6 +25,10 @@ var _over: CanvasLayer = null           # the end-of-campaign panel, once there 
 
 
 func _ready() -> void:
+	# On the root window for tooltips and popups, which are windows of their own. The
+	# screens hang it on their own roots too: it does not reach through a CanvasLayer.
+	get_tree().root.theme = UiTheme.shared()
+	RenderingServer.set_default_clear_color(Color("0d0b09"))
 	Net.players_changed.connect(_refresh_lobby)
 	Net.campaign_updated.connect(_on_campaign)
 	Net.battle_updated.connect(_on_battle)
@@ -52,6 +58,13 @@ func _ready() -> void:
 		elif args[i] == "--load" and i + 1 < args.size():
 			_load_path = args[i + 1]
 			_autostart = true
+		elif args[i] == "--shot" and i + 2 < args.size():
+			# --shot <path> <seconds>: save what is on screen and quit. How a change to
+			# the look is checked without somebody sitting at the window.
+			var path := args[i + 1]
+			get_tree().create_timer(float(args[i + 2])).timeout.connect(func() -> void:
+				get_viewport().get_texture().get_image().save_png(path)
+				get_tree().quit())
 		elif args[i] == "--ai" and i + 1 < args.size():
 			# BEFORE add_ai(), not after. add_ai() emits players_changed, which runs
 			# _refresh_lobby -> _check_autostart, and that bails while _autostart is still
@@ -91,36 +104,64 @@ func _check_autostart() -> void:
 func _build_lobby() -> void:
 	_lobby = CanvasLayer.new()
 	add_child(_lobby)
+	var root := Control.new()
+	root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	root.theme = UiTheme.shared()
+	_lobby.add_child(root)
+
+	# A dark vignette to sit the panel on, rather than the engine's grey.
+	var back := TextureRect.new()
+	back.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	back.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	var glow := GradientTexture2D.new()
+	glow.fill = GradientTexture2D.FILL_RADIAL
+	glow.fill_from = Vector2(0.5, 0.45)
+	glow.fill_to = Vector2(1.1, 1.1)
+	glow.gradient = Gradient.new()
+	glow.gradient.set_color(0, Color("2e2418"))
+	glow.gradient.set_color(1, Color("0a0806"))
+	back.texture = glow
+	root.add_child(back)
 
 	var centre := CenterContainer.new()
 	centre.set_anchors_preset(Control.PRESET_FULL_RECT)
-	_lobby.add_child(centre)
+	root.add_child(centre)
 
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel", UiTheme.panel(Colors.PANEL, Colors.TRIM_BRIGHT, 24))
+	centre.add_child(panel)
 	var box := VBoxContainer.new()
-	box.custom_minimum_size = Vector2(340, 0)
-	box.add_theme_constant_override("separation", 8)
-	centre.add_child(box)
+	box.custom_minimum_size = Vector2(360, 0)
+	box.add_theme_constant_override("separation", 10)
+	panel.add_child(box)
 
-	var title := Label.new()
-	title.text = "Campaign & Battle"
-	title.add_theme_font_size_override("font_size", 28)
+	var title := Widgets.label("Campaign & Battle", "Heading")
+	title.add_theme_font_size_override("font_size", 34)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	box.add_child(title)
+	var sub := Widgets.label("host a table, or join one", "Dim")
+	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	box.add_child(sub)
+	box.add_child(HSeparator.new())
 
 	var host := Button.new()
 	host.text = "Host"
+	host.theme_type_variation = "BigButton"
 	host.pressed.connect(_on_host)
 	box.add_child(host)
 
+	var joining := HBoxContainer.new()
+	box.add_child(joining)
 	_address = LineEdit.new()
 	_address.text = "127.0.0.1"
 	_address.placeholder_text = "host address"
-	box.add_child(_address)
-
+	_address.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	joining.add_child(_address)
 	var join := Button.new()
 	join.text = "Join"
+	join.custom_minimum_size = Vector2(90, 0)
 	join.pressed.connect(_on_join)
-	box.add_child(join)
+	joining.add_child(join)
 
 	_add_ai = Button.new()
 	_add_ai.text = "Add AI opponent"
@@ -144,16 +185,16 @@ func _build_lobby() -> void:
 
 	_start = Button.new()
 	_start.text = "Start Campaign"
+	_start.theme_type_variation = "BigButton"
 	_start.visible = false
 	_start.pressed.connect(func() -> void: Net.start_campaign())
 	box.add_child(_start)
 
-	_status = Label.new()
+	_status = Widgets.label("", "Dim")
 	_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	box.add_child(_status)
 
-	_roster = Label.new()
-	_roster.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_roster = VBoxContainer.new()
 	box.add_child(_roster)
 
 
@@ -179,10 +220,19 @@ func _refresh_lobby() -> void:
 	_start.visible = Net.is_server() and Net.campaign == null
 	_add_ai.visible = _start.visible
 	_load.visible = _start.visible and not Save.newest().is_empty()
-	var names := PackedStringArray()
-	for id: int in Net.player_ids():
-		names.append("player %d%s" % [id, "  (you)" if id == Net.my_id() else ""])
-	_roster.text = "\n".join(names)
+	for c in _roster.get_children():
+		c.queue_free()
+	var seating: Array = Net.player_ids()
+	for id: int in seating:
+		var row := HBoxContainer.new()
+		var chip := ColorRect.new()
+		chip.color = Colors.of_owner(id, seating)
+		chip.custom_minimum_size = Vector2(14, 14)
+		chip.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		row.add_child(chip)
+		row.add_child(Widgets.label("%s%s" % ["AI %d" % -id if id < 0 else "Player %d" % id,
+			"  (you)" if id == Net.my_id() else ""]))
+		_roster.add_child(row)
 
 
 ## A battle takes over the screen while it lasts; the campaign comes back after.
@@ -221,22 +271,27 @@ func _on_campaign_over(winner_id: int) -> void:
 		return
 	_over = CanvasLayer.new()
 	add_child(_over)
+	var colour := Colors.of_owner(winner_id, Net.player_ids())
+	var top := CenterContainer.new()
+	top.theme = UiTheme.shared()
+	top.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
+	top.offset_top = 70
+	_over.add_child(top)
 	var panel := PanelContainer.new()
-	panel.set_anchors_preset(Control.PRESET_CENTER_TOP)
-	panel.position = Vector2(-150, 40)
-	panel.custom_minimum_size = Vector2(300, 0)
-	_over.add_child(panel)
+	panel.add_theme_stylebox_override("panel", UiTheme.panel(Colors.PANEL_DEEP, colour, 20))
+	top.add_child(panel)
 	var box := VBoxContainer.new()
+	box.custom_minimum_size = Vector2(380, 0)
 	panel.add_child(box)
-	var head := Label.new()
+	var head := Widgets.label("Victory" if winner_id == Net.my_id() else "Defeat", "Heading")
 	head.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	head.add_theme_font_size_override("font_size", 22)
-	head.add_theme_color_override("font_color", Colors.of_owner(winner_id, Net.player_ids()))
-	head.text = "you have won" if winner_id == Net.my_id() else "player %d has won" % winner_id
+	head.add_theme_font_size_override("font_size", 36)
+	head.add_theme_color_override("font_color", colour)
 	box.add_child(head)
-	var sub := Label.new()
+	var sub := Widgets.label("%s � turn %d" % [
+		"you have won" if winner_id == Net.my_id() else "player %d has won" % winner_id,
+		Net.campaign.turn if Net.campaign != null else 0], "Dim")
 	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	sub.text = "turn %d" % (Net.campaign.turn if Net.campaign != null else 0)
 	box.add_child(sub)
 
 
@@ -247,3 +302,13 @@ func _on_server_left() -> void:
 	_lobby.visible = true
 	_say("the host has gone")
 	_refresh_lobby()
+
+
+## F12 saves what is on screen to user://shots/. How a change to the look gets checked,
+## and cheap enough to leave in.
+func _input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_F12:
+		DirAccess.make_dir_recursive_absolute("user://shots")
+		var path := "user://shots/%s.png" % Time.get_datetime_string_from_system().replace(":", "-")
+		get_viewport().get_texture().get_image().save_png(path)
+		print("saved ", ProjectSettings.globalize_path(path))

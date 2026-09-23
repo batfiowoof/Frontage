@@ -330,6 +330,40 @@ Two things that are easy to get wrong here:
   well it is set. Its job is not being flanked; the shield wall's is standing in front of
   horses.
 
+### A shape is geometry, not a costume
+
+Every formation used to be the same rectangle with different numbers on it, so a wedge
+and a square were both "a narrow block" -- in the fight and on the screen. Each row of
+`Rules.FORMATIONS` now names a `shape`, and **`sim/formation.gd` is the one place a shape
+is defined**: `extent`, `front_files`, `side_files`, `shaped_slot`, `symmetric`. `reach()`,
+`files_engaged()`, the men's slots, the order preview, picking and the minimap all read
+it, so a shape cannot exist in the fight and not on the screen.
+
+	block    line, column, loose, shield -- the rectangle, exactly as before
+	wedge    a point: WEDGE_POINT_FILES in contact at first, and `bite` drives it in
+	hollow   square: four faces SQUARE_RANKS deep, one face fighting whoever it faces
+
+**A wedge bites.** While it pushes frontally, `Regiment.bite` climbs over
+`WEDGE_BITE_SECONDS`, and three things follow from it: its front files grow from the point
+to its full width, its frontal `reach` shortens by `WEDGE_PENETRATION`, and the line in
+front of it takes `WEDGE_SHOCK` more morale drain. The reach alone would only open a gap --
+a regiment in a fight stands still, so it would drop out of contact and the bite would
+decay -- so `_drive_the_point` walks it forward by exactly the reach it lost. Concentration
+comes free from `contact_files`: a line can bring no more files against a point than the
+point offers, times `WRAP_ALLOWANCE`. The price is the sides: `WEDGE_EXPOSED` on top of the
+flank multiplier, and **no about-face** -- its point would jump to the back, so it wheels.
+
+`bite` is server-side like `pace`: it starts at nothing and a replay rebuilds it.
+
+Measured (`tests/test_shapes.gd` prints these):
+
+	a wedge drives in           38 units in 6s, still in contact
+	a line breaks               at 32s to a wedge, 41s to a line
+	horse into a square, 8s     horse lose 7, square 3
+
+Column's `defense` is -0.15 and the clamp in `_accumulate_strike` now goes to -0.5: "bad if
+caught" had been in the table's comment for a long time with nothing enforcing it.
+
 ## Morale, and the man it hangs on
 
 **Morale measures how badly you are being handled, not how long you have stood there.**
@@ -617,10 +651,16 @@ in id order rather than left to right, so box-selected lines crossed on the way;
 `half_width` came from current strength while `half_depth` and the sim's own `reach()` came
 from `max_strength`, so the honest preview lied about any regiment that had taken losses.
 
-Each ghost is the regiment's real footprint -- `Formation.frontage()` and `half_depth()` at
-`max_strength`, at **the width it is being ordered into** and its formation's spacing -- so
-the preview shows the reshape while you are still dragging. Frontage is what decides the
-fight; it should not be invisible until after you have committed.
+**The ghost is the men.** `Bodies.ghost_places()` lays every man of every selected regiment
+out where the order would put him -- at **the width it is being ordered into**, in its
+formation's shape and spacing, through the same `_local_slot` the living men stand in -- and
+a second MultiMesh draws them. It used to be a rectangle per regiment, which said nothing
+about a wedge or a square and was most of what made the field read as boxes. Frontage is
+what decides the fight; it should not be invisible until after you have committed.
+
+**Nothing on the field is outlined.** Selected, hovered, the attack target and what your
+archers can reach are all shown by tinting the men themselves (`bodies.build(..., tints)`),
+so a highlight shows the shape the regiment is actually standing in.
 
 ## The men
 
@@ -1565,6 +1605,41 @@ notice, which is why the tests check each of them separately.
 A save that wants a different number of players than are at the table is refused rather
 than approximated. Saving mid-battle is refused too: a campaign is only coherent between
 fights.
+
+## Look and feel
+
+Dark translucent panels, a bronze edge, Cinzel headings and Alegreya Sans for reading --
+Total War's campaign chrome. Three rules keep it that way:
+
+- **Every colour is a token in `view/colors.gd`.** `PANEL`, `TRIM`, `TEXT`, `GOLD`,
+  `GOOD`/`WARN`/`BAD`, `SELECT` for what you picked and `ORDER` for what you are about to
+  order. A literal elsewhere is a colour that will drift; the same green used to be written
+  out in four files, three different ways.
+- **Assets are CC0 or OFL, and are `load()`ed, never `preload()`ed.** `.godot/` is not in
+  the repository, so a fresh clone has no import cache and a const preload of a texture
+  stops the headless gates compiling `view/` at all. `view/ui/art.gd` is the one place
+  that loads anything and every caller survives a null. `play.cmd` builds the cache once;
+  the gates never draw and never need it. Sources are listed under `assets/`.
+- **The theme stops at a CanvasLayer.** `get_tree().root.theme` reaches tooltips and
+  popups, which are windows, and nothing else: each HUD root sets `UiTheme.shared()` on
+  itself. That is why the first build of this had the engine's font on every label.
+
+Each screen is a map node that owns the selection and the input, and a HUD `Control`
+(`view/campaign/hud.gd`, `view/battle/hud.gd`) laid out from containers by
+`Widgets.frame()` -- nothing is placed by pixel offset, so 720p and 1080p lay out alike.
+The campaign's bottom panel is empty until something is selected; the old HUD kept seven
+bars stacked in one corner whether or not any of them applied, and four overlapped.
+
+**Woods, hills and marsh are drawn now.** They were on the wire and deciding fights from
+the day the ground went in, and nothing ever rendered them.
+
+**The battle ground samples a noise texture, not a shader hash.** Over a 2400-unit field
+the `sin()` hash loses precision on the GPU and the grass came out in hard rectangles
+that rotating the octaves did not remove. The campaign's hexes are small enough that the
+hash still holds there.
+
+	play.cmd ... --shot <png> <seconds>    save the screen after that long and quit
+	F12                                    save the screen to user://shots/
 
 ## Things that were not obvious
 

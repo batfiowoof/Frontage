@@ -106,6 +106,9 @@ const WRAP_MIN_RADIUS := 12.0
 ## A facing change past this is an ABOUT-FACE, not a wheel, and the men must not be swung
 ## round for it. Comfortably over a right angle: the sim only ever flips by exactly PI.
 const ABOUT_FACE := deg_to_rad(150.0)
+## Loose order is men standing where they please, not a wider grid: each is off his slot
+## by up to this share of a file, seeded by who he is so he does not shimmer.
+const LOOSE_JITTER := 0.35
 
 
 class Troop extends RefCounted:
@@ -126,6 +129,7 @@ class Troop extends RefCounted:
 	var mount := 0.0                     # the facing the slots were last laid out at
 	var was_at := Vector2.INF            # where his regiment stood last frame
 	var spacing := 1.0
+	var formation: StringName = &"line"   # the shape his slots are laid out in
 
 
 var _troops := {}                        # regiment id -> Troop
@@ -133,7 +137,11 @@ var _time := 0.0
 
 
 ## Advance every man and return this frame's MultiMesh buffer.
-func build(pose: Dictionary, seating: Array, delta: float) -> PackedFloat32Array:
+##
+## `tints` is regiment id -> Color, the rgb to lean each man toward and the alpha how far.
+## It is how the battle view says "selected" or "in your archers' reach": by the men
+## themselves, not by a box drawn round them.
+func build(pose: Dictionary, seating: Array, delta: float, tints := {}) -> PackedFloat32Array:
 	_time += delta
 	for id in _troops.keys():
 		if not pose.has(id):
@@ -147,7 +155,7 @@ func build(pose: Dictionary, seating: Array, delta: float) -> PackedFloat32Array
 	buffer.resize(total * FLOATS_PER_INSTANCE)
 	var at := 0
 	for id in pose:
-		at = _write(id, pose[id], seating, buffer, at)
+		at = _write(id, pose[id], seating, buffer, at, tints.get(id, Color(0, 0, 0, 0)))
 	return buffer
 
 
@@ -166,6 +174,8 @@ func _advance(id: int, p: Dictionary, delta: float) -> int:
 	if troop == null or troop.max_strength != int(p["max_strength"]):
 		troop = _raise(int(p["width"]), int(p["max_strength"]), strength, id)
 		troop.mount = float(p["facing"])
+		troop.spacing = float(p.get("spacing", 1.0))
+		troop.formation = StringName(p.get("formation", &"line"))
 		_troops[id] = troop
 		for i in troop.world.size():
 			troop.world[i] = _place_of(troop, p, i)          # arrive already formed
@@ -173,6 +183,7 @@ func _advance(id: int, p: Dictionary, delta: float) -> int:
 		return strength
 
 	troop.spacing = float(p.get("spacing", 1.0))
+	troop.formation = StringName(p.get("formation", &"line"))
 	troop.dress = maxf(0.0, troop.dress - delta)
 	# Turned right round: relabel rather than rotate, so nobody moves an inch.
 	if absf(angle_difference(float(p["facing"]), troop.mount)) > ABOUT_FACE:
@@ -218,7 +229,10 @@ func _advance(id: int, p: Dictionary, delta: float) -> int:
 
 		# Whichever enemy is nearest to HIM, not the one his regiment is nominally
 		# fighting. A man at the far end of a flanked line has no business turning round.
-		var want := facing
+		# At rest a man faces his regiment's front -- or, in a hollow square, straight out
+		# from whichever face he stands on.
+		var want := facing + Formation.rest_facing(Formation.shape_of(troop.formation),
+			troop.file[i], troop.depth[i], troop.width)
 		var t := _threat_for(threats, reach, here)
 		if t >= 0:
 			var toward: Vector2 = threats[t] - here
@@ -327,8 +341,7 @@ static func _advantage(p: Dictionary, shape: Vector3) -> float:
 	var theirs := shape.y
 	if theirs <= 0.0:
 		return 1.0                       # nobody told us his size; assume we may
-	var mine := Formation.frontage(int(p["max_strength"]), int(p["width"]),
-		float(p.get("spacing", 1.0)))
+	var mine := extent_of(p).y
 	return clampf((mine - theirs) / theirs, 0.0, 1.0)
 
 
@@ -628,22 +641,69 @@ func _shallowest_file(troop: Troop) -> int:
 ## Places are rotated into WORLD space before the men chase them, so a regiment that
 ## turns or marches drags its men round after it and they catch up. Easing in local
 ## space instead would spin the whole block rigidly, which is the glued look.
+##
+## The slot is the SHAPE's (Formation.shaped_slot), the same one the sim fights with: a
+## wedge's men stand in an arrowhead and a square's in four faces, because that is the
+## ground the regiment is actually holding.
 static func _place_of(troop: Troop, p: Dictionary, i: int) -> Vector2:
-	var offset := Formation.slot(troop.file[i], troop.depth[i], troop.width, troop.ranks, troop.spacing)
+	var offset := _local_slot(troop.formation, troop.file[i], troop.depth[i], troop.width,
+		troop.ranks, troop.spacing, troop.max_strength, troop.man_id[i])
 	return p["pos"] + offset.rotated(float(p["facing"]))
+
+
+static func _local_slot(formation: StringName, file: int, depth: int, width: int, ranks: int,
+		spacing: float, count: int, man: int) -> Vector2:
+	var at := Formation.shaped_slot(Formation.shape_of(formation), file, depth, width, ranks, spacing, count)
+	if formation == &"loose":
+		var pitch := Rules.FILE_SPACING * spacing * LOOSE_JITTER
+		at += Vector2(sin(float(man) * 12.9898), sin(float(man) * 78.233)) * pitch
+	return at
+
+
+## (half depth, half frontage) of the shape a pose entry stands in -- the view's one-line
+## way of asking Formation.extent, so a square is picked, previewed and mapped as a square.
+static func extent_of(p: Dictionary) -> Vector2:
+	return Formation.extent(Formation.shape_of(StringName(p.get("formation", &"line"))),
+		int(p["max_strength"]), int(p["width"]), float(p.get("spacing", 1.0)))
+
+
+## Where every man of a regiment would stand if it carried out this order, in world space:
+## the right-drag preview. Dealt file-major into the new frontage the way _reform deals
+## them, and laid out by the same _local_slot the living men use, so the ghost cannot
+## promise a shape the men will not take up.
+static func ghost_places(p: Dictionary, row: Dictionary) -> PackedVector2Array:
+	var out := PackedVector2Array()
+	var men := maxi(0, int(p["strength"]))
+	var count := maxi(1, int(p["max_strength"]))
+	var width := maxi(1, int(row["width"]))
+	var ranks := maxi(1, ceili(float(count) / float(width)))
+	var formation := StringName(row.get("formation", p.get("formation", &"line")))
+	var spacing := float(Rules.FORMATIONS.get(formation, {}).get("spacing", p.get("spacing", 1.0)))
+	var base := men / width
+	var extra := men % width
+	var n := 0
+	for f in width:
+		for d in base + (1 if f < extra else 0):
+			var local := _local_slot(formation, f, d, width, ranks, spacing, count, n)
+			out.append(Vector2(row["target"]) + local.rotated(float(row["face"])))
+			n += 1
+	return out
 
 
 static func _wobble(man: int) -> float:
 	return sin(float(man) * 7.13)
 
 
-func _write(id: int, p: Dictionary, seating: Array, buffer: PackedFloat32Array, at: int) -> int:
+func _write(id: int, p: Dictionary, seating: Array, buffer: PackedFloat32Array, at: int,
+		tint := Color(0, 0, 0, 0)) -> int:
 	var troop = _troops.get(id)
 	if troop == null:
 		return at
 	var c := Colors.of_owner(int(p["owner"]), seating)
 	if p["state"] == Regiment.State.ROUTING:
 		c = c.darkened(0.45)
+	if tint.a > 0.0:
+		c = c.lerp(Color(tint.r, tint.g, tint.b), tint.a)
 	for i in troop.world.size():
 		# Each man's own basis. One regiment-wide basis is what made a flanked block
 		# read as a single sprite swinging round.
@@ -700,7 +760,8 @@ func slots(id: int) -> Dictionary:
 	if troop == null:
 		return out
 	for i in troop.file.size():
-		out[troop.man_id[i]] = Formation.slot(troop.file[i], troop.depth[i], troop.width, troop.ranks, troop.spacing)
+		out[troop.man_id[i]] = _local_slot(troop.formation, troop.file[i], troop.depth[i], troop.width,
+			troop.ranks, troop.spacing, troop.max_strength, troop.man_id[i])
 	return out
 
 
