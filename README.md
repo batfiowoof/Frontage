@@ -1,4 +1,4 @@
-# rts-test
+# Frontage
 
 A 2D prototype in Godot 4.7: a turn-based, Civ-like campaign on a hex map, with
 real-time, Total War-like battles whenever two armies meet. Multiplayer over ENet
